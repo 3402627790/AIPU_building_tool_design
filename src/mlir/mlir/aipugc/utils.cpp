@@ -198,10 +198,21 @@ mlir::DenseElementsAttr collectData(mlir::RankedTensorType &type,
   return mlir::DenseElementsAttr::get(type, llvm::ArrayRef(dst));
 }
 
+template <size_t EltByteSize>
+mlir::DenseElementsAttr collectDataRaw(mlir::RankedTensorType &type,
+                                       aipubt::TensorPtr tensor, size_t size) {
+  size_t byteSize = size * EltByteSize;
+  std::vector<char> dst(byteSize, 0);
+  if (tensor->data<char>() != nullptr) {
+    memcpy(dst.data(), tensor->data<char>(), byteSize);
+  }
+  return mlir::DenseElementsAttr::getFromRawBuffer(type,
+                                                   llvm::ArrayRef<char>(dst));
+}
+
 using collectDataFunc = std::function<mlir::DenseElementsAttr(
     mlir::RankedTensorType &, aipubt::TensorPtr, size_t size)>;
 
-// TODO: set true float16 type
 static std::map<aipubt::Tensor::Dtype, collectDataFunc> collectDataMaps = {
     {aipubt::Tensor::INT8, collectData<int8_t>},
     {aipubt::Tensor::UINT8, collectData<uint8_t>},
@@ -211,10 +222,10 @@ static std::map<aipubt::Tensor::Dtype, collectDataFunc> collectDataMaps = {
     {aipubt::Tensor::INT32, collectData<int32_t>},
     {aipubt::Tensor::UINT64, collectData<uint64_t>},
     {aipubt::Tensor::INT64, collectData<int64_t>},
-    {aipubt::Tensor::FP16, collectData<int16_t>},
+    {aipubt::Tensor::FP16, collectDataRaw<2>},
     {aipubt::Tensor::FP32, collectData<float_t>},
     {aipubt::Tensor::FP64, collectData<double>},
-    {aipubt::Tensor::BFP16, collectData<int16_t>},
+    {aipubt::Tensor::BFP16, collectDataRaw<2>},
 };
 
 mlir::DenseElementsAttr DenseElementsAttrGet(mlir::OpBuilder &builder,
