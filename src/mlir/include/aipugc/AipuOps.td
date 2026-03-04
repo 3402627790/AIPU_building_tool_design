@@ -217,6 +217,43 @@ def AbsOp : AIPUOp<"Abs",
 }
 
 //===----------------------------------------------------------------------===//
+// Operator: Negative
+//===----------------------------------------------------------------------===//
+def NegativeOp : AIPUOp<"Negative",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Computes the negation of a tensor element-wise";
+
+  let description = [{
+    Given an input tensor, this operation returns a tensor containing the
+    negation of each element in the input tensor. The operation is
+    applied element-wise and preserves the input tensor's shape.
+
+    Example:
+      Input: [-1.0, 2.0, -3.5]
+      Output: [1.0, -2.0, 3.5]
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Operator: Square
 //===----------------------------------------------------------------------===//
 def SquareOp : AIPUOp<"Square",
@@ -727,6 +764,45 @@ def PrintOp : AIPUOp<"print"> {
   let arguments = (ins AnyTypeOf<[AIPUGCAnyTensor, F64MemRef]>:$input);
 
   let assemblyFormat = "$input attr-dict `:` type($input)";
+}
+
+//===----------------------------------------------------------------------===//
+// TileOp
+//===----------------------------------------------------------------------===//
+
+def TileOp : AIPUOp<"Tile",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Repeats a tensor along each dimension according to repeats";
+
+  let description = [{
+    Constructs a tensor by tiling the input tensor. The `repeats` attribute
+    specifies the number of repetitions along each dimension.
+
+    Example:
+      Input shape: [2, 6, 16, 32], repeats = [2, 2, 5, 4]
+      Output shape: [4, 12, 80, 128]
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    DenseI64ArrayAttr:$repeats,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DenseI64ArrayAttr":$repeats,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//

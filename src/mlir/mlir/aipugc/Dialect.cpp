@@ -339,6 +339,30 @@ void AbsOp::inferShapes() {
 }
 
 //===----------------------------------------------------------------------===//
+// NegativeOp
+//===----------------------------------------------------------------------===//
+void NegativeOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                  Value input, DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+LogicalResult NegativeOp::verify() {
+  auto inputType = getInput().getType();
+  if (!mlir::isa<RankedTensorType>(inputType)) {
+    return emitOpError("expected ranked tensor type for input");
+  }
+  return success();
+}
+void NegativeOp::inferShapes() {
+  auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
+  getResult().setType(inputType);
+}
+
+//===----------------------------------------------------------------------===//
 // SquareOp
 //===----------------------------------------------------------------------===//
 void SquareOp::build(OpBuilder &builder, OperationState &state, Type outputType,
@@ -789,6 +813,71 @@ void Pool2DOp::build(OpBuilder &builder, OperationState &state, Type outputType,
   state.addTypes(outputType);
 }
 void Pool2DOp::inferShapes() { return; }
+
+//===----------------------------------------------------------------------===//
+// TileOp
+//===----------------------------------------------------------------------===//
+void TileOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                   Value input, DenseI64ArrayAttr repeats,
+                   DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  state.addAttribute("repeats", repeats);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult TileOp::verify() {
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  if (!inputType)
+    return success();
+
+  int64_t rank = inputType.getRank();
+  auto repeats = getRepeats();
+  if ((int64_t)repeats.size() != rank) {
+    return emitOpError("repeats size (")
+           << repeats.size() << ") must match input rank (" << rank << ")";
+  }
+
+  for (auto it : llvm::enumerate(repeats)) {
+    if (it.value() < 1) {
+      return emitOpError("repeats[")
+             << it.index() << "] must be >= 1, got " << it.value();
+    }
+  }
+
+  return success();
+}
+
+void TileOp::inferShapes() {
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  if (!inputType) {
+    auto tensorType = llvm::dyn_cast<TensorType>(getInput().getType());
+    if (!tensorType) {
+      getResult().setType(getInput().getType());
+      return;
+    }
+    getResult().setType(
+        UnrankedTensorType::get(tensorType.getElementType()));
+    return;
+  }
+
+  auto repeats = getRepeats();
+  SmallVector<int64_t> outShape;
+  for (int64_t i = 0; i < inputType.getRank(); ++i) {
+    int64_t dim = inputType.getDimSize(i);
+    if (ShapedType::isDynamic(dim)) {
+      outShape.push_back(ShapedType::kDynamic);
+    } else {
+      outShape.push_back(dim * repeats[i]);
+    }
+  }
+
+  getResult().setType(
+      RankedTensorType::get(outShape, inputType.getElementType()));
+}
 
 //===----------------------------------------------------------------------===//
 // ReshapeOp

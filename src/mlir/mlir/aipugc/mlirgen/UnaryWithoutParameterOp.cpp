@@ -36,6 +36,12 @@ public:
   ~MLIRGenAbs() {}
 };
 
+class MLIRGenNegative : public MLIRGenUnary<NegativeOp> {
+public:
+  using MLIRGenUnary::MLIRGenUnary;
+  ~MLIRGenNegative() {}
+};
+
 class MLIRGenSqrt : public MLIRGenUnary<SqrtOp> {
 public:
   using MLIRGenUnary::MLIRGenUnary;
@@ -80,6 +86,7 @@ public:
 
 // REGISTER_MLIRGEN(Reshape);
 REGISTER_MLIRGEN(Abs);
+REGISTER_MLIRGEN(Negative);
 REGISTER_MLIRGEN(Sqrt);
 REGISTER_MLIRGEN(Rsqrt);
 REGISTER_MLIRGEN(Cosine);
