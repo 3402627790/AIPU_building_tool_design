@@ -187,6 +187,9 @@ mlir::Type getType(mlir::OpBuilder &builder, aipubt::TensorPtr tensor) {
              : mlir::Type(mlir::RankedTensorType::get(shape, elementType));
 }
 
+// Collect tensor data into a DenseElementsAttr with typed element access.
+// Copies `size` elements of type T from the tensor's buffer into a local
+// vector, then wraps it as an MLIR dense attribute.
 template <typename T>
 mlir::DenseElementsAttr collectData(mlir::RankedTensorType &type,
                                     aipubt::TensorPtr tensor, size_t size) {
@@ -198,10 +201,13 @@ mlir::DenseElementsAttr collectData(mlir::RankedTensorType &type,
   return mlir::DenseElementsAttr::get(type, llvm::ArrayRef(dst));
 }
 
-template <size_t EltByteSize>
+// Collect tensor data into a DenseElementsAttr using raw byte-level copy,
+// bypassing element type interpretation. Unlike collectData<T>, this operates
+// on untyped char buffers, suitable for types without native C++ equivalents.
+template <size_t ElementByteSize>
 mlir::DenseElementsAttr collectDataRaw(mlir::RankedTensorType &type,
                                        aipubt::TensorPtr tensor, size_t size) {
-  size_t byteSize = size * EltByteSize;
+  size_t byteSize = size * ElementByteSize;
   std::vector<char> dst(byteSize, 0);
   if (tensor->data<char>() != nullptr) {
     memcpy(dst.data(), tensor->data<char>(), byteSize);
