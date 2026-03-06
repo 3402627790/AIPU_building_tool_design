@@ -1,5 +1,6 @@
 #include "aipugc/utils.h"
 #include "aipugc/QuantUtils.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/Support/Debug.h"
 #define DEBUG_TYPE "utils"
 
@@ -216,6 +217,26 @@ mlir::DenseElementsAttr collectDataRaw(mlir::RankedTensorType &type,
                                                    llvm::ArrayRef<char>(dst));
 }
 
+// Aligned 4-bit: each element occupies one byte in source buffer.
+// Build APInt(4) elements directly to avoid raw buffer packing assumptions.
+mlir::DenseElementsAttr collectDataAligned4bit(mlir::RankedTensorType &type,
+                                               aipubt::TensorPtr tensor,
+                                               size_t size) {
+  std::vector<llvm::APInt> dst;
+  dst.reserve(size);
+  if (tensor->data<char>() != nullptr) {
+    const char *src = tensor->data<char>();
+    for (size_t i = 0; i < size; ++i) {
+      uint64_t v = static_cast<uint8_t>(src[i]) & 0x0F;
+      dst.emplace_back(4, v);
+    }
+  } else {
+    for (size_t i = 0; i < size; ++i)
+      dst.emplace_back(4, 0);
+  }
+  return mlir::DenseElementsAttr::get(type, llvm::ArrayRef<llvm::APInt>(dst));
+}
+
 using collectDataFunc = std::function<mlir::DenseElementsAttr(
     mlir::RankedTensorType &, aipubt::TensorPtr, size_t size)>;
 
@@ -232,6 +253,9 @@ static std::map<aipubt::Tensor::Dtype, collectDataFunc> collectDataMaps = {
     {aipubt::Tensor::FP32, collectData<float_t>},
     {aipubt::Tensor::FP64, collectData<double>},
     {aipubt::Tensor::BFP16, collectDataRaw<2>},
+    {aipubt::Tensor::ALIGNED_INT4, collectDataAligned4bit},
+    {aipubt::Tensor::ALIGNED_UINT4, collectDataAligned4bit},
+
 };
 
 mlir::DenseElementsAttr DenseElementsAttrGet(mlir::OpBuilder &builder,
