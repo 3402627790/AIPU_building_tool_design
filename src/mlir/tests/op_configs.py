@@ -19,6 +19,9 @@ to control explicitly.
 # =========================================================================
 
 # Integer dtypes (default IR)
+from typing import Any
+
+
 DTYPE_INT8 = ("int8", "")
 DTYPE_INT16 = ("int16", "it=int16")
 DTYPE_UINT8 = ("uint8", "it=uint8")
@@ -193,7 +196,6 @@ OP_CONFIGS = [
     },
     {
         "aipuir_name": "Convolution",
-        "test_suffix": "k5",
         "shapes": [
             ("conv_k5_medium", "[1,16,16,8]"),
         ],
@@ -203,7 +205,6 @@ OP_CONFIGS = [
     },
     {
         "aipuir_name": "Convolution",
-        "test_suffix": "k1",
         "shapes": [
             ("conv_k1_medium", "[1,16,16,16]"),
         ],
@@ -212,7 +213,7 @@ OP_CONFIGS = [
         "category": "conv",
     },
     {
-        "aipuir_name": "DepthwiseConvolution",
+        "aipuir_name": "DepthwiseConv",
         "shapes": [
             ("dw_small",  "[1,8,8,4]"),
             ("dw_medium", "[1,16,16,8]"),
@@ -455,18 +456,13 @@ OP_CONFIGS = [
 ]
 
 
-# =========================================================================
-# Helper: flatten configs into parametrize-ready test cases
-# =========================================================================
-
 def generate_test_cases():
     """
     Yield ``(test_id, op_name, param_string, category)`` tuples for every
-    (op × shape × dtype) combination.
+    (op x shape x dtype) combination.
     """
     for cfg in OP_CONFIGS:
         op_name = cfg["aipuir_name"]
-        suffix = cfg.get("test_suffix", "")
         extra = cfg.get("extra_params", "")
         category = cfg.get("category", "")
 
@@ -479,13 +475,9 @@ def generate_test_cases():
                     parts.append(extra)
                 param_str = "; ".join(parts)
 
-                tid = f"{op_name}"
-                if suffix:
-                    tid += f"_{suffix}"
-                tid += f"-{shape_label}-{dtype_label}"
+                tid = f"{op_name}-{shape_label}-{dtype_label}"
 
                 yield tid, op_name, param_str, category
 
 
-# Pre-compute for import convenience
 ALL_TEST_CASES = list(generate_test_cases())

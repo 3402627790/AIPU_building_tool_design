@@ -51,10 +51,6 @@ def pytest_addoption(parser):
     )
 
 
-# ---------------------------------------------------------------------------
-# Session-scoped fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture(scope="session")
 def aipugc_bin(request):
     """Resolve the aipugc executable path."""
@@ -101,10 +97,6 @@ def graph_dir(request):
 def regenerate(request):
     return request.config.getoption("--regenerate")
 
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
 
 def run_aipuir(aipuir_bin, layer_type, params=None, output_path="graph.def",
                cwd=None, timeout=120):

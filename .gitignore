@@ -26,9 +26,6 @@ __pycache__/
 venv/
 .env
 
-# Test cache
-generated_graphs/
-
 # 系统文件
 .DS_Store
 Thumbs.db

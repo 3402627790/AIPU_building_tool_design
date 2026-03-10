@@ -11,10 +11,10 @@ to force a fresh generation.
 
 Run examples::
 
-    # first run – generates all graph.def and runs compile tests
+    # first run generates all graph.def and runs compile tests
     pytest tests/ -v
 
-    # subsequent runs – reuses cached graph.def, much faster
+    # subsequent runs reuses cached graph.def, much faster
     pytest tests/ -v
 
     # force re-generation
