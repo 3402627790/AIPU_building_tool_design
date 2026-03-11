@@ -68,6 +68,14 @@ SHAPES_3D = [
     ("3d_medium", "[2,10,16]"),
 ]
 
+SHAPES_BINARY = [
+    ("4d_same_small",    "[1,4,4,4],[1,4,4,4]"),
+    ("4d_same_medium",   "[1,10,10,8],[1,10,10,8]"),
+    ("4d_same_large",    "[1,20,20,16],[1,20,20,16]"),
+    ("4d_bcast_1d",      "[1,4,4,4],[4]"),
+    ("4d_bcast_scalar",  "[1,10,10,8],[1]"),
+]
+
 
 # =========================================================================
 # Op Configurations
@@ -135,48 +143,43 @@ OP_CONFIGS = [
     # =======================  Binary Ops  =======================
     {
         "aipuir_name": "Add",
-        "shapes": SHAPES_GENERIC,
+        "shapes": SHAPES_BINARY,
         "dtypes": ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Sub",
-        "shapes": SHAPES_GENERIC,
+        "shapes": SHAPES_BINARY,
         "dtypes": ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Mul",
-        "shapes": SHAPES_GENERIC,
+        "shapes": SHAPES_BINARY,
         "dtypes": ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Div",
-        "shapes": SHAPES_GENERIC,
+        "shapes": SHAPES_BINARY,
         "dtypes": ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Eltwise",
-        "shapes": [
-            ("4d_small",  "[1,4,4,4],[1,4,4,4]"),
-            ("4d_medium", "[1,10,10,8],[1,10,10,8]"),
-            ("4d_large",  "[1,20,20,16],[1,20,20,16]"),
-        ],
+        "shapes": SHAPES_BINARY,
         "dtypes": ALL_DTYPES,
         "category": "binary",
-        "multi_input": True,
     },
     {
         "aipuir_name": "Pow",
-        "shapes": SHAPES_GENERIC,
+        "shapes": SHAPES_BINARY,
         "dtypes": ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "SquaredDifference",
-        "shapes": SHAPES_GENERIC,
+        "shapes": SHAPES_BINARY,
         "dtypes": ALL_DTYPES,
         "category": "binary",
     },
@@ -286,8 +289,8 @@ OP_CONFIGS = [
     {
         "aipuir_name": "MatMul",
         "shapes": [
-            ("mm_small", "[1,4,8]"),
-            ("mm_medium", "[2,16,32]"),
+            ("mm_small", "[1,4,8],[1,8,4]"),
+            ("mm_medium", "[2,16,32],[2,32,16]"),
         ],
         "dtypes": ALL_DTYPES,
         "category": "binary",
@@ -338,8 +341,16 @@ OP_CONFIGS = [
     },
     {
         "aipuir_name": "Concat",
-        "shapes": SHAPES_GENERIC,
-        "dtypes": ALL_DTYPES,
+        "shapes": [
+            ("concat_small", "[1,4,4,8],[1,4,4,8]"),
+            ("concat_large", "[1,20,20,16],[1,20,20,16]"),
+        ],
+        "dtypes": [
+            ("concat_int8", "int8,int8"),
+            ("concat_uint16", "uint8,uint8"),
+            ("concat_float16", "float16,float16"),
+            ("concat_bfloat16", "bfloat16,bfloat16"),
+        ],
         "category": "shape",
     },
     {
