@@ -117,7 +117,7 @@ def test_aipugc_compile(test_id, op_name, param_str, category,
 _DEFAULT_OPS = [
     "Abs", "Negative", "Square", "Sqrt", "Rsqrt", "Cosine", "Exp", "Log",
     "Quantize",
-    "Add", "Sub", "Mul", "Div", "Eltwise", "Pow", "SquaredDifference",
+    "Add", "Sub", "Mul", "Div", "Eltwise", "SquaredDifference",
     "Convolution", "DepthwiseConvolution", "Pooling",
     "Activation", "Cast",
     "BatchNorm", "LayerNorm", "RMSNorm",

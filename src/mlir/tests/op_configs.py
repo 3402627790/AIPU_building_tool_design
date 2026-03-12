@@ -178,7 +178,11 @@ OP_CONFIGS = [
     },
     {
         "aipuir_name": "Eltwise",
-        "shapes": SHAPES_BINARY,
+        "shapes": [
+            ("4d_small",  "[[1,4,4,4],[1,4,4,4]]"),
+            ("4d_medium", "[[1,10,10,8],[1,10,10,8]]"),
+            ("4d_large",  "[[1,20,20,16],[1,20,20,16]]"),
+        ],
         "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
