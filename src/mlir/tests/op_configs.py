@@ -34,6 +34,17 @@ INT_DTYPES = [DTYPE_INT8, DTYPE_INT16, DTYPE_UINT8]
 FLOAT_DTYPES = [DTYPE_FLOAT16, DTYPE_BFLOAT16]
 ALL_DTYPES = INT_DTYPES + FLOAT_DTYPES
 
+# Binary ops require dtype for both inputs: it=<type>,<type>
+BINARY_DTYPE_INT8 = ("int8", "it=int8,int8")
+BINARY_DTYPE_INT16 = ("int16", "it=int16,int16")
+BINARY_DTYPE_UINT8 = ("uint8", "it=uint8,uint8")
+BINARY_DTYPE_FLOAT16 = ("float16", "float_ir=true; it=float16,float16")
+BINARY_DTYPE_BFLOAT16 = ("bfloat16", "float_ir=true; it=bfloat16,bfloat16")
+
+BINARY_INT_DTYPES = [BINARY_DTYPE_INT8, BINARY_DTYPE_INT16, BINARY_DTYPE_UINT8]
+BINARY_FLOAT_DTYPES = [BINARY_DTYPE_FLOAT16, BINARY_DTYPE_BFLOAT16]
+BINARY_ALL_DTYPES = BINARY_INT_DTYPES + BINARY_FLOAT_DTYPES
+
 # =========================================================================
 # Shape presets (NHWC layout unless noted)
 # =========================================================================
@@ -144,43 +155,43 @@ OP_CONFIGS = [
     {
         "aipuir_name": "Add",
         "shapes": SHAPES_BINARY,
-        "dtypes": ALL_DTYPES,
+        "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Sub",
         "shapes": SHAPES_BINARY,
-        "dtypes": ALL_DTYPES,
+        "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Mul",
         "shapes": SHAPES_BINARY,
-        "dtypes": ALL_DTYPES,
+        "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Div",
         "shapes": SHAPES_BINARY,
-        "dtypes": ALL_DTYPES,
+        "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Eltwise",
         "shapes": SHAPES_BINARY,
-        "dtypes": ALL_DTYPES,
+        "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "Pow",
         "shapes": SHAPES_BINARY,
-        "dtypes": ALL_DTYPES,
+        "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
     {
         "aipuir_name": "SquaredDifference",
         "shapes": SHAPES_BINARY,
-        "dtypes": ALL_DTYPES,
+        "dtypes": BINARY_ALL_DTYPES,
         "category": "binary",
     },
 
