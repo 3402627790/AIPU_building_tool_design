@@ -1576,18 +1576,25 @@ def PadOp : AIPUOp<"Pad",
 //===----------------------------------------------------------------------===//
 def ResizeOp : AIPUOp<"Resize",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Resizes a tensor using specified scaling factors and interpolation method";
+  let summary = "Resizes a tensor using ratio or output size";
 
   let description = [{
-    Resizes the input tensor to new dimensions calculated by scaling factors.
-    Supports different interpolation methods and coordinate transformation modes.
+    Resizes the input tensor using the specified interpolation method.
+    The resize configuration may be provided either by spatial scaling factors
+    (`ratio_x` / `ratio_y`) or by the target output `size`, but not both at
+    the same time.
 
     Parameters:
-    - ratio_x/y: Scaling factors for spatial dimensions
     - method: Interpolation method (BILINEAR/NEAREST)
-    - mode: Coordinate transformation mode (ALIGN_CORNERS/ASYMMETRIC/HALF_PIXEL)
-
-    Output shape: [N, C, H * ratio_y, W * ratio_x]
+    - ratio_x/y: Optional scaling factors for width/height
+    - size: Optional output tensor size in NHWC layout
+    - mode: Coordinate transformation mode. Defaults to HALF_PIXEL.
+      Supported values:
+        HALF_PIXEL
+        ALIGN_CORNERS
+        ASYMMETRIC
+        PYTORCH_HALF_PIXEL
+        TF_HALF_PIXEL_FOR_NN
   }];
 
   let arguments = (ins
@@ -1614,6 +1621,8 @@ def ResizeOp : AIPUOp<"Resize",
       "::mlir::DictionaryAttr":$dictAttr
     )>
   ];
+
+  let hasVerifier = 1;
 }
 //===----------------------------------------------------------------------===//
 // Operator: GridSample

@@ -1878,6 +1878,41 @@ void ResizeOp::build(OpBuilder &builder, OperationState &state, Type outputType,
   }
   state.addTypes(outputType);
 }
+LogicalResult ResizeOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+
+  if (inputType && outputType && inputType.hasRank() && outputType.hasRank() &&
+      inputType.getRank() != outputType.getRank()) {
+    return emitOpError() << "input rank " << inputType.getRank()
+                         << " must match output rank " << outputType.getRank();
+  }
+
+  if (getRatioX().getValueAsDouble() <= 0.0 ||
+      getRatioY().getValueAsDouble() <= 0.0) {
+    return emitOpError("ratio_x and ratio_y must be positive");
+  }
+
+  StringRef method = getMethod();
+  if (!method.equals_insensitive("BILINEAR") &&
+      !method.equals_insensitive("NEAREST")) {
+    return emitOpError() << "invalid resize method: " << method
+                         << ", must be BILINEAR/NEAREST";
+  }
+
+  StringRef mode = getMode();
+  if (!mode.equals_insensitive("HALF_PIXEL") &&
+      !mode.equals_insensitive("ALIGN_CORNERS") &&
+      !mode.equals_insensitive("ASYMMETRIC") &&
+      !mode.equals_insensitive("PYTORCH_HALF_PIXEL") &&
+      !mode.equals_insensitive("TF_HALF_PIXEL_FOR_NN")) {
+    return emitOpError() << "invalid resize mode: " << mode
+                         << ", must be HALF_PIXEL/ALIGN_CORNERS/ASYMMETRIC/"
+                            "PYTORCH_HALF_PIXEL/TF_HALF_PIXEL_FOR_NN";
+  }
+
+  return success();
+}
 void ResizeOp::inferShapes() { return; }
 //===----------------------------------------------------------------------===//
 // GridSampleOp

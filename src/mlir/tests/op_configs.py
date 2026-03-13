@@ -396,6 +396,7 @@ OP_CONFIGS = [
             ("crop_large",  "[1,20,20,16]"),
         ],
         "dtypes": ALL_DTYPES,
+        "extra_params": "crops=[[0,1],[1,5],[3,9],[4,7]]",
         "category": "shape",
     },
     {
@@ -455,8 +456,20 @@ OP_CONFIGS = [
     # =======================  Image / Resize  =======================
     {
         "aipuir_name": "Resize",
-        "shapes": SHAPES_4D_MINIMAL,
+        "shapes": [
+            ("4d_small", "[1,4,4,4]"),
+        ],
         "dtypes": ALL_DTYPES,
+        "extra_params": "method=BILINEAR; mode=ALIGN_CORNERS; size=[1,44,50,4]",
+        "category": "spatial",
+    },
+    {
+        "aipuir_name": "Resize",
+        "shapes": [
+            ("4d_medium", "[1,10,10,8]"),
+        ],
+        "dtypes": ALL_DTYPES,
+        "extra_params": "method=BILINEAR; mode=ALIGN_CORNERS; size=[1,112,127,8]",
         "category": "spatial",
     },
     {
