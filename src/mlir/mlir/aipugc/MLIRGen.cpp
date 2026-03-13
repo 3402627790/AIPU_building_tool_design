@@ -177,6 +177,13 @@ private:
     MLIRGenBase *mlirGenClass = MLIRGenRegistry::get(node->type());
     outputs = mlirGenClass->mlirGen(builder, node, symbolTable);
 
+    if (outputs.size() != node->outputs().size()) {
+      llvm::errs() << "MLIRGen output count mismatch for node " << node->name()
+                   << ": expected " << node->outputs().size()
+                   << ", got " << outputs.size() << "\n";
+      return mlir::failure();
+    }
+
     // Declare all the function arguments in the symbol table.
     for (size_t i = 0; i < node->outputs().size(); ++i) {
       if (failed(declare(node->outputs()[i]->name(), outputs[i])))
