@@ -1595,6 +1595,12 @@ def ResizeOp : AIPUOp<"Resize",
         ASYMMETRIC
         PYTORCH_HALF_PIXEL
         TF_HALF_PIXEL_FOR_NN
+    - nearest_mode (in dictAttr): Rounding mode when method=NEAREST.
+      Defaults to ROUND_PREFER_FLOOR. Supported values:
+        ROUND_PREFER_FLOOR
+        ROUND_PREFER_CEIL
+        FLOOR
+        CEIL
   }];
 
   let arguments = (ins

@@ -1888,8 +1888,8 @@ LogicalResult ResizeOp::verify() {
                          << " must match output rank " << outputType.getRank();
   }
 
-  if (getRatioX().getValueAsDouble() <= 0.0 ||
-      getRatioY().getValueAsDouble() <= 0.0) {
+  if (getRatioX().convertToDouble() <= 0.0 ||
+      getRatioY().convertToDouble() <= 0.0) {
     return emitOpError("ratio_x and ratio_y must be positive");
   }
 
@@ -1909,6 +1909,26 @@ LogicalResult ResizeOp::verify() {
     return emitOpError() << "invalid resize mode: " << mode
                          << ", must be HALF_PIXEL/ALIGN_CORNERS/ASYMMETRIC/"
                             "PYTORCH_HALF_PIXEL/TF_HALF_PIXEL_FOR_NN";
+  }
+
+  if (auto dict = getDictAttr()) {
+    if (auto nmAttr = dict->getAs<StringAttr>("nearest_mode")) {
+      StringRef nearestMode = nmAttr.getValue();
+      if (!nearestMode.equals_insensitive("ROUND_PREFER_FLOOR") &&
+          !nearestMode.equals_insensitive("ROUND_PREFER_CEIL") &&
+          !nearestMode.equals_insensitive("FLOOR") &&
+          !nearestMode.equals_insensitive("CEIL")) {
+        return emitOpError()
+               << "invalid nearest_mode: " << nearestMode
+               << ", must be ROUND_PREFER_FLOOR/ROUND_PREFER_CEIL/FLOOR/CEIL";
+      }
+      if (!method.equals_insensitive("NEAREST")) {
+        return emitOpError()
+               << "nearest_mode is only valid when method is NEAREST, "
+                  "but method="
+               << method;
+      }
+    }
   }
 
   return success();
