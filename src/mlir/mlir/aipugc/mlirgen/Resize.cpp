@@ -48,9 +48,8 @@ public:
       auto inputShape = inputTensor->shape();
       std::vector<int64_t> outputSize = params.at("size");
 
-      if (inputShape.size() != 4 || outputSize.size() != 4) {
-        llvm::errs() << "ResizeOp expects 4D NHWC input and size, but got input rank "
-                     << inputShape.size() << " and output rank "
+      if (outputSize.size() != 4) {
+        llvm::errs() << "ResizeOp expects size to be 4D NHWC, but got output rank "
                      << outputSize.size() << "\n";
         return {};
       }
