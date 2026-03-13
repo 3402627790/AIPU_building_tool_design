@@ -536,9 +536,6 @@ LogicalResult PowOp::verify() {
   ShapedType expType = mlir::dyn_cast<ShapedType>(getExponent().getType());
   if (!baseType || !expType)
     return emitOpError("expected ranked tensor types for base and exponent");
-  if (baseType.getElementType() != expType.getElementType()) {
-    return emitOpError("base and exponent must have the same element type");
-  }
   SmallVector<int64_t> resultShape;
   if (!OpTrait::util::getBroadcastedShape(baseType.getShape(),
                                          expType.getShape(), resultShape)) {

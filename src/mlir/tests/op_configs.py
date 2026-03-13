@@ -441,6 +441,7 @@ OP_CONFIGS = [
             ("b2s_medium", "[4,8,8,8]"),
         ],
         "dtypes": ALL_DTYPES,
+        "extra_params": "block_size_x=2; block_size_y=2",
         "category": "spatial",
     },
     {
