@@ -154,6 +154,10 @@ int main(int argc, const char **argv) {
 
   // Get mlir module from context
   mlir::OwningOpRef<mlir::ModuleOp> module = aipugc::mlirGen(context, g);
+  if (!module) {
+    llvm::errs() << "Error: MLIR generation or module verification failed.\n";
+    return 1;
+  }
 
   if (emitAction != Action::None) {
     mlir::PassManager pm(module.get()->getName());
