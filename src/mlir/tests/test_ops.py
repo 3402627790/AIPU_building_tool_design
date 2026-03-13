@@ -118,7 +118,7 @@ _DEFAULT_OPS = [
     "Abs", "Negative", "Square", "Sqrt", "Rsqrt", "Cosine", "Exp", "Log",
     "Quantize",
     "Add", "Sub", "Mul", "Div", "Eltwise", "SquaredDifference",
-    "Convolution", "DepthwiseConvolution", "Pooling",
+    "Convolution", "DepthwiseConv", "Pooling",
     "Activation", "Cast",
     "BatchNorm", "LayerNorm", "RMSNorm",
     "FullyConnected", "MatMul",
