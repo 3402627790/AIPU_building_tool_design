@@ -72,6 +72,7 @@ namespace cl = llvm::cl;
 
 enum Action {
   None,
+  DumpAIPUGC,
   DumpTosa,
   DumpLinalg,
   DumpAffine,
@@ -85,6 +86,7 @@ enum Action {
 static cl::opt<enum Action> emitAction(
   "emit",
   cl::desc("Specify the compilation stage to output."),
+  cl::values(clEnumValN(DumpAIPUGC, "aipugc", "output the optimized AIPUGC-level MLIR")),
   cl::values(clEnumValN(DumpTosa, "tosa", "output the TOSA-level MLIR")),
   cl::values(clEnumValN(DumpLinalg, "linalg", "output the Linalg-level MLIR")),
   cl::values(clEnumValN(DumpAffine, "affine", "output the Affine-Level MLIR")),

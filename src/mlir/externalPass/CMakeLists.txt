@@ -6,6 +6,7 @@ set(CMAKE_CXX_FLAGS "-g -O0 -std=c++17 -fPIC")
 
 add_llvm_library(libexternalPass MODULE
   EliminateRedundantTransposePass.cpp
+  FuseMulAddToBatchNormPass.cpp
 
   LINK_LIBS PUBLIC
   MLIRTransforms

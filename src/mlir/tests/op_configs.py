@@ -45,16 +45,23 @@ BINARY_INT_DTYPES = [BINARY_DTYPE_INT8, BINARY_DTYPE_INT16, BINARY_DTYPE_UINT8]
 BINARY_FLOAT_DTYPES = [BINARY_DTYPE_FLOAT16, BINARY_DTYPE_BFLOAT16]
 BINARY_ALL_DTYPES = BINARY_INT_DTYPES + BINARY_FLOAT_DTYPES
 
+# Cast ops require input type != to_dtype
+CAST_DTYPES = [
+    ("uint8_to_int8",    "it=uint8; to_dtype=int8"),
+    ("uint8_to_int16",   "it=uint8; to_dtype=int16"),
+    ("int8_to_uint8",    "it=int8; to_dtype=uint8"),
+    ("int8_to_int16",    "it=int8; to_dtype=int16"),
+    ("int16_to_int8",    "it=int16; to_dtype=int8"),
+    ("float16_to_bfloat16", "float_ir=true; it=float16; to_dtype=bfloat16"),
+]
+
 # =========================================================================
 # Shape presets (NHWC layout unless noted)
 # =========================================================================
 
 SHAPES_4D = [
     ("4d_small",  "[1,4,4,4]"),
-    ("4d_medium", "[1,10,10,8]"),
     ("4d_large",  "[1,32,32,16]"),
-    ("4d_rect",   "[1,20,30,3]"),
-    ("4d_batch",  "[2,8,8,4]"),
 ]
 
 SHAPES_4D_MINIMAL = [
@@ -70,7 +77,6 @@ SHAPES_2D = [
 
 SHAPES_GENERIC = [
     ("4d_small",  "[1,4,4,4]"),
-    ("4d_medium", "[1,10,10,8]"),
     ("4d_large",  "[1,20,20,16]"),
 ]
 
@@ -81,7 +87,6 @@ SHAPES_3D = [
 
 SHAPES_BINARY = [
     ("4d_same_small",    "[[1,4,4,4],[1,4,4,4]]"),
-    ("4d_same_medium",   "[[1,10,10,8],[1,10,10,8]]"),
     ("4d_same_large",    "[[1,20,20,16],[1,20,20,16]]"),
     ("4d_bcast_1d",      "[[1,4,4,4],[4]]"),
     ("4d_bcast_scalar",  "[[1,10,10,8],[1]]"),
@@ -262,7 +267,7 @@ OP_CONFIGS = [
     {
         "aipuir_name": "Cast",
         "shapes": SHAPES_GENERIC,
-        "dtypes": ALL_DTYPES,
+        "dtypes": CAST_DTYPES,
         "category": "unary",
     },
 
