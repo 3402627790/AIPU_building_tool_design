@@ -1,0 +1,12 @@
+
+project(AIPUBuildToolModules)
+if(ANDROID)
+message("Android not support include aipuas!")
+else()
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+add_subdirectory(toolchain)
+add_subdirectory(btrt)
+endif()
+add_subdirectory(compassLLM)
+# add_subdirectory(runtime)
+endif()
