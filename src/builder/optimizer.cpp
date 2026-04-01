@@ -54,6 +54,26 @@ BuilderOpPlugin *BuilderOptimizer::get_single_op_plugin(OpType t, uint32_t flag)
     return nullptr;
 }
 
+BuilderOpPlugin *BuilderOptimizer::get_builder_op_plugin_by_name(const std::string &name, uint32_t flag)
+{
+    auto m_plugins = ((*PluginLoader::get_instance())[BUILDERPLUGIN_TYPE]);
+    flag = flag >> 16;
+    for (auto plugin_ : m_plugins)
+    {
+        auto plugin = reinterpret_cast<BuilderOpPluginInfo *>(plugin_);
+        if ((plugin->plugin_type >> 16) != flag)
+        {
+            continue;
+        }
+        if (plugin->name != name)
+        {
+            continue;
+        }
+        return plugin->init_handle();
+    }
+    return nullptr;
+}
+
 void BuilderOptimizer::optimize(GraphPtr graph)
 {
     auto output_tensors = graph->get_output_tensors();

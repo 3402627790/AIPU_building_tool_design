@@ -26,6 +26,7 @@
 #include "core/graph.h"
 #include "core/optype.h"
 #include "core/plugin_loader.h"
+#include <string>
 namespace aipubt
 {
 class BuilderOptimizer
@@ -35,6 +36,8 @@ public:
     void optimize(GraphPtr g);
     // plugin flag only high 16bit works
     static BuilderOpPlugin *get_single_op_plugin(OpType t, uint32_t flag = 0);
+    /// Lookup a builder op plugin by REGISTER_PLUGIN class name (e.g. "TransposePlugin").
+    static BuilderOpPlugin *get_builder_op_plugin_by_name(const std::string &name, uint32_t flag = 0);
 
 private:
     PluginLoader *m_plugin_loader = PluginLoader::get_instance();
