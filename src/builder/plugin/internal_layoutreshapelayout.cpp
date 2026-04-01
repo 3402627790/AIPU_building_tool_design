@@ -308,7 +308,18 @@ public:
         return true;
     };
 
-    // Check if the pattern meets the optimization conditions
+    /// Validate whether the LayoutConvertor-Reshape-LayoutConvertor pattern can be
+    /// optimized. The pattern is accepted when all of the following hold:
+    ///   1. Input/output layouts are the same NCHWC16 or NCHWC32.
+    ///   2. The reshape operates in NHWC and is static.
+    ///   3. Both shapes are 5-D with matching C_out and C_in.
+    ///   4. The spatial element count N*H*W is preserved.
+    ///   5. If a transpose is needed (N changes while C_out > 1), the case must be
+    ///      a spatial axis swap expressible as a single 5-D transpose:
+    ///        - N-H swap (H_in == N_out), or
+    ///        - N-W swap (W_in == N_out).
+    ///      After the swap, the remaining spatial dims are flat-reinterpreted
+    ///      within each C_out block to reach the final [H_out, W_out].
     bool check_params(BaseNodePtrList nodes) override
     {
         auto inp = nodes[0]->inputs()[0];
@@ -348,24 +359,32 @@ public:
             return false;
         }
 
-        // C dimension must be the same
         if (in_shape[1] != out_shape[1] || in_shape[4] != out_shape[4])
         {
             return false;
         }
 
-        long long in_spatial = (long long)in_shape[0] * in_shape[2] * in_shape[3];
-        long long out_spatial = (long long)out_shape[0] * out_shape[2] * out_shape[3];
-        if (in_spatial != out_spatial)
+        long long in_spatial_prod = (long long)in_shape[0] * in_shape[2] * in_shape[3];
+        long long out_spatial_prod = (long long)out_shape[0] * out_shape[2] * out_shape[3];
+        if (in_spatial_prod != out_spatial_prod)
         {
             return false;
         }
 
-        bool need_transpose = (in_shape[0] != out_shape[0]);
-        if (need_transpose)
+        // In NCHWC memory (N->C_out->H->W->C_in), C_out separates N from H,W.
+        // Changing N when C_out > 1 crosses that barrier and requires a transpose.
+        // The transpose swaps N with one spatial axis so that N_out lands in dim 0.
+        // The remaining spatial dims are then a flat reinterpretation within each
+        // C_out block. Supported patterns:
+        //   - N-H swap: H_in == N_out  (remaining [N_in, W] reshapes to [H_out, W_out])
+        //   - N-W swap: W_in == N_out  (remaining [H, N_in] reshapes to [H_out, W_out])
+        // (H-W reshape does not cross the C_out barrier so no transpose is needed.)
+        bool crosses_cout = (in_shape[0] != out_shape[0]) && (in_shape[1] > 1);
+        if (crosses_cout)
         {
-            // For N-H swap pattern: require H_in == N_out
-            if (in_shape[2] != out_shape[0])
+            bool is_nh_swap = (in_shape[2] == out_shape[0]);
+            bool is_nw_swap = (in_shape[3] == out_shape[0]);
+            if (!is_nh_swap && !is_nw_swap)
             {
                 return false;
             }
@@ -380,16 +399,36 @@ public:
         std::vector<int> in_shape = match_list[0]->inputs()[0]->shape();
         std::vector<int> out_shape = match_list[2]->outputs()[0]->shape();
 
-        bool need_transpose = (in_shape[0] != out_shape[0]);
+        // In NCHWC memory (N->C_out->H->W->C_in), C_out separates N from H,W.
+        // Changing N when C_out > 1 crosses that barrier and requires a transpose.
+        // When N is unchanged (or C_out==1), any spatial [H,W] reshape is a flat
+        // reinterpretation within each (n, c_out) block — no transpose needed.
+        bool need_transpose = (in_shape[0] != out_shape[0]) && (in_shape[1] > 1);
         sgnode->set_attr("need_transpose", need_transpose);
 
         if (need_transpose)
         {
-            // Permutation for N-H swap: {2, 1, 0, 3, 4}
-            sgnode->params()["perm"] = NodeParamValue({2, 1, 0, 3, 4});
-
-            std::vector<int> trans_out_shape = {in_shape[2], in_shape[1], in_shape[0], in_shape[3], in_shape[4]};
-            sgnode->set_attr("transpose_out_shape", trans_out_shape);
+            bool is_nw_swap = (in_shape[3] == out_shape[0]);
+            if (is_nw_swap)
+            {
+                // N-W swap: transpose produces [W, C_out, H, N, C_in].
+                // Remaining [H, N_in] is flat-reinterpreted as [H_out, W_out]
+                // within each C_out block.
+                sgnode->params()["perm"] = NodeParamValue({3, 1, 2, 0, 4});
+                std::vector<int> trans_out_shape = {
+                    in_shape[3], in_shape[1], in_shape[2], in_shape[0], in_shape[4]};
+                sgnode->set_attr("transpose_out_shape", trans_out_shape);
+            }
+            else
+            {
+                // N-H swap: transpose produces [H, C_out, N, W, C_in].
+                // Remaining [N_in, W] is flat-reinterpreted as [H_out, W_out]
+                // within each C_out block.
+                sgnode->params()["perm"] = NodeParamValue({2, 1, 0, 3, 4});
+                std::vector<int> trans_out_shape = {
+                    in_shape[2], in_shape[1], in_shape[0], in_shape[3], in_shape[4]};
+                sgnode->set_attr("transpose_out_shape", trans_out_shape);
+            }
         }
     }
 
