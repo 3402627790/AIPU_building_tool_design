@@ -20,28 +20,26 @@
  * @Last Modified by: Neo Wang
  * @Last Modified time: 2023-11-15 16:34:53
  */
-#ifndef BUILDER_OPTIMIZER_H
-#define BUILDER_OPTIMIZER_H
-
-#include "core/graph.h"
-#include "core/optype.h"
-#include "core/plugin_loader.h"
-#include <string>
-namespace aipubt
-{
-class BuilderOptimizer
-{
-public:
-    BuilderOptimizer() {}
-    void optimize(GraphPtr g);
-    // plugin flag only high 16bit works
+ #ifndef BUILDER_OPTIMIZER_H
+ #define BUILDER_OPTIMIZER_H
+ 
+ #include "core/graph.h"
+ #include "core/optype.h"
+ #include "core/plugin_loader.h"
+ namespace aipubt
+ {
+ class BuilderOptimizer
+ {
+ public:
+     BuilderOptimizer() {}
+     void optimize(GraphPtr g);
+    // plugin flag only high 16bit works. If multiple single-op plugins match the same OpType,
+    // returns the one with the highest get_score() (ties: first in plugin load order).
     static BuilderOpPlugin *get_single_op_plugin(OpType t, uint32_t flag = 0);
-    /// Lookup a builder op plugin by REGISTER_PLUGIN class name (e.g. "TransposePlugin").
-    static BuilderOpPlugin *get_builder_op_plugin_by_name(const std::string &name, uint32_t flag = 0);
-
-private:
-    PluginLoader *m_plugin_loader = PluginLoader::get_instance();
-};
-}; // namespace aipubt
-
-#endif //!BUILDER_OPTIMIZER_H
+ 
+ private:
+     PluginLoader *m_plugin_loader = PluginLoader::get_instance();
+ };
+ }; // namespace aipubt
+ 
+ #endif //!BUILDER_OPTIMIZER_H

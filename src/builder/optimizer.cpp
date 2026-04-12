@@ -37,6 +37,8 @@ BuilderOpPlugin *BuilderOptimizer::get_single_op_plugin(OpType t, uint32_t flag)
 {
     auto m_plugins = ((*PluginLoader::get_instance())[BUILDERPLUGIN_TYPE]);
     flag = flag >> 16;
+    BuilderOpPlugin *best = nullptr;
+    uint32_t best_score = 0;
     for (auto plugin_ : m_plugins)
     {
         auto plugin = reinterpret_cast<BuilderOpPluginInfo *>(plugin_);
@@ -48,30 +50,15 @@ BuilderOpPlugin *BuilderOptimizer::get_single_op_plugin(OpType t, uint32_t flag)
         auto p = opt->get_graph_pattern();
         if (p.second.size() == 0 && p.first.size() == 1 && p.first[0].second == t)
         {
-            return opt;
+            uint32_t s = opt->get_score();
+            if (best == nullptr || s > best_score)
+            {
+                best = opt;
+                best_score = s;
+            }
         }
     }
-    return nullptr;
-}
-
-BuilderOpPlugin *BuilderOptimizer::get_builder_op_plugin_by_name(const std::string &name, uint32_t flag)
-{
-    auto m_plugins = ((*PluginLoader::get_instance())[BUILDERPLUGIN_TYPE]);
-    flag = flag >> 16;
-    for (auto plugin_ : m_plugins)
-    {
-        auto plugin = reinterpret_cast<BuilderOpPluginInfo *>(plugin_);
-        if ((plugin->plugin_type >> 16) != flag)
-        {
-            continue;
-        }
-        if (plugin->name != name)
-        {
-            continue;
-        }
-        return plugin->init_handle();
-    }
-    return nullptr;
+    return best;
 }
 
 void BuilderOptimizer::optimize(GraphPtr graph)

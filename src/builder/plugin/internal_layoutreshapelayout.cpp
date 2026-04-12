@@ -15,6 +15,7 @@
 //
 //--------------------------------------------------------------------------------
 #include "builder/lowering/lowering.h"
+#include "builder/optimizer.h"
 #include "builder/target.h"
 #include <builder/plugin.h>
 #include <core/graph.h>
@@ -22,8 +23,6 @@
 #include <utils/utils.h>
 
 #include <algorithm>
-#include <cctype>
-#include <map>
 #include <string>
 
 namespace aipubt
@@ -31,260 +30,6 @@ namespace aipubt
 
 namespace
 {
-
-// Push transpose parameters to fixed 6 dimensions
-void push_transpose_param(BuilderParams &ro, const std::vector<int> &param, int dim)
-{
-    for (int i = 0; i < 6; i++)
-    {
-        if (i < dim)
-        {
-            ro.push_back(param[i]);
-        }
-        else
-        {
-            ro.push_back(1);
-        }
-    }
-}
-
-/// Same semantics as TransposePlugin::merge_dma_data_unit (inlined for internal codegen).
-int merge_dma_data_unit(std::vector<int> &shape, std::vector<int> &perm, int &dim, int dtype_size)
-{
-    if (shape.empty() || (int)shape.size() < dim || perm.empty() || (int)perm.size() < dim)
-    {
-        return dtype_size;
-    }
-    int last_dim = dim - 1;
-    if (perm[last_dim] == last_dim)
-    {
-        if (shape[last_dim] * dtype_size == 4)
-        {
-            dim = dim - 1;
-            return 4;
-        }
-        if (shape[last_dim] * dtype_size == 2)
-        {
-            dim = dim - 1;
-            return 2;
-        }
-    }
-    return dtype_size;
-}
-
-/// Check if axis is in axes array
-static bool check_in_axes(const int *axes, int axis, int ndim)
-{
-    for (int32_t i = 0; i < ndim; i++)
-    {
-        if (axis == axes[i])
-        {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// reduce all axis which is equal to 1.
-int reduce_1_axes(std::vector<int> &in_shape, std::vector<int> &perm, int ndim)
-{
-    int32_t axes[6];
-    int32_t cnt_axe = 0, cnt_shape = 0, cnt_perm = 0;
-    int32_t temp_perm[6];
-    int32_t temp_in_shape[6];
-    for (int32_t i = 0; i < ndim; i++)
-    {
-        if (in_shape[perm[i]] != 1)
-        {
-            temp_perm[cnt_perm++] = perm[i];
-        }
-        if (in_shape[i] == 1)
-        {
-            axes[cnt_axe++] = i;
-        }
-        else
-        {
-            temp_in_shape[cnt_shape++] = in_shape[i];
-        }
-    }
-
-    for (int32_t i = cnt_axe - 1; i >= 0; i--)
-    {
-        for (int32_t j = 0; j < cnt_perm; j++)
-        {
-            if (temp_perm[j] >= axes[i])
-            {
-                temp_perm[j]--;
-            }
-        }
-    }
-
-    for (int32_t i = 0; i < cnt_shape; i++)
-    {
-        in_shape[i] = temp_in_shape[i];
-        perm[i] = temp_perm[i];
-    }
-
-    return cnt_shape;
-}
-
-/// Fuse adjacent axes in permutation
-int fuse_axes(std::vector<int> &in_shape, std::vector<int> &perm, int ndim)
-{
-    int32_t fuse_axes_num = 0;
-    int32_t fuse_axes[6];
-    int32_t temp_in_shape[6];
-    int32_t temp_perm[6];
-    for (int32_t i = 0; i < ndim; i++)
-    {
-        temp_in_shape[i] = in_shape[i];
-        temp_perm[i] = perm[i];
-    }
-
-    for (int32_t i = 1; i < ndim; i++)
-    {
-        if (perm[i] - 1 == perm[i - 1])
-        {
-            temp_perm[i] = temp_perm[i - 1];
-            temp_in_shape[perm[i]] *= temp_in_shape[perm[i - 1]];
-            fuse_axes[fuse_axes_num] = perm[i - 1];
-            fuse_axes_num += 1;
-        }
-    }
-
-    for (int32_t i = 0; i < fuse_axes_num; i++)
-    {
-        for (int32_t j = 0; j < ndim; j++)
-        {
-            if (temp_perm[j] > fuse_axes[i])
-            {
-                temp_perm[j] -= 1;
-            }
-        }
-    }
-
-    // Calculate fused input shape
-    uint32_t count = 0;
-    for (int32_t i = 0; i < ndim; i++)
-    {
-        if (!check_in_axes(fuse_axes, i, fuse_axes_num))
-        {
-            in_shape[count] = temp_in_shape[i];
-            count += 1;
-        }
-    }
-
-    // Calculate fused permutation
-    count = 1;
-    perm[0] = temp_perm[0];
-    for (int32_t i = 1; i < ndim; i++)
-    {
-        if (temp_perm[i] != temp_perm[i - 1])
-        {
-            perm[count] = temp_perm[i];
-            count += 1;
-        }
-    }
-
-    return ndim - fuse_axes_num;
-}
-
-// Get shape and permutation after axis fusion
-void get_new_shape_perm_dim(BaseNodePtr sgnode, BaseNodePtr &node, 
-                            std::vector<int> &temp_shape, 
-                            std::vector<int> &temp_perm, int &dim)
-{
-    auto in_ts = sgnode->inputs()[0]->shape();
-    auto out_ts = sgnode->outputs()[0]->shape();
-    dim = in_ts.dim();
-    aipu_assert(out_ts.dim() == dim);
-    
-    // Get permutation parameter
-    std::vector<int> perm = node->params()["perm"];
-    aipu_assert((int)perm.size() == dim);
-    
-    // Handle negative indices
-    for (size_t i = 0; i < perm.size(); i++)
-    {
-        if (perm[i] < 0)
-        {
-            perm[i] += (int)perm.size();
-        }
-    }
-    
-    // Get input shape
-    std::vector<int> in_shape(dim);
-    for (int i = 0; i < dim; i++)
-    {
-        in_shape[i] = in_ts[i];
-    }
-    
-    temp_shape = in_shape;
-    temp_perm = perm;
-    
-    // Apply axis fusion optimization
-    dim = reduce_1_axes(temp_shape, temp_perm, dim);
-    dim = fuse_axes(temp_shape, temp_perm, dim);
-    
-    if (dim > 6)
-    {
-        ERROR() << "[InternalLayoutReshapeLayout] Transpose can't support real > 6d permutation.";
-    }
-}
-
-/// Target architecture mapping for transpose kernels
-static const std::map<std::string, std::string> &transpose_targets_map()
-{
-    static const std::map<std::string, std::string> k_map = {
-        {"z1_0904", "z1_0904"},
-        {"z1_0701", "z1_0701"},
-        {"z1_0701_p", "z1_0701"},
-        {"z2_1104", "z2_1104"},
-        {"z2_1002", "z2_1002"},
-        {"z2_0901", "z2_0901"},
-        {"z3_1204", "z2_1104"},
-        {"z3_1104", "z2_1104"},
-        {"z3_1002", "z2_1002"},
-        {"z3_0901", "z2_0901"},
-        {"x1_1204", "x1_1204"},
-        {"z5_0901", "x2"},
-        {"z5_1204", "x2"},
-        {"x2_1204", "x2"},
-        {"x3_1204", "x3"},
-        {"x3_1202", "x3"},
-        {"x3_1304", "x3"},
-        {"x3_1302", "x3"},
-        {"x3p_1204", "x3p"},
-        {"x3p_1202", "x3p"},
-        {"x3p_1304", "x3p"},
-        {"x3p_1302", "x3p"},
-        {"x3s_1204", "x3s"},
-        {"x3s_1202", "x3s"},
-        {"x3s_1304", "x3s"},
-        {"x3s_1302", "x3s"},
-    };
-    return k_map;
-}
-
-// Get target architecture suffix for binary file names
-static std::string tpcc_transpose_target_suffix(const std::string &target_name)
-{
-    std::string key;
-    key.reserve(target_name.size());
-    for (unsigned char c : target_name)
-    {
-        key.push_back((char)std::tolower(c));
-    }
-    const auto &m = transpose_targets_map();
-    auto it = m.find(key);
-    if (it != m.end())
-    {
-        return it->second;
-    }
-    WARN() << "[InternalLayoutReshapeLayout] transpose targets_map: unknown target \"" << key
-           << "\", using lowercased name as bin token";
-    return key;
-}
 
 static std::vector<int> integer_factorize(int n)
 {
@@ -407,14 +152,6 @@ std::vector<std::vector<int>> split_shape(const std::vector<int> &split, TensorS
     return ret;
 }
 
-/**
- * @brief Returns true if the permutation is the identity (perm[i] == i for all i).
- *        An identity permutation means the transpose is a no-op and can be elided.
- *
- * @param perm  The permutation vector to check (int or uint32_t values).
- * @return true  All indices are in-place; no data movement required.
- * @return false At least one index is out of place; a real transpose is required.
- */
 static bool is_perm_consistent(const std::vector<int> &perm)
 {
     for (size_t i = 0; i < perm.size(); i++)
@@ -528,7 +265,7 @@ public:
         TensorShape ts5d_in(s5d_in);
         TensorShape ts5d_out(s5d_out);
 
-        // Check 1: do the strides actually change across the reshape?
+        // Check 1: do the strides actually change across the reshape
         std::vector<int> split;
         bool is_strides_ok = is_strides_changed(ts5d_in, ts5d_out, split);
         if (!is_strides_ok)
@@ -542,7 +279,6 @@ public:
         // Check 2: compute the effective permutation (new_perm) that would remain
         // after fusing the two LC transposes with the reshape, following the same
         // algorithm as fuse_transpose_with_reshape().
-
         const std::vector<int> perm0 = {0, 2, 3, 1, 4}; // LC0: NCHWC -> NHWCG
         const std::vector<int> perm1 = {0, 3, 1, 2, 4}; // LC2: NHWCG -> NCHWC
 
@@ -552,9 +288,6 @@ public:
 
         // Step B: undo perm0 to recover the per-dim factor groups in the original
         //         NCHWC input space (before_trans).
-        //         Then build:
-        //           new_perm0       -- flat index sequence for the expanded NCHWC shape
-        //           after_trans_split -- dimension sizes in perm0-traversal order (NHWCG)
         std::vector<std::vector<int>> before_trans(perm0.size());
         for (uint32_t i = 0; i < (uint32_t)perm0.size(); ++i)
         {
@@ -646,21 +379,6 @@ public:
         // A permutation where every index stays in place (perm[i] == i) is the
         // identity: the effective transpose is a no-op and can be elided.
         m_need_transpose = !is_perm_consistent(new_perm);
-
-        // -----------------------------------------------------------------------
-        // Save the computed permutation and the expanded input shape of the
-        // transpose kernel so that setup() can publish them as node attributes.
-        //
-        // m_new_reshape0  -- flat expansion of before_trans (indexed in NCHWC axis
-        //                    order, possibly with sub-dimensions when a single NCHWC
-        //                    axis is split across the reshape boundary).
-        //                    This is the shape the transpose kernel actually reads.
-        // m_new_perm      -- effective permutation over m_new_reshape0.
-        //                    trans_out_shape[i] = m_new_reshape0[m_new_perm[i]].
-        //
-        // Using the expanded shape (rather than a hardcoded NCHWC-space perm) makes
-        // setup() correct for every possible axis permutation -- not just N↔H.
-        // -----------------------------------------------------------------------
         m_new_perm = new_perm;
 
         m_new_reshape0.clear();
@@ -675,10 +393,6 @@ public:
         return true;
     }
 
-    // Setup attributes for the fused node.
-    // Translates the perm/shape data computed in check_params into node attributes
-    // consumed by generate_params(), generate_code_name(), generate_kernel(), and
-    // memory_remapping().
     void setup(BaseNodePtr sgnode, BaseNodePtrList match_list) override
     {
         sgnode->set_attr("need_transpose", m_need_transpose);
@@ -688,18 +402,6 @@ public:
             return;
         }
 
-        // -----------------------------------------------------------------------
-        // m_new_perm and m_new_reshape0 may describe an EXPANDED shape where one
-        // NCHWC axis has been split into multiple sub-axes (e.g. W=1024 → [4, 256]).
-        // Using them directly (rather than hardcoding a 5-D NCHWC-space perm) makes
-        // this path correct for N↔W, N↔H, H↔W, and any split-axis permutation.
-        //
-        // The transpose kernel operates on:
-        //   input  shape = m_new_reshape0          ("transpose_in_shape")
-        //   output shape = m_new_reshape0 reordered by m_new_perm ("transpose_out_shape")
-        //   perm         = m_new_perm              (stored in node params["perm"])
-        // -----------------------------------------------------------------------
-
         // Compute the transpose output shape by applying m_new_perm to m_new_reshape0.
         // trans_out_shape[i] = m_new_reshape0[m_new_perm[i]]  (output[i] = input[perm[i]])
         std::vector<int> trans_out_shape(m_new_perm.size());
@@ -708,162 +410,106 @@ public:
             trans_out_shape[i] = m_new_reshape0[m_new_perm[i]];
         }
 
-        sgnode->params()["perm"]             = NodeParamValue(m_new_perm);
-        sgnode->set_attr("transpose_in_shape",  m_new_reshape0);
-        sgnode->set_attr("transpose_out_shape", trans_out_shape);
+        sgnode->params()["perm"] = NodeParamValue(m_new_perm);
+        // Store the flat input shape that the transpose kernel will actually read.
+        sgnode->set_attr("transpose_in_shape", m_new_reshape0);
     }
 
-    // Generate builder parameters for the transpose kernel.
+    // -----------------------------------------------------------------------
+    // 1. Temporarily reshape sgnode's tensors to the flat layout
+    // 2. Invoke the callback with the plugin and the node list
+    // 3. Restore the shapes
+    // -----------------------------------------------------------------------
+    template<typename Fn>
+    auto invoke_as_flat_transpose(BaseNodePtr sgnode, Fn &&fn)
+        -> decltype(fn(std::declval<BuilderOpPlugin *>(),
+                       std::declval<BaseNodePtrList &>()))
+    {
+        using R = decltype(fn(std::declval<BuilderOpPlugin *>(),
+                              std::declval<BaseNodePtrList &>()));
+
+        // ── Step 1: select and validate the plugin BEFORE patching shapes.
+        uint32_t flag = 0;
+        auto plugin = BuilderOptimizer::get_single_op_plugin(OpType_Transpose, flag);
+        if (!plugin)
+        {
+            ERROR() << "[InternalLayoutReshapeLayout] Cannot obtain TransposePlugin for "
+                    << sgnode->name();
+            return R{};
+        }
+        BaseNodePtrList m = {sgnode};
+        bool res = plugin->check_params(m);
+        res &= plugin->set_target(get_target()->name().c_str());
+
+        if (!res)
+        {
+            ERROR() << "[InternalLayoutReshapeLayout] TransposePlugin check_params/"
+                       "set_target failed for " << sgnode->name();
+            return R{};
+        }
+
+        // ── Step 2: patch tensor shapes to flat so TransposePlugin's
+        // get_new_shape_perm_dim hits the Flat→Flat branch.
+        auto flat_in_vec = sgnode->get_attr<std::vector<int>>("transpose_in_shape");
+        std::vector<int> perm_vec = sgnode->params()["perm"];
+
+        std::vector<int> flat_out_vec(perm_vec.size());
+        for (size_t i = 0; i < perm_vec.size(); ++i)
+            flat_out_vec[i] = flat_in_vec[perm_vec[i]];
+
+        // Save dtype and current shapes before patching
+        auto dtype = sgnode->inputs()[0]->type();
+        auto orig_in_shape = sgnode->inputs()[0]->shape();
+        auto orig_out_shape = sgnode->outputs()[0]->shape();
+
+        TensorShape flat_in_shape(flat_in_vec, DataLayout_Flat);
+        TensorShape flat_out_shape(flat_out_vec, DataLayout_Flat);
+
+        sgnode->inputs()[0]->shape() = flat_in_shape;
+        sgnode->outputs()[0]->shape() = flat_out_shape;
+
+        // ── Step 3: invoke the caller's lambda with the validated plugin.
+        auto result = fn(plugin, m);
+
+        // ── Step 4: restore original shapes and dtype.
+        sgnode->inputs()[0]->shape()  = orig_in_shape;
+        sgnode->outputs()[0]->shape() = orig_out_shape;
+        sgnode->inputs()[0]->set_type(dtype);
+        sgnode->outputs()[0]->set_type(dtype);
+
+        return result;
+    }
+
     BuilderParams generate_params(BaseNodePtr sgnode, BaseNodePtrList &nodes) override
     {
-        bool need_transpose = cast_any<bool>(sgnode->get_attr("need_transpose"));
-        if (!need_transpose)
-        {
+        if (!cast_any<bool>(sgnode->get_attr("need_transpose")))
             return BuilderParams();
-        }
 
-        auto node = sgnode;
-        auto inp  = sgnode->inputs()[0];
-        BuilderParams ro;
-
-        // Temporarily substitute the tensor's shape with the expanded transpose-input
-        // shape so that get_new_shape_perm_dim() sees the correct per-axis sizes and
-        // can apply reduce_1_axes / fuse_axes for kernel parameter computation.
-        auto trans_in_shape  = sgnode->get_attr<std::vector<int>>("transpose_in_shape");
-        auto trans_out_shape = sgnode->get_attr<std::vector<int>>("transpose_out_shape");
-        auto saved_in_ts     = inp->shape();                  // full TensorShape (layout + dims)
-        // auto saved_in_layout = inp->shape().layout();
-
-        inp->shape() = TensorShape(trans_in_shape);
-        inp->shape().set_layout(DataLayout_Flat);
-
-        auto outp            = sgnode->outputs()[0];
-        auto saved_out_ts    = outp->shape();
-        outp->shape()        = TensorShape(trans_out_shape);
-        outp->shape().set_layout(DataLayout_Flat);
-
-        int dim = 0;
-        std::vector<int> temp_shape, temp_perm;
-        get_new_shape_perm_dim(sgnode, node, temp_shape, temp_perm, dim);
-
-        int kernel_dtype_size = Tensor::dtype_size(node->inputs()[0]->type());
-        kernel_dtype_size = merge_dma_data_unit(temp_shape, temp_perm, dim, kernel_dtype_size);
-
-        push_transpose_param(ro, temp_shape, dim);
-        push_transpose_param(ro, temp_perm, dim);
-        ro.push_back(dim);
-
-        // Restore original shapes before appending tensor references.
-        inp->shape()  = saved_in_ts;
-        outp->shape() = saved_out_ts;
-
-        ro.push_back(sgnode->inputs()[0]);
-        ro.push_back(sgnode->outputs()[0]);
-        ro.push_back(0);  // workspace
-
-        return ro;
+        return invoke_as_flat_transpose(sgnode, [&](BuilderOpPlugin *plugin, BaseNodePtrList &m) {
+            return plugin->generate_params(sgnode, m);
+        });
     }
 
-    // Generate binary code name for the transpose kernel.
     const std::string generate_code_name(BaseNodePtr sgnode, BaseNodePtrList &nodes) override
     {
-        bool need_transpose = cast_any<bool>(sgnode->get_attr("need_transpose"));
-        if (!need_transpose)
-        {
+        if (!cast_any<bool>(sgnode->get_attr("need_transpose")))
             return "";
-        }
 
-        auto node            = sgnode;
-        auto inp             = sgnode->inputs()[0];
-        auto outp            = sgnode->outputs()[0];
-        auto saved_in_ts     = inp->shape();
-        auto saved_out_ts    = outp->shape();
-        // auto saved_in_layout = inp->shape().layout();
-        auto trans_in_shape  = sgnode->get_attr<std::vector<int>>("transpose_in_shape");
-        auto trans_out_shape = sgnode->get_attr<std::vector<int>>("transpose_out_shape");
-
-        // Temporarily replace tensor shapes with the expanded transpose shapes
-        // (Flat layout, no NCHWC/NHWC reinterpretation) so that get_new_shape_perm_dim
-        // works purely on the kernel's logical axes.
-        inp->shape()  = TensorShape(trans_in_shape);
-        inp->shape().set_layout(DataLayout_Flat);
-        outp->shape() = TensorShape(trans_out_shape);
-        outp->shape().set_layout(DataLayout_Flat);
-
-        int dim = 0;
-        std::vector<int> temp_shape, temp_perm;
-        get_new_shape_perm_dim(sgnode, node, temp_shape, temp_perm, dim);
-        int kernel_dtype_size =
-            merge_dma_data_unit(temp_shape, temp_perm, dim, Tensor::dtype_size(node->inputs()[0]->type()));
-
-        // Restore original shapes.
-        inp->shape()  = saved_in_ts;
-        outp->shape() = saved_out_ts;
-
-        const std::string arch = tpcc_transpose_target_suffix(get_target()->name());
-        std::string code_name;
-        if (kernel_dtype_size == 1)
-        {
-            code_name = "tpcc_transpose_i8u8_" + arch + ".bin";
-        }
-        else if (kernel_dtype_size == 2)
-        {
-            code_name = "tpcc_transpose_i16u16_" + arch + ".bin";
-        }
-        else
-        {
-            code_name = "tpcc_transpose_i32u32_" + arch + ".bin";
-        }
-
-        return code_name;
+        return invoke_as_flat_transpose(sgnode, [&](BuilderOpPlugin *plugin, BaseNodePtrList &m) {
+            return plugin->generate_code_name(sgnode, m);
+        });
     }
 
-    // Generate kernel function name for the transpose operation.
     const std::string generate_kernel(BaseNodePtr sgnode, BaseNodePtrList &nodes) override
     {
-        bool need_transpose = cast_any<bool>(sgnode->get_attr("need_transpose"));
-        if (!need_transpose)
-        {
+        if (!cast_any<bool>(sgnode->get_attr("need_transpose")))
             return "";
-        }
 
-        auto inp             = sgnode->inputs()[0];
-        auto outp            = sgnode->outputs()[0];
-        auto saved_in_ts     = inp->shape();
-        auto saved_out_ts    = outp->shape();
-        auto trans_in_shape  = sgnode->get_attr<std::vector<int>>("transpose_in_shape");
-        auto trans_out_shape = sgnode->get_attr<std::vector<int>>("transpose_out_shape");
-
-        // Same shape substitution as generate_code_name.
-        inp->shape()  = TensorShape(trans_in_shape);
-        inp->shape().set_layout(DataLayout_Flat);
-        outp->shape() = TensorShape(trans_out_shape);
-        outp->shape().set_layout(DataLayout_Flat);
-
-        int dim = 0;
-        std::vector<int> temp_shape, temp_perm;
-        get_new_shape_perm_dim(sgnode, sgnode, temp_shape, temp_perm, dim);
-        int kernel_dtype_size =
-            merge_dma_data_unit(temp_shape, temp_perm, dim, Tensor::dtype_size(sgnode->inputs()[0]->type()));
-
-        // Restore original shapes.
-        inp->shape()  = saved_in_ts;
-        outp->shape() = saved_out_ts;
-
-        const char *kname = "Transpose32Bit";
-        if (kernel_dtype_size == 1)
-        {
-            kname = "Transpose8Bit";
-        }
-        else if (kernel_dtype_size == 2)
-        {
-            kname = "Transpose16Bit";
-        }
-        return kname;
+        return invoke_as_flat_transpose(sgnode, [&](BuilderOpPlugin *plugin, BaseNodePtrList &m) {
+            return plugin->generate_kernel(sgnode, m);
+        });
     }
 
-    // Memory remapping: when no transpose is needed the output can share the
-    // input buffer (the LC+Reshape+LC is a pure logical relabelling).
     void memory_remapping(BaseNodePtr sgnode, BaseNodePtrList &nodes) override
     {
         bool need_transpose = cast_any<bool>(sgnode->get_attr("need_transpose"));
@@ -877,27 +523,9 @@ public:
     }
 
 private:
-    // -----------------------------------------------------------------------
-    // State carried from check_params() into setup().
-    //
-    // check_params() runs before the fused sgnode exists, so intermediate
-    // results must be stashed here and then published as node attributes in
-    // setup() for the downstream code-generation methods to consume.
-    // -----------------------------------------------------------------------
-
-    /// Whether the fused LC+Reshape+LC requires a real transpose kernel.
-    bool m_need_transpose = false;
-
-    /// Effective permutation over m_new_reshape0 computed in check_params().
-    /// trans_out_shape[i] = m_new_reshape0[m_new_perm[i]].
-    /// May be larger than 5 when a single NCHWC axis is split across the reshape.
-    std::vector<int> m_new_perm;
-
-    /// Expanded input shape for the transpose kernel.
-    /// Derived by flattening before_trans (the per-NCHWC-axis factor groups).
-    /// When no axis is split, equals the original NCHWC in_shape; otherwise
-    /// some axes are replaced by multiple sub-axis sizes.
-    std::vector<int> m_new_reshape0;
+    bool m_need_transpose = false;       // true if a real Transpose kernel is required
+    std::vector<int> m_new_perm;         // effective perm on the expanded flat shape
+    std::vector<int> m_new_reshape0;     // expanded flat input sizes the transpose kernel reads
 };
 
 REGISTER_PLUGIN(InternalLayoutReshapeLayout, 0x01010000, BUILDERPLUGIN_TYPE | GBPlugin_Internal);
