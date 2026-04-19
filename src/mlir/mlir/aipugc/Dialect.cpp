@@ -1040,6 +1040,36 @@ LogicalResult BatchNormOp::verify() {
 void BatchNormOp::inferShapes() { return; }
 
 //===----------------------------------------------------------------------===//
+// InstanceNormOp
+//===----------------------------------------------------------------------===//
+void InstanceNormOp::build(OpBuilder &builder, OperationState &state,
+                           Type outputType, Value input, Value weight, Value bias,
+                           FloatAttr epsilon, DictionaryAttr dictAttr) {
+  state.addOperands({input, weight, bias});
+  state.addAttribute("epsilon", epsilon);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult InstanceNormOp::verify() {
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  if (!inputType)
+    return success();
+
+  int64_t rank = inputType.getRank();
+  if (rank < 2 || rank > 5) {
+    return emitOpError("input rank must be between 2 and 5, got ") << rank;
+  }
+
+  return success();
+}
+
+void InstanceNormOp::inferShapes() { return; }
+
+//===----------------------------------------------------------------------===//
 // LayerNormOp
 //===----------------------------------------------------------------------===//
 LogicalResult LayerNormOp::verify() {

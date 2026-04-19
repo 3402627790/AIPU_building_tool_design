@@ -562,6 +562,45 @@ def BatchNormOp : AIPUOp<"BatchNorm",
 }
 
 //===----------------------------------------------------------------------===//
+// Operator: InstanceNorm
+//===----------------------------------------------------------------------===//
+def InstanceNormOp : AIPUOp<"InstanceNorm",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Instance Normalization operator";
+
+  let description = [{
+    Applies instance normalization: y = gamma * (x - mean) / sqrt(variance + epsilon) + beta,
+    where mean and variance are computed per instance per channel (over spatial dimensions).
+    Aligns with core `instance_normalization` (input, gamma, beta, epsilon).
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    AIPUGCAnyTensor:$weight,
+    AIPUGCAnyTensor:$bias,
+    F32Attr:$epsilon,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::Value":$weight,
+      "::mlir::Value":$bias,
+      "::mlir::FloatAttr":$epsilon,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Operator: LayerNorm
 //===----------------------------------------------------------------------===//
 def LayerNormOp : AIPUOp<"LayerNorm",

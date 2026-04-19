@@ -1,10 +1,12 @@
 #include "Plugin/Plugin.h"
 #include "aipugc/Dialect.h"
 #include "aipugc/Passes.h"
+#include "mlir/Dialect/Traits.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "FuseMulAddToBatchNormPass"
@@ -44,7 +46,6 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
       return failure();
 
     // Determine input vs weight inside mul by comparing tensor ranks:
-    // input has higher rank, weight has lower (or equal) rank.
     Value mulLhs = mulOp.getLhs();
     Value mulRhs = mulOp.getRhs();
     auto lhsType = llvm::dyn_cast<RankedTensorType>(mulLhs.getType());
@@ -61,25 +62,18 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
       weight = mulLhs;
     }
 
-    // Infer axis: find which dimension of input matches the weight size.
-    // e.g. input=[1,16,28,28], weight=[16] → axis=1 (channel dim)
-    //      input=[1,28,28,16], weight=[16] → axis=3 (NHWC layout)
-    //      input=[2,256],      weight=[256] → axis=1
     auto inputType = llvm::dyn_cast<RankedTensorType>(input.getType());
     auto weightType = llvm::dyn_cast<RankedTensorType>(weight.getType());
     if (!inputType || !weightType || weightType.getRank() != 1)
       return failure();
 
-    int64_t weightDim = weightType.getDimSize(0);
-    int32_t axis = -1;
-    for (int64_t i = 0; i < inputType.getRank(); ++i) {
-      if (inputType.getDimSize(i) == weightDim) {
-        axis = static_cast<int32_t>(i);
-        break;
-      }
-    }
-    if (axis < 0)
+    SmallVector<int64_t> broadcastShape;
+    if (!OpTrait::util::getBroadcastedShape(inputType.getShape(),
+                                            weightType.getShape(),
+                                            broadcastShape))
       return failure();
+
+    int32_t axis = static_cast<int32_t>(inputType.getRank() - 1);
 
     LLVM_DEBUG(llvm::dbgs() << "FuseMulAddToBatchNorm: matched pattern "
                                "add(mul(input, weight), bias), axis="

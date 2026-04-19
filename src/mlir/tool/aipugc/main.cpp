@@ -311,7 +311,6 @@ int main(int argc, const char **argv) {
       }
     }
 
-
     if (mlir::failed(pm.run(*module))) {
       llvm::errs() << "Error: Pass manager failed to execute.\n";
       return 4;
@@ -337,7 +336,6 @@ int main(int argc, const char **argv) {
     llvm::raw_fd_ostream os(fileName, ec, llvm::sys::fs::OF_None);
     if (ec) {
       llvm::errs() << "Error: Could not open '" << fileName << "': " << ec.message() << "\n";
-      return false;
     }
     module->print(os);
   }
