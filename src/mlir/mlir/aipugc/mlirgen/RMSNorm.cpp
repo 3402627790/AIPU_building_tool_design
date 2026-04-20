@@ -26,7 +26,6 @@ public:
 
     const auto &params = node->params();
 
-    // 对应参考里的 gamma/weight：node->constants()[\"weights\"]
     auto it_weights = node->constants().find("weights");
     if (it_weights == node->constants().end()) {
       llvm::errs() << "RMSNorm missing weights constant\n";

@@ -20,8 +20,8 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
       : OpRewritePattern<aipugc::AddOp>(context, /*benefit=*/5) {}
 
   // Match and rewrite the following pattern:
-  //   %w = aipugc.constant or block argument   (weight)
-  //   %b = aipugc.constant or block argument   (bias)
+  //   %w = aipugc.constant   (weight)
+  //   %b = aipugc.constant   (bias)
   //   %0 = "aipugc.mul"(%input, %w)            -> MulOp defines %0
   //   %1 = "aipugc.add"(%0, %b)                -> AddOp uses %0, defines %1
   // Into:
@@ -45,6 +45,10 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
     if (!mulOp)
       return failure();
 
+    // Require both weight and bias to be constant for quantization fusion.
+    if (!bias.getDefiningOp<aipugc::ConstantOp>())
+      return failure();
+
     // Determine input vs weight inside mul by comparing tensor ranks:
     Value mulLhs = mulOp.getLhs();
     Value mulRhs = mulOp.getRhs();
@@ -65,6 +69,10 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
     auto inputType = llvm::dyn_cast<RankedTensorType>(input.getType());
     auto weightType = llvm::dyn_cast<RankedTensorType>(weight.getType());
     if (!inputType || !weightType || weightType.getRank() != 1)
+      return failure();
+
+    // Require weight to be constant.
+    if (!weight.getDefiningOp<aipugc::ConstantOp>())
       return failure();
 
     SmallVector<int64_t> broadcastShape;

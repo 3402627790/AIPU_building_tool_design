@@ -525,6 +525,9 @@ def FullyConnectedOp : AIPUOp<"FullyConnected",
   let hasVerifier = 0;
 }
 
+//===----------------------------------------------------------------------===//
+// Operator: BatchNorm
+//===----------------------------------------------------------------------===//
 def BatchNormOp : AIPUOp<"BatchNorm",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
   let summary = "Batch Normalization operator";
@@ -569,9 +572,10 @@ def InstanceNormOp : AIPUOp<"InstanceNorm",
   let summary = "Instance Normalization operator";
 
   let description = [{
-    Applies instance normalization: y = gamma * (x - mean) / sqrt(variance + epsilon) + beta,
+    Applies instance normalization: y = weight * (x - mean) / sqrt(variance + epsilon) + bias,
     where mean and variance are computed per instance per channel (over spatial dimensions).
-    Aligns with core `instance_normalization` (input, gamma, beta, epsilon).
+    Aligns with core `instance_normalization` (input, weight, bias, epsilon); constants are
+    stored as "weights" / "biases" on the graph node.
   }];
 
   let arguments = (ins
@@ -601,6 +605,48 @@ def InstanceNormOp : AIPUOp<"InstanceNorm",
 }
 
 //===----------------------------------------------------------------------===//
+// Operator: GroupNorm
+//===----------------------------------------------------------------------===//
+def GroupNormOp : AIPUOp<"GroupNorm",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Group Normalization operator";
+
+  let description = [{
+    Applies group normalization along the given axis. Aligns with core
+    `group_normalization` (input, weight, bias, axis, group, epsilon).
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    AIPUGCAnyTensor:$weight,
+    AIPUGCAnyTensor:$bias,
+    I32Attr:$axis,
+    I32Attr:$group,
+    F32Attr:$epsilon,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::Value":$weight,
+      "::mlir::Value":$bias,
+      "::mlir::IntegerAttr":$axis,
+      "::mlir::IntegerAttr":$group,
+      "::mlir::FloatAttr":$epsilon,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Operator: LayerNorm
 //===----------------------------------------------------------------------===//
 def LayerNormOp : AIPUOp<"LayerNorm",
@@ -609,16 +655,15 @@ def LayerNormOp : AIPUOp<"LayerNorm",
 
   let description = [{
     Applies layer normalization over the input tensor along the specified axes.
-    Gamma and beta are optional (pass 0 or 2 operands). When both are absent,
-    method is WITHOUT_GAMMA_BETA. Optionally outputs mean and inverse stddev.
-    Input rank must be in [2, 4]. Axis values are normalized to [0, rank).
-    Optional parameters like stash_type, out_mean_invstddev and quantization
-    info are carried in the generic dictionary attribute.
+    Operand layout matches BatchNorm-style: separate `weight` and `bias` tensors.
+    Both are optional; when both are absent the core uses method
+    WITHOUT_GAMMA_BETA.
   }];
 
   let arguments = (ins
     AIPUGCAnyTensor:$input,
-    Variadic<AIPUGCAnyTensor>:$gamma_beta,
+    AIPUGCAnyTensor:$weight,
+    AIPUGCAnyTensor:$bias,
     DenseI64ArrayAttr:$axis,
     F32Attr:$epsilon,
     OptionalAttr<DictionaryAttr>:$dictAttr
@@ -633,7 +678,8 @@ def LayerNormOp : AIPUOp<"LayerNorm",
     OpBuilder<(ins
       "::mlir::Type":$outputType,
       "::mlir::Value":$input,
-      "::mlir::ValueRange":$gamma_beta,
+      "::mlir::Value":$weight,
+      "::mlir::Value":$bias,
       "::mlir::DenseI64ArrayAttr":$axis,
       "::mlir::FloatAttr":$epsilon,
       "::mlir::DictionaryAttr":$dictAttr,
@@ -653,8 +699,8 @@ def RMSNormOp : AIPUOp<"RMSNorm",
 
   let description = [{
     Applies RMS (Root Mean Square) normalization over the input tensor along the
-    specified axes. Gamma and beta are optional (pass 0 or 2 operands). When both
-    are absent, method is WITHOUT_GAMMA_BETA. Unlike LayerNorm, RMSNorm normalizes
+    specified axes. The scale weight operand is optional. When absent, the core
+    uses method WITHOUT_GAMMA_BETA. Unlike LayerNorm, RMSNorm normalizes
     by the root mean square of activations without subtracting the mean. Input
     rank must be in [2, 4]. Axis values are normalized to [0, rank). Optional
     parameters (e.g. quantization info) are carried in the generic dictionary

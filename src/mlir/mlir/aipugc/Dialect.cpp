@@ -492,6 +492,8 @@ LogicalResult MulOp::verify() {
   ShapedType lhsType = mlir::dyn_cast<ShapedType>(getLhs().getType());
   ShapedType rhsType = mlir::dyn_cast<ShapedType>(getRhs().getType());
   if (lhsType.getElementType() != rhsType.getElementType()) {
+    llvm::errs() << "lhsElementType: " << lhsType.getElementType() << "\n";
+llvm::errs() << "rhsElementType: " << rhsType.getElementType() << "\n";
     return emitError("element types must match.");
   }
 
@@ -984,6 +986,9 @@ void FullyConnectedOp::build(OpBuilder &builder, OperationState &state,
 }
 void FullyConnectedOp::inferShapes() { return; }
 
+//===----------------------------------------------------------------------===//
+// BatchNormOp
+//===----------------------------------------------------------------------===//
 void BatchNormOp::build(OpBuilder &builder, OperationState &state,
                         Type outputType, Value input, Value weight, Value bias,
                         IntegerAttr axis, FloatAttr epsilon,
@@ -996,23 +1001,6 @@ void BatchNormOp::build(OpBuilder &builder, OperationState &state,
                             dictAttr.getValue().end());
   }
   state.addTypes(outputType);
-}
-
-void LayerNormOp::build(OpBuilder &builder, OperationState &state,
-                        Type outputType, Value input, ValueRange gamma_beta,
-                        DenseI64ArrayAttr axis, FloatAttr epsilon,
-                        DictionaryAttr dictAttr,
-                        ArrayRef<Type> meanInvstddevTypes) {
-  state.addOperands(input);
-  state.addOperands(gamma_beta);
-  state.addAttribute("axis", axis);
-  state.addAttribute("epsilon", epsilon);
-  if (dictAttr) {
-    state.attributes.append(dictAttr.getValue().begin(),
-                            dictAttr.getValue().end());
-  }
-  state.addTypes(outputType);
-  state.addTypes(meanInvstddevTypes);
 }
 
 LogicalResult BatchNormOp::verify() {
@@ -1042,36 +1030,22 @@ void BatchNormOp::inferShapes() { return; }
 //===----------------------------------------------------------------------===//
 // InstanceNormOp
 //===----------------------------------------------------------------------===//
-void InstanceNormOp::build(OpBuilder &builder, OperationState &state,
-                           Type outputType, Value input, Value weight, Value bias,
-                           FloatAttr epsilon, DictionaryAttr dictAttr) {
-  state.addOperands({input, weight, bias});
-  state.addAttribute("epsilon", epsilon);
-  if (dictAttr) {
-    state.attributes.append(dictAttr.getValue().begin(),
-                            dictAttr.getValue().end());
-  }
-  state.addTypes(outputType);
+void LayerNormOp::build(OpBuilder &builder, OperationState &state,
+  Type outputType, Value input, Value weight, Value bias,
+  DenseI64ArrayAttr axis, FloatAttr epsilon,
+  DictionaryAttr dictAttr,
+  ArrayRef<Type> meanInvstddevTypes) {
+state.addOperands({input, weight, bias});
+state.addAttribute("axis", axis);
+state.addAttribute("epsilon", epsilon);
+if (dictAttr) {
+state.attributes.append(dictAttr.getValue().begin(),
+      dictAttr.getValue().end());
+}
+state.addTypes(outputType);
+state.addTypes(meanInvstddevTypes);
 }
 
-LogicalResult InstanceNormOp::verify() {
-  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
-  if (!inputType)
-    return success();
-
-  int64_t rank = inputType.getRank();
-  if (rank < 2 || rank > 5) {
-    return emitOpError("input rank must be between 2 and 5, got ") << rank;
-  }
-
-  return success();
-}
-
-void InstanceNormOp::inferShapes() { return; }
-
-//===----------------------------------------------------------------------===//
-// LayerNormOp
-//===----------------------------------------------------------------------===//
 LogicalResult LayerNormOp::verify() {
   auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
   if (!inputType)
@@ -1080,12 +1054,6 @@ LogicalResult LayerNormOp::verify() {
   int64_t rank = inputType.getRank();
   if (rank < 2 || rank > 4) {
     return emitOpError("input rank must be between 2 and 4, got ") << rank;
-  }
-
-  size_t numGammaBeta = getGammaBeta().size();
-  if (numGammaBeta != 0 && numGammaBeta != 2) {
-    return emitOpError("gamma_beta must have 0 or 2 operands, got ")
-           << numGammaBeta;
   }
 
   for (int64_t axisVal : getAxis()) {
@@ -1118,6 +1086,80 @@ LogicalResult LayerNormOp::verify() {
 }
 
 void LayerNormOp::inferShapes() { return; }
+
+//===----------------------------------------------------------------------===//
+// InstanceNormOp
+//===----------------------------------------------------------------------===//
+void InstanceNormOp::build(OpBuilder &builder, OperationState &state,
+                           Type outputType, Value input, Value weight, Value bias,
+                           FloatAttr epsilon, DictionaryAttr dictAttr) {
+  state.addOperands({input, weight, bias});
+  state.addAttribute("epsilon", epsilon);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult InstanceNormOp::verify() {
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  if (!inputType)
+    return success();
+
+  int64_t rank = inputType.getRank();
+  if (rank < 2 || rank > 5) {
+    return emitOpError("input rank must be between 2 and 5, got ") << rank;
+  }
+
+  return success();
+}
+
+void InstanceNormOp::inferShapes() { return; }
+
+//===----------------------------------------------------------------------===//
+// GroupNormOp
+//===----------------------------------------------------------------------===//
+void GroupNormOp::build(OpBuilder &builder, OperationState &state,
+                        Type outputType, Value input, Value weight, Value bias,
+                        IntegerAttr axis, IntegerAttr group, FloatAttr epsilon,
+                        DictionaryAttr dictAttr) {
+  state.addOperands({input, weight, bias});
+  state.addAttribute("axis", axis);
+  state.addAttribute("group", group);
+  state.addAttribute("epsilon", epsilon);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult GroupNormOp::verify() {
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  if (!inputType)
+    return success();
+
+  int64_t rank = inputType.getRank();
+  if (rank < 3 || rank > 4) {
+    return emitOpError("input rank must be 3 or 4, got ") << rank;
+  }
+
+  int64_t axis = getAxis();
+  int64_t normalizedAxis = axis < 0 ? axis + rank : axis;
+  if (normalizedAxis < 0 || normalizedAxis >= rank) {
+    return emitOpError("axis value ")
+           << axis << " out of range for input rank " << rank;
+  }
+
+  if (getGroup() <= 0) {
+    return emitOpError("group must be positive, got ") << getGroup();
+  }
+
+  return success();
+}
+
+void GroupNormOp::inferShapes() { return; }
 
 //===----------------------------------------------------------------------===//
 // RMSNormOp
@@ -1154,7 +1196,7 @@ LogicalResult RMSNormOp::verify() {
     }
   }
 
-  // Basic type/shape consistency check between input and weight (gamma).
+  // Basic type/shape consistency check between input and weight.
   auto weightType = dyn_cast<RankedTensorType>(getWeight().getType());
   if (weightType && inputType) {
     // Element types must match.

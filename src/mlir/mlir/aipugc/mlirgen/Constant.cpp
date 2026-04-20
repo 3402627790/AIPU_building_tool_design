@@ -24,6 +24,9 @@ public:
   mlirGen(mlir::OpBuilder &builder, aipubt::NodePtr node,
           std::map<std::string, mlir::Value> &symbolTable) override {
     auto const_tensor = node->constants()["weights"];
+    // Default: all Constant weights use scale=1, zp=0 quantization
+    // This ensures type consistency with other quantized tensors in the graph
+    const_tensor->quantization() = aipubt::Quantization(1.0f, 0);
     auto location = loc(builder, node);
     auto output =
         ConstantTensorMlirGen(builder, location, const_tensor, symbolTable);
