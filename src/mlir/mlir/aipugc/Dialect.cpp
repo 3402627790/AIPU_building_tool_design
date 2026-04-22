@@ -386,6 +386,52 @@ void SquareOp::inferShapes() {
   getResult().setType(inputType);
 }
 
+// Common verifier function for binary element-wise ops (Add/Sub/Mul/Div)
+namespace {
+  static LogicalResult verifyBinaryElementwiseOp(Operation* op, Value lhs, 
+                                                  Value rhs, StringRef opName) {
+    ShapedType lhsType = mlir::dyn_cast<ShapedType>(lhs.getType());
+    ShapedType rhsType = mlir::dyn_cast<ShapedType>(rhs.getType());
+    if (!lhsType || !rhsType) {
+      return op->emitError() << opName << " operands must be shaped tensor type.";
+    }
+  
+    auto getCompareType = [](Type t) {
+      if (auto q = mlir::dyn_cast<QuantizedType>(t)) {
+        return q.getStorageType();
+      }
+      return t;
+    };
+    auto lhsEleType = lhsType.getElementType();
+    auto rhsEleType = rhsType.getElementType();
+    auto lhsCmp = getCompareType(lhsEleType);
+    auto rhsCmp = getCompareType(rhsEleType);
+    bool compatible = false;
+    if (auto lhsInt = mlir::dyn_cast<IntegerType>(lhsCmp)) {
+      if (auto rhsInt = mlir::dyn_cast<IntegerType>(rhsCmp)) {
+        compatible = lhsInt.getWidth() == rhsInt.getWidth();
+      }
+    } else {
+      compatible = lhsCmp == rhsCmp;
+    }
+    if (!compatible) {
+      llvm::errs() << "lhsElementType: " << lhsEleType << "\n";
+      llvm::errs() << "rhsElementType: " << rhsEleType << "\n";
+      return op->emitError() << opName << " operands must have compatible storage "
+                             "element types (same bit-width for integers, or "
+                             "identical floating-point types).";
+    }
+  
+    SmallVector<int64_t> resultShape;
+    if (!OpTrait::util::getBroadcastedShape(lhsType.getShape(),
+                                            rhsType.getShape(), resultShape)) {
+      return op->emitError()
+             << opName << " operands have incompatible shapes for broadcasting.";
+    }
+    return success();
+  }
+  } // end of verifyBinaryElementwiseOp namespace
+
 //===----------------------------------------------------------------------===//
 // AddOp
 //===----------------------------------------------------------------------===//
@@ -411,18 +457,7 @@ void AddOp::inferShapes() {
   }
 }
 LogicalResult AddOp::verify() {
-  ShapedType lhsType = mlir::dyn_cast<ShapedType>(getLhs().getType());
-  ShapedType rhsType = mlir::dyn_cast<ShapedType>(getRhs().getType());
-  if (lhsType.getElementType() != rhsType.getElementType()) {
-    return emitError("element types must match.");
-  }
-
-  SmallVector<int64_t> resultShape;
-  if (!OpTrait::util::getBroadcastedShape(lhsType.getShape(),
-                                          rhsType.getShape(), resultShape)) {
-    return emitError("Add operands have incompatible shapes for broadcasting.");
-  }
-  return mlir::success();
+  return verifyBinaryElementwiseOp(getOperation(), getLhs(), getRhs(), "Add");
 }
 
 //===----------------------------------------------------------------------===//
@@ -450,18 +485,7 @@ void SubOp::inferShapes() {
 }
 
 LogicalResult SubOp::verify() {
-  ShapedType lhsType = mlir::dyn_cast<ShapedType>(getLhs().getType());
-  ShapedType rhsType = mlir::dyn_cast<ShapedType>(getRhs().getType());
-  if (lhsType.getElementType() != rhsType.getElementType()) {
-    return emitError("element types must match.");
-  }
-
-  SmallVector<int64_t> resultShape;
-  if (!OpTrait::util::getBroadcastedShape(lhsType.getShape(),
-                                          rhsType.getShape(), resultShape)) {
-    return emitError("Sub operands have incompatible shapes for broadcasting.");
-  }
-  return mlir::success();
+  return verifyBinaryElementwiseOp(getOperation(), getLhs(), getRhs(), "Sub");
 }
 
 //===----------------------------------------------------------------------===//
@@ -489,22 +513,8 @@ void MulOp::inferShapes() {
 }
 
 LogicalResult MulOp::verify() {
-  ShapedType lhsType = mlir::dyn_cast<ShapedType>(getLhs().getType());
-  ShapedType rhsType = mlir::dyn_cast<ShapedType>(getRhs().getType());
-  if (lhsType.getElementType() != rhsType.getElementType()) {
-    llvm::errs() << "lhsElementType: " << lhsType.getElementType() << "\n";
-llvm::errs() << "rhsElementType: " << rhsType.getElementType() << "\n";
-    return emitError("element types must match.");
-  }
-
-  SmallVector<int64_t> resultShape;
-  if (!OpTrait::util::getBroadcastedShape(lhsType.getShape(),
-                                          rhsType.getShape(), resultShape)) {
-    return emitError("Mul operands have incompatible shapes for broadcasting.");
-  }
-  return mlir::success();
+  return verifyBinaryElementwiseOp(getOperation(), getLhs(), getRhs(), "Mul");
 }
-
 //===----------------------------------------------------------------------===//
 // PowOp
 //===----------------------------------------------------------------------===//
@@ -572,18 +582,7 @@ void DivOp::inferShapes() {
 }
 
 LogicalResult DivOp::verify() {
-  ShapedType lhsType = mlir::dyn_cast<ShapedType>(getLhs().getType());
-  ShapedType rhsType = mlir::dyn_cast<ShapedType>(getRhs().getType());
-  if (lhsType.getElementType() != rhsType.getElementType()) {
-    return emitError("element types must match.");
-  }
-
-  SmallVector<int64_t> resultShape;
-  if (!OpTrait::util::getBroadcastedShape(lhsType.getShape(),
-                                          rhsType.getShape(), resultShape)) {
-    return emitError("Div operands have incompatible shapes for broadcasting.");
-  }
-  return mlir::success();
+  return verifyBinaryElementwiseOp(getOperation(), getLhs(), getRhs(), "Div");
 }
 
 //===----------------------------------------------------------------------===//
@@ -2292,6 +2291,150 @@ void MatMulOp::build(OpBuilder &builder, OperationState &state, Type outputType,
   state.addTypes(outputType);
 }
 void MatMulOp::inferShapes() { return; }
+
+//===----------------------------------------------------------------------===//
+// RegionOp
+//===----------------------------------------------------------------------===//
+void RegionOp::build(OpBuilder &builder, OperationState &state,
+                     Type scoresType, Type coordinatesType, Type boxesNumberType,
+                     Type validClassesType, Type totalClassType, Value input,
+                     FloatAttr obj_thresh, IntegerAttr max_box_num,
+                     IntegerAttr box_per_grid, IntegerAttr class_num,
+                     IntegerAttr grid_width, IntegerAttr grid_height,
+                     BoolAttr grid_compensate, DenseF64ArrayAttr anchors,
+                     DictionaryAttr dictAttr) {
+  state.addOperands({input});
+  state.addAttribute("obj_thresh", obj_thresh);
+  state.addAttribute("max_box_num", max_box_num);
+  state.addAttribute("box_per_grid", box_per_grid);
+  state.addAttribute("class_num", class_num);
+  state.addAttribute("grid_width", grid_width);
+  state.addAttribute("grid_height", grid_height);
+  state.addAttribute("grid_compensate", grid_compensate);
+  state.addAttribute("anchors", anchors);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes({scoresType, coordinatesType, boxesNumberType,
+                  validClassesType, totalClassType});
+}
+
+LogicalResult RegionOp::verify() {
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  if (!inputType)
+    return success();
+
+  // Input should be 5D: [batch_size, s, s, anchor_num, num_classes + 5]
+  if (inputType.getRank() != 5) {
+    return emitOpError("input must be 5D tensor, got rank ")
+           << inputType.getRank();
+  }
+
+  // Check that the last dimension has at least 6 elements (5 + num_classes)
+  int64_t lastDim = inputType.getDimSize(4);
+  if (!ShapedType::isDynamic(lastDim) && lastDim < 6) {
+    return emitOpError("input last dimension must be >= 6, got ") << lastDim;
+  }
+
+  // Check anchors size is valid (should be 2 * box_per_grid values)
+  int32_t boxPerGrid = getBoxPerGrid();
+  auto anchors = getAnchors();
+  if ((int64_t)anchors.size() != boxPerGrid * 2) {
+    return emitOpError("anchors size must be 2*box_per_grid (")
+           << boxPerGrid * 2 << "), got " << anchors.size();
+  }
+
+  return success();
+}
+void RegionOp::inferShapes() { return; }
+
+//===----------------------------------------------------------------------===//
+// NmsOp
+//===----------------------------------------------------------------------===//
+void NmsOp::build(OpBuilder &builder, OperationState &state,
+                  Type selectedCoordinatesType, Type selectedBoxNumberType,
+                  Type selectedScoreType, Type selectedIndicesType,
+                  Value box_coor, Value box_num_per_class,
+                  Value class_num_per_batch, Value score,
+                  FloatAttr score_threshold, FloatAttr iou_threshold,
+                  IntegerAttr max_output_size, FloatAttr soft_nms_sigma,
+                  BoolAttr center_point_box, StringAttr method,
+                  DictionaryAttr dictAttr) {
+  state.addOperands({box_coor, box_num_per_class, class_num_per_batch, score});
+  state.addAttribute("score_threshold", score_threshold);
+  state.addAttribute("iou_threshold", iou_threshold);
+  state.addAttribute("max_output_size", max_output_size);
+  state.addAttribute("soft_nms_sigma", soft_nms_sigma);
+  state.addAttribute("center_point_box", center_point_box);
+  state.addAttribute("method", method);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes({selectedCoordinatesType, selectedBoxNumberType,
+                  selectedScoreType, selectedIndicesType});
+}
+
+LogicalResult NmsOp::verify() {
+  // box_coor must be 3D with last dim == 4
+  if (auto boxCoorType = dyn_cast<RankedTensorType>(getBoxCoor().getType())) {
+    if (boxCoorType.getRank() != 3) {
+      return emitOpError("box_coor must be 3D, got rank ")
+             << boxCoorType.getRank();
+    }
+    int64_t lastDim = boxCoorType.getDimSize(2);
+    if (!ShapedType::isDynamic(lastDim) && lastDim != 4) {
+      return emitOpError("box_coor last dimension must be 4, got ") << lastDim;
+    }
+  }
+
+  // box_num_per_class / class_num_per_batch / score must all be 2D
+  auto check2D = [&](Value v, StringRef name) -> LogicalResult {
+    if (auto t = dyn_cast<RankedTensorType>(v.getType())) {
+      if (t.getRank() != 2)
+        return emitOpError(name) << " must be 2D, got rank " << t.getRank();
+    }
+    return success();
+  };
+  if (failed(check2D(getBoxNumPerClass(), "box_num_per_class")))
+    return failure();
+  if (failed(check2D(getClassNumPerBatch(), "class_num_per_batch")))
+    return failure();
+  if (failed(check2D(getScore(), "score")))
+    return failure();
+
+  // Batch dims must match across inputs.
+  auto boxCoorType = dyn_cast<RankedTensorType>(getBoxCoor().getType());
+  auto boxNumType = dyn_cast<RankedTensorType>(getBoxNumPerClass().getType());
+  auto classNumType =
+      dyn_cast<RankedTensorType>(getClassNumPerBatch().getType());
+  auto scoreType = dyn_cast<RankedTensorType>(getScore().getType());
+  if (boxCoorType && boxNumType && classNumType && scoreType) {
+    int64_t batch = boxCoorType.getDimSize(0);
+    auto sameBatch = [&](RankedTensorType t) {
+      int64_t b = t.getDimSize(0);
+      return ShapedType::isDynamic(batch) || ShapedType::isDynamic(b) ||
+             b == batch;
+    };
+    if (!sameBatch(boxNumType) || !sameBatch(classNumType) ||
+        !sameBatch(scoreType)) {
+      return emitOpError(
+          "all inputs must have the same batch size (first dimension)");
+    }
+  }
+
+  // method must be HARD or GAUSSIAN
+  auto method = getMethod();
+  if (method != "HARD" && method != "GAUSSIAN") {
+    return emitOpError("method must be 'HARD' or 'GAUSSIAN', got '")
+           << method << "'";
+  }
+
+  return success();
+}
+
+void NmsOp::inferShapes() { return; }
 
 //===----------------------------------------------------------------------===//
 // AIPU Attribute Definitions.
