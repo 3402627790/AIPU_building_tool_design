@@ -2114,6 +2114,136 @@ def MatMulOp : AIPUOp<"MatMul",
     )>
   ];
 }
+
+//===----------------------------------------------------------------------===//
+// Operator: RegionOp
+//===----------------------------------------------------------------------===//
+def RegionOp : AIPUOp<"Region",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Region operator for YOLO object detection post-processing";
+
+  let description = [{
+    Performs region extraction for YOLO object detection models.
+    Decodes raw YOLO outputs to structured detection results including
+    bounding box coordinates, confidence scores, and class information.
+
+    Input shape: [batch_size, s, s, anchor_num, num_classes + 5]
+    Output: scores, coordinates, boxes_number, valid_classes, total_class
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    F32Attr:$obj_thresh,
+    I32Attr:$max_box_num,
+    I32Attr:$box_per_grid,
+    I32Attr:$class_num,
+    I32Attr:$grid_width,
+    I32Attr:$grid_height,
+    BoolAttr:$grid_compensate,
+    DenseF64ArrayAttr:$anchors,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$scores,
+    AIPUGCAnyTensor:$coordinates,
+    AIPUGCAnyTensor:$boxes_number,
+    AIPUGCAnyTensor:$valid_classes,
+    AIPUGCAnyTensor:$total_class
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$scoresType,
+      "::mlir::Type":$coordinatesType,
+      "::mlir::Type":$boxesNumberType,
+      "::mlir::Type":$validClassesType,
+      "::mlir::Type":$totalClassType,
+      "::mlir::Value":$input,
+      "::mlir::FloatAttr":$obj_thresh,
+      "::mlir::IntegerAttr":$max_box_num,
+      "::mlir::IntegerAttr":$box_per_grid,
+      "::mlir::IntegerAttr":$class_num,
+      "::mlir::IntegerAttr":$grid_width,
+      "::mlir::IntegerAttr":$grid_height,
+      "::mlir::BoolAttr":$grid_compensate,
+      "::mlir::DenseF64ArrayAttr":$anchors,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Operator: NmsOp
+//===----------------------------------------------------------------------===//
+def NmsOp : AIPUOp<"NMS",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Non-Maximum Suppression operator";
+
+  let description = [{
+    Performs Non-Maximum Suppression (NMS) for object detection.
+    Selects a subset of bounding boxes based on IoU threshold and score
+    threshold to remove overlapping detections.
+
+    Inputs:
+      - box_coor: 3D tensor of box coordinates, shape [batch, N, 4]
+      - box_num_per_class: 2D tensor, number of boxes per class per batch
+      - class_num_per_batch: 2D tensor, number of classes per batch
+      - score: 2D tensor of scores
+
+    Outputs:
+      - selected_coordinates: selected box coordinates
+      - selected_box_number: selected box count per class
+      - selected_score: selected scores
+      - selected_indices: selected box indices
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$box_coor,
+    AIPUGCAnyTensor:$box_num_per_class,
+    AIPUGCAnyTensor:$class_num_per_batch,
+    AIPUGCAnyTensor:$score,
+    F32Attr:$score_threshold,
+    F32Attr:$iou_threshold,
+    I32Attr:$max_output_size,
+    F32Attr:$soft_nms_sigma,
+    BoolAttr:$center_point_box,
+    StrAttr:$method,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$selected_coordinates,
+    AIPUGCAnyTensor:$selected_box_number,
+    AIPUGCAnyTensor:$selected_score,
+    AIPUGCAnyTensor:$selected_indices
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$selectedCoordinatesType,
+      "::mlir::Type":$selectedBoxNumberType,
+      "::mlir::Type":$selectedScoreType,
+      "::mlir::Type":$selectedIndicesType,
+      "::mlir::Value":$box_coor,
+      "::mlir::Value":$box_num_per_class,
+      "::mlir::Value":$class_num_per_batch,
+      "::mlir::Value":$score,
+      "::mlir::FloatAttr":$score_threshold,
+      "::mlir::FloatAttr":$iou_threshold,
+      "::mlir::IntegerAttr":$max_output_size,
+      "::mlir::FloatAttr":$soft_nms_sigma,
+      "::mlir::BoolAttr":$center_point_box,
+      "::mlir::StringAttr":$method,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------
 
 
