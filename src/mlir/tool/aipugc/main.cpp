@@ -10,6 +10,7 @@
 #include <tools/common_options.h>
 #include <utils/utils.h>
 #include "llvm/Support/FileUtilities.h"
+#include "llvm/Support/raw_ostream.h"
 
 // MLIR core infrastructure
 #include "mlir/Parser/Parser.h"
@@ -47,6 +48,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/SPIRV/Transforms/SPIRVConversion.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "mlir/Conversion/GPUToSPIRV/GPUToSPIRVPass.h"
@@ -174,7 +176,7 @@ int main(int argc, const char **argv) {
     bool isCpuPath = emitAction == Action::DumpCPU;         // CPU Path: Affine -> LLVM
     bool isCudaPath = emitAction == Action::DumpCUDA;       // CUDA Path: Affine -> NVVM -> PTX -> LLVM
     bool isVulkanPath = emitAction == Action::DumpVulkan;   // Vulkan Path: Affine -> GPU -> SPIRV
-    bool isRunJit = emitAction >= Action::RunJIT;
+    // bool isRunJit = emitAction >= Action::RunJIT;
 
     mlir::OpPassManager &optPM = pm.nest<mlir::aipugc::FuncOp>();
     mlir::aipugc::AipuApplyPassPlugin(optPM);
@@ -317,7 +319,10 @@ int main(int argc, const char **argv) {
     }
   }
 
-  module->dump();
+  // Keep terminal output readable by eliding large tensor literals.
+  // module->dump();
+  module->print(llvm::outs(), mlir::OpPrintingFlags().elideLargeElementsAttrs(32));
+  llvm::outs() << "\n";
 
   if (emitAction == Action::DumpLL) {
     dumpLLVMIR(*module, dump);
