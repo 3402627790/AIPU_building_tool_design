@@ -63,6 +63,11 @@ set(CMAKE_PREFIX_PATH  "${PROJECT_SOURCE_DIR}/cmake/")
 list(APPEND CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/cmake/pybind11")
 set(LLVM_TOOLCHAIN_PATH ${LLVM_PATH}/bin CACHE STRING "set the LLVM_TOOLCHAIN_PATH for llvm compiler")
 
+# for internal llvm
+set(INTERNAL_LLVM_DIR "${PROJECT_SOURCE_DIR}/3rdparty/llvm")
+set(LLVM_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/llvm" CACHE PATH "Path to internal LLVM config" FORCE)
+set(MLIR_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/mlir" CACHE PATH "Path to internal MLIR config" FORCE)
+set(Clang_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/clang" CACHE PATH "Path to internal Clang config" FORCE)
 
 # set(pybind11_DIR pybind11)
 

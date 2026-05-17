@@ -42,6 +42,14 @@
 #include <cstdint>
 #include <string>
 
+// C-exported helper so Python (or any dlopen caller) can register the
+// aipugc dialect into a live MLIRContext without needing C++ templates.
+extern "C" __attribute__((visibility("default")))
+void aipugcRegisterDialects(void *rawCtx) {
+  static_cast<mlir::MLIRContext *>(rawCtx)
+      ->getOrLoadDialect<mlir::aipugc::AIPUDialect>();
+}
+
 #define DEBUG_TYPE "dialect"
 
 using namespace mlir;
@@ -135,6 +143,148 @@ void AIPUDialect::printType(mlir::Type type,
     printUniformQuantizedPerAxisType(perAxisType, printer);
   else
     llvm_unreachable("Unhandled quantized type");
+}
+
+/// Parse a type registered to this dialect.
+/// Formats:
+///   !aipugc.quant<i8:f32, 1.000000>
+///   !aipugc.quant<i8:f32, 1.000000:5>
+///   !aipugc.quant_per_axis<i8:f32:1, {1.000000:0,2.000000:0}>
+mlir::Type AIPUDialect::parseType(mlir::DialectAsmParser &parser) const {
+  StringRef mnemonic;
+  if (parser.parseKeyword(&mnemonic))
+    return {};
+
+  auto parseSingleStorageType = [&](bool &isSigned, unsigned &width)
+      -> LogicalResult {
+    StringRef storageStr;
+    if (failed(parser.parseKeyword(&storageStr)))
+      return failure();
+    if (storageStr.starts_with("i")) {
+      isSigned = true;
+    } else if (storageStr.starts_with("u")) {
+      isSigned = false;
+    } else {
+      parser.emitError(parser.getCurrentLocation(),
+                       "expected 'i' or 'u' for storage type");
+      return failure();
+    }
+    if (storageStr.drop_front(1).getAsInteger(10, width))
+      return failure();
+    return success();
+  };
+
+  if (mnemonic == "quant") {
+    // !aipugc.quant<i8:f32, scale[:zeroPoint]>
+    if (parser.parseLess())
+      return {};
+
+    bool isSigned = true;
+    unsigned width = 8;
+    if (failed(parseSingleStorageType(isSigned, width)))
+      return {};
+
+    if (parser.parseColon())
+      return {};
+
+    Type expressedType;
+    if (parser.parseType(expressedType))
+      return {};
+
+    if (parser.parseComma())
+      return {};
+
+    double scale = 0.0;
+    if (parser.parseFloat(scale))
+      return {};
+
+    int64_t zeroPoint = 0;
+    if (succeeded(parser.parseOptionalColon())) {
+      if (parser.parseInteger(zeroPoint))
+        return {};
+    }
+
+    if (parser.parseGreater())
+      return {};
+
+    unsigned flags = isSigned ? QuantizationFlags::Signed : 0;
+    Type storageType = IntegerType::get(getContext(), width);
+    int64_t storageTypeMin =
+        QuantizedType::getDefaultMinimumForInteger(isSigned, width);
+    int64_t storageTypeMax =
+        QuantizedType::getDefaultMaximumForInteger(isSigned, width);
+    return UniformQuantizedType::get(flags, storageType, expressedType, scale,
+                                    zeroPoint, storageTypeMin, storageTypeMax);
+  }
+
+  if (mnemonic == "quant_per_axis") {
+    // !aipugc.quant_per_axis<i8:f32:dim, {s0:z0,s1:z1,...}>
+    if (parser.parseLess())
+      return {};
+
+    bool isSigned = true;
+    unsigned width = 8;
+    if (failed(parseSingleStorageType(isSigned, width)))
+      return {};
+
+    if (parser.parseColon())
+      return {};
+
+    Type expressedType;
+    if (parser.parseType(expressedType))
+      return {};
+
+    if (parser.parseColon())
+      return {};
+
+    int32_t quantizedDimension = 0;
+    if (parser.parseInteger(quantizedDimension))
+      return {};
+
+    if (parser.parseComma())
+      return {};
+
+    SmallVector<double> scales;
+    SmallVector<int64_t> zeroPoints;
+
+    if (parser.parseLBrace())
+      return {};
+
+    auto parseOneParam = [&]() -> ParseResult {
+      double s = 0.0;
+      if (parser.parseFloat(s))
+        return failure();
+      int64_t z = 0;
+      if (succeeded(parser.parseOptionalColon())) {
+        if (parser.parseInteger(z))
+          return failure();
+      }
+      scales.push_back(s);
+      zeroPoints.push_back(z);
+      return success();
+    };
+
+    if (parser.parseCommaSeparatedList(parseOneParam))
+      return {};
+
+    if (parser.parseRBrace() || parser.parseGreater())
+      return {};
+
+    unsigned flags = isSigned ? QuantizationFlags::Signed : 0;
+    Type storageType = IntegerType::get(getContext(), width);
+    int64_t storageTypeMin =
+        QuantizedType::getDefaultMinimumForInteger(isSigned, width);
+    int64_t storageTypeMax =
+        QuantizedType::getDefaultMaximumForInteger(isSigned, width);
+    return UniformQuantizedPerAxisType::get(flags, storageType, expressedType,
+                                           scales, zeroPoints,
+                                           quantizedDimension, storageTypeMin,
+                                           storageTypeMax);
+  }
+
+  parser.emitError(parser.getCurrentLocation(),
+                   "unknown aipugc type: " + mnemonic);
+  return {};
 }
 
 /// Dialect initialization, the instance will be owned by the context. This is

@@ -169,6 +169,9 @@ struct FuseFcBnPass
     : public PassWrapper<FuseFcBnPass, OperationPass<aipugc::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FuseFcBnPass);
 
+  StringRef getArgument() const final { return "fuse-fc-bn"; }
+  StringRef getDescription() const final { return "Fuse FullyConnected and BatchNorm"; }
+
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseFullyConnectedBatchNorm>(&getContext());
@@ -179,5 +182,7 @@ struct FuseFcBnPass
     }
   }
 };
+
+static mlir::PassRegistration<FuseFcBnPass> passRegFcBn;
 
 REGISTER_PASS_PLUGIN(FuseFcBnPass)

@@ -124,6 +124,9 @@ struct FuseMulAddToBatchNormPass
                          OperationPass<aipugc::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_FALLBACK_TYPE_ID(FuseMulAddToBatchNormPass)
 
+  StringRef getArgument() const final { return "fuse-mul-add-to-batchnorm"; }
+  StringRef getDescription() const final { return "Fuse Mul and Add to BatchNorm"; }
+
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<FuseMulAddToBatchNorm>(&getContext());
@@ -136,5 +139,7 @@ struct FuseMulAddToBatchNormPass
 };
 
 } // namespace
+
+static mlir::PassRegistration<FuseMulAddToBatchNormPass> passReg;
 
 REGISTER_PASS_PLUGIN(FuseMulAddToBatchNormPass)

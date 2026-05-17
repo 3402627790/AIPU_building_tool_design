@@ -27,6 +27,7 @@ def AIPUDialect : Dialect {
     // Register the builtin Attributes.
     //void registerAttributes();
   public:
+    mlir::Type parseType(mlir::DialectAsmParser &parser) const override;
     void printType(mlir::Type ty, mlir::DialectAsmPrinter &p) const override;
   }];
 }
