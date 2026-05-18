@@ -63,16 +63,11 @@ set(CMAKE_PREFIX_PATH  "${PROJECT_SOURCE_DIR}/cmake/")
 list(APPEND CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/cmake/pybind11")
 set(LLVM_TOOLCHAIN_PATH ${LLVM_PATH}/bin CACHE STRING "set the LLVM_TOOLCHAIN_PATH for llvm compiler")
 
-# for internal llvm
-set(INTERNAL_LLVM_DIR "${PROJECT_SOURCE_DIR}/3rdparty/llvm")
-set(LLVM_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/llvm" CACHE PATH "Path to internal LLVM config" FORCE)
-set(MLIR_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/mlir" CACHE PATH "Path to internal MLIR config" FORCE)
-set(Clang_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/clang" CACHE PATH "Path to internal Clang config" FORCE)
 
 # set(pybind11_DIR pybind11)
 
 
-
+message(STATUS "CMAKE_SYSTEM_NAME is: ${CMAKE_SYSTEM_NAME}")
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     set(OS_LINUX 1)
     EXECUTE_PROCESS( COMMAND uname -o COMMAND tr -d '\n' OUTPUT_VARIABLE OPERATING_SYSTEM)
@@ -109,7 +104,7 @@ endif()
 message("using layerlib path as ${LAYERLIB_PATH}")
 message("using plugin path as ${PLUGIN_PATH}")
 message("using aipu llvm toolchain as ${LLVM_PATH}")
-set(PYTHON_EXE "/arm/tools/python/python/3.10.12/rhe7-x86_64/bin/python3"  CACHE STRING "set the python interpreter for build")
+set(PYTHON_EXE "/arm/tools/python/python/3.12.8/rhe7-x86_64/bin/python3"  CACHE STRING "set the python interpreter for build")
 # set(PYTHON_EXE "/arm/tools/python/python/3.11.0/rhe7-x86_64/bin/python3"  CACHE STRING "set the python interpreter for build")
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -119,6 +114,14 @@ endif()
 if(NOT DEFINED CMAKE_STRIP)
 find_program(CMAKE_STRIP strip)
 message("using strip tool ${CMAKE_STRIP}")
+endif()
+
+find_package(Threads REQUIRED)
+if(USE_OMP)
+  find_package(OpenMP REQUIRED)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
 endif()
 
 
@@ -132,3 +135,4 @@ add_subdirectory(doc)
 if(WITH_TEST)
     add_subdirectory(test)
 endif()
+

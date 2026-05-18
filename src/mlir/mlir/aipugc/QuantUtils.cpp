@@ -423,7 +423,7 @@ void printStorageType(QuantizedType type, DialectAsmPrinter &printer) {
 /// Helper that prints a UniformQuantizedType.
 void printUniformQuantizedType(UniformQuantizedType type,
                                DialectAsmPrinter &printer) {
-  printer << "quant<";
+  printer << "quant_per_axis<";
   printStorageType(type, printer);
   printer << ":" << type.getExpressedType() << ", ";
 

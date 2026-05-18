@@ -1,7 +1,5 @@
-cmake_minimum_required(VERSION 3.29)
+cmake_minimum_required(VERSION 3.24)
 project("AIPUMLIR")
-
-
 set(AIPUBuildPath /project/ai/scratch01/AIPUBuilder)
 
 message(${CMAKE_CURRENT_BINARY_DIR})
@@ -16,13 +14,14 @@ set(LLVM_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/llvm" CACHE PATH "Path to internal 
 
 find_package(MLIR REQUIRED CONFIG)
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 
 find_library(AIPUBT_LIB
   NAMES aipubuildtool
   PATHS ${AIPUBuildPath}/lib
   REQUIRED
 )
-list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+
 include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
@@ -76,7 +75,6 @@ add_subdirectory(tool/aipugc)
 add_custom_target(libexternalPassLink ALL)
 add_custom_command(
   TARGET   libexternalPassLink
-  COMMAND rm -rf  ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
-  COMMAND  mkdir -p ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
-  COMMAND  ln -s ${AIPUGC_ROOT_BIN_DIR}/externalPass/libexternalPass.so ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin;
+  COMMAND  ln -sf ${AIPUGC_ROOT_BIN_DIR}/externalPass/libexternalPass.so ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
+  COMMAND  ln -sf ${AIPUGC_ROOT_BIN_DIR}/libAIPUMLIR.so ${AIPUGC_ROOT_BIN_DIR}/../../../python/src/AIPUBuilder/_C/
 )
