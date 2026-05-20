@@ -133,9 +133,9 @@ install(TARGETS aipubuildtool
         )
 install(DIRECTORY "${ROOT_DIR}/include/" TYPE INCLUDE)
 
-if (NOT OS_ANDROID)
+if (CPU_x86_64)
   message("Building mlir for Host...")
   add_subdirectory(mlir)
 else()
-  message("Skip building mlir for Android Target")
+  message("Skip building mlir for non-x86_64 Target")
 endif()

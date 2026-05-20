@@ -84,6 +84,24 @@ public:
   ~MLIRGenQuantize() {}
 };
 
+class MLIRGenFloor : public MLIRGenUnary<FloorOp> {
+public:
+  using MLIRGenUnary::MLIRGenUnary;
+  ~MLIRGenFloor() {}
+};
+
+class MLIRGenCeil : public MLIRGenUnary<CeilOp> {
+public:
+  using MLIRGenUnary::MLIRGenUnary;
+  ~MLIRGenCeil() {}
+};
+
+class MLIRGenReciprocal : public MLIRGenUnary<ReciprocalOp> {
+public:
+  using MLIRGenUnary::MLIRGenUnary;
+  ~MLIRGenReciprocal() {}
+};
+
 // REGISTER_MLIRGEN(Reshape);
 REGISTER_MLIRGEN(Abs);
 REGISTER_MLIRGEN(Negative);
@@ -94,6 +112,9 @@ REGISTER_MLIRGEN(Exp);
 REGISTER_MLIRGEN(Log);
 REGISTER_MLIRGEN(Square);
 REGISTER_MLIRGEN(Quantize);
+REGISTER_MLIRGEN(Floor);
+REGISTER_MLIRGEN(Ceil);
+REGISTER_MLIRGEN(Reciprocal);
 
 } // namespace aipugc
 } // namespace mlir

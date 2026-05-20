@@ -1657,6 +1657,46 @@ def PadOp : AIPUOp<"Pad",
   let hasVerifier = 1;
 }
 //===----------------------------------------------------------------------===//
+// Operator: Clip
+//===----------------------------------------------------------------------===//
+def ClipOp : AIPUOp<"Clip",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Clips tensor values element-wise to a specified [min, max] range";
+
+  let description = [{
+    Limits the values in the input tensor to the range [min_val, max_val].
+    Equivalent to: output = max(min_val, min(max_val, input)).
+    Widely used for activation clamping (e.g. RELU6 = Clip(0, 6)).
+
+    Example:
+      input = [-2.0, 0.5, 3.0, 7.0], min_val = 0.0, max_val = 6.0
+      output = [0.0, 0.5, 3.0, 6.0]
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    F32Attr:$min_val,
+    F32Attr:$max_val,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::FloatAttr":$min_val,
+      "::mlir::FloatAttr":$max_val,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+//===----------------------------------------------------------------------===//
 // Operator: Resize
 //===----------------------------------------------------------------------===//
 def ResizeOp : AIPUOp<"Resize",
@@ -2244,8 +2284,140 @@ def NmsOp : AIPUOp<"NMS",
   let hasVerifier = 1;
 }
 
-//===----------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
+// Operator: Floor
+//===----------------------------------------------------------------------===//
+def FloorOp : AIPUOp<"Floor",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Computes element-wise floor of the input tensor";
 
+  let description = [{
+    Returns a tensor with element-wise floor applied: output[i] = floor(input[i]).
+    Used in quantization pipelines after Clip to round toward negative infinity.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Operator: Ceil
+//===----------------------------------------------------------------------===//
+def CeilOp : AIPUOp<"Ceil",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Computes element-wise ceiling of the input tensor";
+
+  let description = [{
+    Returns a tensor with element-wise ceil applied: output[i] = ceil(input[i]).
+    Used in quantization and shape computation pipelines.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Operator: Reciprocal
+//===----------------------------------------------------------------------===//
+def ReciprocalOp : AIPUOp<"Reciprocal",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Computes element-wise reciprocal: output = 1 / input";
+
+  let description = [{
+    Returns a tensor where each element is the reciprocal of the corresponding
+    input element: output[i] = 1.0 / input[i].
+    Commonly used in Softmax and normalization layers.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Operator: Where
+//===----------------------------------------------------------------------===//
+def WhereOp : AIPUOp<"Where",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Element-wise conditional selection between two tensors";
+
+  let description = [{
+    Selects elements from `x` or `y` depending on `condition`:
+      output[i] = condition[i] ? x[i] : y[i]
+    Shapes of condition, x, y must be broadcastable.
+    Used in masking, Clip decomposition, and conditional logic.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$condition,
+    AIPUGCAnyTensor:$x,
+    AIPUGCAnyTensor:$y,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$condition,
+      "::mlir::Value":$x,
+      "::mlir::Value":$y,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
 
 //===----------------------------------------------------------------------===//
 #endif // AIPUGC_OPS

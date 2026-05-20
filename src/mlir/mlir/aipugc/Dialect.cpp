@@ -535,7 +535,6 @@ void SquareOp::inferShapes() {
   auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
   getResult().setType(inputType);
 }
-
 // Common verifier function for binary element-wise ops (Add/Sub/Mul/Div)
 namespace {
   static LogicalResult verifyBinaryElementwiseOp(Operation* op, Value lhs, 
@@ -2077,6 +2076,138 @@ LogicalResult PadOp::verify() {
   }
 
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ClipOp
+//===----------------------------------------------------------------------===//
+void ClipOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                   Value input, FloatAttr min_val, FloatAttr max_val,
+                   DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  state.addAttribute("min_val", min_val);
+  state.addAttribute("max_val", max_val);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult ClipOp::verify() {
+  auto inputType = getInput().getType();
+  if (!mlir::isa<RankedTensorType>(inputType)) {
+    return emitOpError("expected ranked tensor type for input");
+  }
+  if (getMinVal().convertToDouble() > getMaxVal().convertToDouble()) {
+    return emitOpError("requires min_val <= max_val");
+  }
+  return success();
+}
+
+void ClipOp::inferShapes() {
+  auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
+  getResult().setType(inputType);
+}
+//===----------------------------------------------------------------------===//
+// FloorOp
+//===----------------------------------------------------------------------===//
+void FloorOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                    Value input, DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult FloorOp::verify() {
+  if (!mlir::isa<RankedTensorType>(getInput().getType()))
+    return emitOpError("expected ranked tensor type for input");
+  return success();
+}
+
+void FloorOp::inferShapes() {
+  auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
+  getResult().setType(inputType);
+}
+//===----------------------------------------------------------------------===//
+// CeilOp
+//===----------------------------------------------------------------------===//
+void CeilOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                   Value input, DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult CeilOp::verify() {
+  if (!mlir::isa<RankedTensorType>(getInput().getType()))
+    return emitOpError("expected ranked tensor type for input");
+  return success();
+}
+
+void CeilOp::inferShapes() {
+  auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
+  getResult().setType(inputType);
+}
+//===----------------------------------------------------------------------===//
+// ReciprocalOp
+//===----------------------------------------------------------------------===//
+void ReciprocalOp::build(OpBuilder &builder, OperationState &state,
+                         Type outputType, Value input,
+                         DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult ReciprocalOp::verify() {
+  if (!mlir::isa<RankedTensorType>(getInput().getType()))
+    return emitOpError("expected ranked tensor type for input");
+  return success();
+}
+
+void ReciprocalOp::inferShapes() {
+  auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
+  getResult().setType(inputType);
+}
+//===----------------------------------------------------------------------===//
+// WhereOp
+//===----------------------------------------------------------------------===//
+void WhereOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                    Value condition, Value x, Value y,
+                    DictionaryAttr dictAttr) {
+  state.addOperands(condition);
+  state.addOperands(x);
+  state.addOperands(y);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult WhereOp::verify() {
+  if (!mlir::isa<RankedTensorType>(getCondition().getType()))
+    return emitOpError("expected ranked tensor type for condition");
+  if (!mlir::isa<RankedTensorType>(getX().getType()))
+    return emitOpError("expected ranked tensor type for x");
+  if (!mlir::isa<RankedTensorType>(getY().getType()))
+    return emitOpError("expected ranked tensor type for y");
+  return success();
+}
+
+void WhereOp::inferShapes() {
+  auto xType = mlir::cast<RankedTensorType>(getX().getType());
+  getResult().setType(xType);
 }
 //===----------------------------------------------------------------------===//
 // ResizeOp
