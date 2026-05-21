@@ -1,0 +1,395 @@
+from ..engine import register_gt
+from AIPUBuilder.core import OpType, Dtype
+from AIPUBuilder.logger import ERROR, INFO
+import numpy as np
+import torch
+from .gt_util import clip_to_bit
+from .gt_util.aiff import _aiff_inner_activation, _aiff_final_output
+from .gt_util.quant_utils import clamp, fp_activation, to_fp24, linear_dequantize
+from .gt_util import check_in_datalayout, check_out_datalayout
+from AIPUBuilder.core import Target
+
+
+def div(input_1, input_2, lut):
+    input_2_sign = torch.sign(input_2)
+    input2_abs = torch.clip(torch.abs(input_2), 0, 255)
+    input2_lut = lut.numpy()[input2_abs.numpy()]
+    outputs = input_1 * input2_lut * input_2_sign
+    return outputs
+
+
+elwise_dict = {
+    'ADD': lambda x, y: (x + y),
+    'SUB': lambda x, y: (x - y),
+    'MAX': lambda x, y: torch.where(x > y, x, y),
+    'MIN': lambda x, y: torch.where(x < y, x, y),
+    'MUL': lambda x, y: x * y,
+    'DIV': lambda x, y, lut: div(x, y, lut)
+}
+
+
+@register_gt(OpType.Eltwise)
+# @check_datalayout
+def eltwise(self, *args, **kwargs):
+    self.sgattrs = kwargs['sgattrs'] if 'sgattrs' in kwargs else None
+    if self.sgattrs is None:
+        self.sgattrs = dict()
+    is_fuse = kwargs['fuse'] if 'fuse' in kwargs else False
+
+    sim_x3_itp = self.attrs.get('sim_x3_itp', '')
+    fp_bits = self.attrs.get('sim_x3_itp_fp_bits', 24)
+    if 'sim_x3_itp_fp_bits' not in self.attrs:
+        print(f"sim_x3_itp_fp_bits not in {self}")
+    if 'sim_x3_itp' not in self.attrs:
+        print(f"sim_x3_itp not in {self}")
+    if self.inputs[0].dtype.is_float:
+        return fp_eltwise(self, is_fuse=is_fuse)
+    elif sim_x3_itp == 'qdqs':
+        from .gt_util.quant_utils import dequantize_with_scale_approx_method, quantize_with_scale_approx_method
+        bk_inp0 = self.inputs[0].betensor.clone()
+        bk_inp1 = self.inputs[1].betensor.clone()
+        for i, inp in enumerate(self.inputs):
+            if 'fused' in inp._attrs and inp._attrs['fused']:
+                # INFO(f"{inp} has fused edge in eltwise")
+                pass
+            else:
+                un_fused_inp_scale = torch.tensor(inp.quantization.scales, device=self.outputs[0].betensor.device).half().float()
+                un_fused_inp_zp = torch.tensor(inp.quantization.offsets, device=self.outputs[0].betensor.device).float()
+                un_fused_inp_scale_fp24 = to_fp24(un_fused_inp_scale, fp_bits)
+                un_fused_inp_zp_fp24 = to_fp24(un_fused_inp_zp, fp_bits)
+
+                # whether inp.betensor needs to to_fp24(inp.betensor)
+                inp_fp24 = to_fp24(inp.betensor.float(), fp_bits)
+                dequantize_un_fused_inp = dequantize_with_scale_approx_method(inp_fp24, un_fused_inp_scale_fp24)
+                dequantize_un_fused_inp_fp24 = to_fp24(dequantize_un_fused_inp, fp_bits)
+                self.inputs[i].betensor = dequantize_un_fused_inp_fp24
+        deq_out = fp_eltwise(self, is_fuse=True)
+        deq_out_fp24 = to_fp24(deq_out, fp_bits)
+
+        out_scale = torch.tensor(self.outputs[0].quantization.scales, device=self.outputs[0].betensor.device).half().float()
+        out_zp = torch.tensor(self.outputs[0].quantization.offsets, device=self.outputs[0].betensor.device).float()
+        out_scale_fp24 = to_fp24(out_scale, fp_bits)
+        out_zp_fp24 = to_fp24(out_zp, fp_bits)
+
+        outputs = (to_fp24(quantize_with_scale_approx_method(deq_out_fp24, out_scale_fp24), fp_bits) - out_zp).round()
+        outputs = clamp(outputs, self.outputs[0].dtype)
+        outputs = check_out_datalayout(self, [outputs], ['NHWC'])[0]
+        self.outputs[0].betensor = outputs
+
+        self.inputs[0].betensor = bk_inp0
+        self.inputs[1].betensor = bk_inp1
+
+        return outputs
+    elif sim_x3_itp == 'qdq':
+        bk_inp0 = self.inputs[0].betensor.clone()
+        bk_inp1 = self.inputs[1].betensor.clone()
+        for i, inp in enumerate(self.inputs):
+            if 'fused' in inp._attrs and inp._attrs['fused']:
+                INFO(f"{inp} has fused edge in eltwise")
+                pass
+            else:
+                un_fused_inp_scale = torch.tensor(inp.quantization.scales, device=self.outputs[0].betensor.device).float()
+                un_fused_inp_zp = torch.tensor(inp.quantization.offsets, device=self.outputs[0].betensor.device).float()
+                un_fused_inp_scale_fp24 = to_fp24(1. / un_fused_inp_scale, fp_bits)
+                un_fused_inp_zp_fp24 = to_fp24(un_fused_inp_zp, fp_bits)
+
+                # whether inp.betensor needs to to_fp24(inp.betensor)
+                inp_fp24 = to_fp24(inp.betensor.float(), fp_bits)
+                dequantize_un_fused_inp = to_fp24(((inp_fp24 + un_fused_inp_zp_fp24) * un_fused_inp_scale_fp24).float(), fp_bits)
+                self.inputs[i].betensor = dequantize_un_fused_inp
+        deq_out = fp_eltwise(self, is_fuse=True)
+        deq_out_fp24 = to_fp24(deq_out, fp_bits)
+
+        out_scale = torch.tensor(self.outputs[0].quantization.scales, device=self.outputs[0].betensor.device).float()
+        out_zp = torch.tensor(self.outputs[0].quantization.offsets, device=self.outputs[0].betensor.device).float()
+        out_scale_fp24 = to_fp24(out_scale, fp_bits)
+        out_zp_fp24 = to_fp24(out_zp, fp_bits)
+
+        outputs = (to_fp24(deq_out_fp24 * out_scale_fp24, fp_bits) - out_zp_fp24).round()
+        outputs = clamp(outputs, self.outputs[0].dtype)
+        outputs = check_out_datalayout(self, [outputs], ['NHWC'])[0]
+        self.outputs[0].betensor = outputs
+
+        self.inputs[0].betensor = bk_inp0
+        self.inputs[1].betensor = bk_inp1
+
+        return outputs
+    elif sim_x3_itp == 'cast':
+        bk_inp0 = self.inputs[0].betensor.clone()
+        bk_inp1 = self.inputs[1].betensor.clone()
+        inp0 = self.inputs[0].betensor
+        inp1 = self.inputs[1].betensor
+        inp0 = to_fp24(inp0.float(), fp_bits)
+        inp1 = to_fp24(inp1.float(), fp_bits)
+        if len(self.inputs) == 3:  # gemm op
+            inp2 = self.inputs[2].betensor.long()
+            inp0, inp1, _ = check_in_datalayout(self, [inp0, inp1, inp2], ['NHWC', 'NHWC', 'NHWC'])
+        else:
+            inp0, inp1 = check_in_datalayout(self, [inp0, inp1], ['NHWC', 'NHWC'])
+        inp_zp0 = to_fp24(torch.tensor(self.inputs[0].quantization.offsets, device=self.outputs[0].betensor.device).float(), fp_bits)
+        inp0 = to_fp24(inp0 + inp_zp0, fp_bits)
+        inp_zp1 = to_fp24(torch.tensor(self.inputs[1].quantization.offsets, device=self.outputs[0].betensor.device).float(), fp_bits)
+        inp1 = to_fp24(inp1 + inp_zp1, fp_bits)
+
+        shift = self.params['shift_value']
+        method = self.params["method"]
+        if method in ['ADD', 'MAX', 'MIN', 'SUB']:
+            scale_o = self.params["scale_value"][0]
+            scale_i0 = self.params["scale_value"][1]
+            scale_i1 = self.params["scale_value"][2]
+            inp0 = torch.clip(inp0 * scale_i0, np.iinfo(np.int32).min, np.iinfo(np.int32).max)
+            inp1 = torch.clip(inp1 * scale_i1, np.iinfo(np.int32).min, np.iinfo(np.int32).max)
+            inp0 = to_fp24(inp0.float(), fp_bits)
+            inp1 = to_fp24(inp1.float(), fp_bits)
+        elif self.params["method"] in ['MUL', 'DIV']:
+            scale_o = self.params["scale_value"]
+
+        if method == 'DIV':
+            params = [inp0, inp1, self.constants['lut'].betensor]
+        else:
+            params = [inp0, inp1]
+        outputs = elwise_dict[self.params['method']](*params)
+        outputs = to_fp24(outputs.float(), fp_bits)
+        del inp0, inp1, params
+        with_activation = self.params.get('with_activatoin', 'NONE')
+        if with_activation in ['NONE', 'RELU']:
+            if with_activation == 'RELU':
+                outputs = torch.nn.functional.relu(outputs)
+        else:
+            ERROR(f"now not support with_activation = {with_activation} in conv")
+        out_zp = torch.tensor(self.outputs[0].quantization.offsets, device=self.outputs[0].betensor.device).float()
+        out_zp_fp24 = to_fp24(out_zp, fp_bits)
+        # ts = to_fp24(scale_o * 0.5 ** shift)
+        # outputs = torch.round(to_fp24(outputs * ts) - out_zp_fp24)
+
+        # outputs = torch.round(to_fp24(outputs * scale_o) * (0.5 ** shift) - out_zp_fp24)
+        # outputs = to_fp24(outputs.float())
+        # outputs = clamp(outputs, self.outputs[0].dtype)
+        # outputs = check_out_datalayout(self, [outputs], ['NHWC'])[0]
+        # self.outputs[0].betensor = outputs
+
+        outputs, final_scale, final_shift = _aiff_inner_activation(self, outputs, scale_o, shift)
+        outputs = _aiff_final_output(self, outputs, final_scale, final_shift)
+        outputs = clamp(outputs, self.outputs[0].dtype)
+        outputs = check_out_datalayout(self, [outputs], ['NHWC'])[0]
+        self.outputs[0].betensor = outputs
+
+        self.inputs[0].betensor = bk_inp0
+        self.inputs[1].betensor = bk_inp1
+
+        return outputs
+    else:
+        is_aiff = True
+        if 'is_aiff' in kwargs.keys():
+            is_aiff = kwargs['is_aiff']
+        if is_aiff:
+            return aiff_eltwise(self, *args, **kwargs)
+        else:
+            return tpc_eltwise(self, *args, **kwargs)
+
+
+def aiff_eltwise(self, *args, **kwargs):
+    method = self.params["method"]
+    inp0 = self.inputs[0].betensor.long()
+    inp1 = self.inputs[1].betensor.long()
+    if len(self.inputs) == 3:  # gemm op
+        inp2 = self.inputs[2].betensor.long()
+        inp0, inp1, _ = check_in_datalayout(self, [inp0, inp1, inp2], ['NHWC', 'NHWC', 'NHWC'])
+    else:
+        temp_layout_i = "NHWC"
+        i_data_layout = [i.shape.layout.name.upper() for i in self.inputs]
+        if set(i_data_layout).intersection(set(["NDCHWC32", "NDCHWC32T8", "NDCHWC16", "NDCHWC16T8", "NDCHWC32T1", "NDCHWC16T1"])):
+            temp_layout_i = "NDHWC"
+        elif set(i_data_layout).intersection(set(["NCHWC32", "NCHWC32T8", "NCHWC16", "NCHWC16T8", "NCHWC32T1", "NCHWC16T1"])):
+            temp_layout_i = "NHWC"
+        inp0, inp1 = check_in_datalayout(self, [inp0, inp1], [temp_layout_i, temp_layout_i])
+    inp0 = inp0 + self.inputs[0].quantization.offset
+    inp1 = inp1 + self.inputs[1].quantization.offset
+
+    shift = self.params['shift_value']
+    if method in ['ADD', 'MAX', 'MIN', 'SUB']:
+        scale_o = self.params["scale_value"][0]
+        scale_i0 = self.params["scale_value"][1]
+        scale_i1 = self.params["scale_value"][2]
+        inp0 = torch.clip(inp0 * scale_i0, np.iinfo(np.int32).min, np.iinfo(np.int32).max)
+        inp1 = torch.clip(inp1 * scale_i1, np.iinfo(np.int32).min, np.iinfo(np.int32).max)
+    elif self.params["method"] in ['MUL', 'DIV']:
+        scale_o = self.params["scale_value"]
+
+    if method == 'DIV':
+        params = [inp0, inp1, self.constants['lut'].betensor]
+    else:
+        params = [inp0, inp1]
+    outputs = elwise_dict[self.params['method']](*params)
+    del inp0, inp1, params
+    outputs = clip_to_bit(outputs, 32)
+    outputs, final_scale, final_shift = _aiff_inner_activation(self, outputs, scale_o, shift)
+    # final doquant and -zp
+    outputs = _aiff_final_output(self, outputs, final_scale, final_shift)
+    outputs = clamp(outputs, self.outputs[0].dtype)
+    temp_layout_o = "NHWC" if len(self.inputs) == 3 else temp_layout_i
+    outputs = check_out_datalayout(self, [outputs], [temp_layout_o])[0]
+    self.outputs[0].betensor = outputs
+    return outputs
+
+
+def tpc_eltwise(self, *args, **kwargs):
+    method = self.params["method"]
+    if method in ['ADD', 'MAX', 'MIN', 'SUB']:
+        scale_o = self.params["scale_value"][0]
+        scale_i0 = self.params["scale_value"][1]
+        scale_i1 = self.params["scale_value"][2]
+    elif self.params["method"] in ['MUL', 'DIV']:
+        scale_o = self.params["scale_value"]
+    with_activation = self.params["with_activation"]
+    shift = self.params['shift_value']
+
+    if self.inputs[0].dtype in [Dtype.INT8, Dtype.UINT8]:
+
+        method = self.params["method"]
+        inp0 = self.inputs[0].betensor.long()
+        inp1 = self.inputs[1].betensor.long()
+        inp0 = inp0 + self.inputs[0].quantization.offset
+        inp1 = inp1 + self.inputs[1].quantization.offset
+        inp0 = torch.round(inp0 * 0.5)
+        inp1 = torch.round(inp1 * 0.5)
+        shift -= 1
+        if method in ['ADD', 'MAX', 'MIN', 'SUB']:
+            inp0 = torch.clip(inp0 * scale_i0, np.iinfo(np.int32).min, np.iinfo(np.int32).max)
+            inp1 = torch.clip(inp1 * scale_i1, np.iinfo(np.int32).min, np.iinfo(np.int32).max)
+        if method == 'DIV':
+            params = [inp0, inp1, self.constants['lut'].betensor]
+        else:
+            params = [inp0, inp1]
+        outputs = elwise_dict[self.params['method']](*params)
+        outputs = clip_to_bit(outputs, 32)
+        outputs, final_scale, final_shift = _aiff_inner_activation(self, outputs, scale_o, shift)
+        # final doquant and -zp
+        outputs = _aiff_final_output(self, outputs, final_scale, final_shift)
+        outputs = clamp(outputs, self.outputs[0].dtype)
+        self.outputs[0].betensor = outputs
+        return outputs
+    elif self.inputs[0].dtype in [Dtype.INT16, Dtype.UINT16]:
+        input_1 = self.inputs[0].betensor.long()
+        input_2 = self.inputs[1].betensor.long()
+        if scale_o >= 2 ** 8 or with_activation == 'PRELU':  # Judge whether is 16bit output scale or not.
+            # Determine data type range consider signed or not, the sub result must be signed, therefore use i32
+            if self.inputs[0].dtype.is_signed or self.inputs[0].dtype.is_signed or method.upper() == 'SUB':
+                max_16bit = np.iinfo(np.int16).max
+                min_16bit = np.iinfo(np.int16).min
+                max_32bit = np.iinfo(np.int32).max
+                min_32bit = np.iinfo(np.int32).min
+                np_16bit = np.int16
+                np_32bit = np.int32
+            else:
+                max_16bit = np.iinfo(np.uint16).max
+                min_16bit = np.iinfo(np.uint16).min
+                max_32bit = np.iinfo(np.uint32).max
+                min_32bit = np.iinfo(np.uint32).min
+                np_16bit = np.uint16
+                np_32bit = np.uint32
+
+            if method.upper() in ['ADD', 'SUB', 'MAX', 'MIN']:
+                out1 = input_1 * scale_i0
+                out2 = input_2 * scale_i1
+                if method.upper() == 'ADD':
+                    outputs = out1 + out2
+                elif method.upper() == 'SUB':
+                    outputs = out1 - out2
+                elif method.upper() == 'MAX':
+                    outputs = torch.where(out1 > out2, out1, out2)
+                elif method.upper() == 'MIN':
+                    outputs = torch.where(out1 < out2, out1, out2)
+            elif method.upper() == 'MUL':
+                if (not self.inputs[0].dtype.is_signed) and self.inputs[1].is_signed:
+                    input_1, input_2 = input_2, input_1
+                outputs = input_1 * input_2
+            else:
+                raise TypeError('do not support method = %s' % method)
+            added = outputs.cpu().numpy()
+            added = np.clip(outputs, min_32bit, max_32bit)
+            # 2.1 high 16bits of `added` * os
+            hi = np_32bit(np.clip(np_16bit(np.floor(added * (0.5 ** 16))), min_16bit, max_16bit)) * scale_o
+            # 2.2 low 16bits of `added` * os, then shift 16(same scale with high bits before merged sum)
+            lo = np.uint32(np.round((added & 0x0000ffff) * scale_o * (0.5 ** 16)))
+            # 3. final shift
+            # note: 0.5 ** 0 == 1
+            hi_and_lo = hi + lo
+            shifted_hi_and_lo = np.round(hi_and_lo * (0.5 ** (shift - 16)))
+            outputs = np.clip(shifted_hi_and_lo, min_16bit, max_16bit).astype(np_16bit)
+            outputs = torch.from_numpy(outputs)
+        else:  # scale_o <= 255
+            if method.upper() in ['ADD', 'SUB', 'MAX', 'MIN']:
+                output1 = torch.round(input_1 * scale_o * 0.5 ** 8)
+                output2 = torch.round(input_2 * scale_o * 0.5 ** 8)
+                output1 *= scale_i0
+                output2 *= scale_i1
+                if method.upper() == 'ADD':
+                    outputs = output1 + output2
+                elif method.upper() == 'SUB':
+                    outputs = output1 - output2
+                elif method.upper() == 'MAX':
+                    outputs = torch.where(output1 > output2, output1, output2)
+                elif method.upper() == 'MIN':
+                    outputs = torch.where(output1 < output2, output1, output2)
+            elif method.upper() == 'MUL':
+                if (not self.inputs[0].dtype.is_signed) and self.inputs[1].is_signed:
+                    input_1, input_2 = input_2, input_1
+                outputs = input_1 * scale_o
+                outputs = torch.round(outputs * (0.5 ** 8))
+                outputs = outputs * input_2
+            else:
+                raise TypeError('do not support method = %s' % method)
+            outputs = torch.round(outputs * (0.5 ** (shift - 8)))
+
+        # Clamp before activation
+        outputs = torch.clip(torch.round(outputs), np.iinfo(np.int32).min, np.iinfo(np.int32).max)
+        outputs = outputs.to(torch.int32)
+
+        # Activation: clip/leakyrelu/relu/prelu
+        if with_activation == 'CLIP':
+            outputs = torch.clip(outputs, self.params["clip_min"], self.params["clip_max"])
+        elif with_activation == "LEAKRELU":
+            if self.outputs[0].dtype.bits == 8 and self.inputs[0].dtype.bits == 16:
+                pass
+            else:
+                outputs = torch.clip(outputs, np.iinfo(self.output_type).min,
+                                     np.iinfo(self.output_type).max).to(torch.long)
+            outputs[outputs < 0] = torch.round(outputs[outputs < 0] * self.params["negative_slope_value"] * 0.5 ** 8)
+        elif with_activation == 'RELU':
+            outputs[outputs < 0] = 0
+        elif with_activation == 'PRELU':
+            # PReLU / per channel
+            for i in range(0, outputs.shape[-1]):
+                outputs_c = outputs[..., i]
+                outputs_c[outputs_c < 0] = np.round(
+                    outputs_c[outputs_c < 0] * self.negative_slope[i] * (0.5 ** self.negative_slope_shift))
+            outputs = np.clip(outputs, -2 ** 31, 2 ** 31 - 1)
+        elif with_activation == "NONE":
+            pass
+        outputs = outputs.to(torch.long)
+        outputs -= self.outputs[0].quantization.offset
+        outputs = outputs.to(self.outputs[0].dtype.torch)
+        self.outputs[0].betensor = outputs
+        return outputs
+
+
+def fp_eltwise(self, is_fuse=False):
+    inp0 = self.inputs[0].betensor.to(torch.float32)
+    inp1 = self.inputs[1].betensor.to(torch.float32)
+    inp0, inp1 = check_in_datalayout(self, [inp0, inp1], ['NHWC', 'NHWC'])
+    if self.params['method'].upper() == "ADD":
+        outputs = inp0 + inp1
+    elif self.params['method'].upper() == "SUB":
+        outputs = inp0 - inp1
+    elif self.params['method'].upper() == "MUL":
+        outputs = inp0 * inp1
+    elif self.params['method'].upper() == "MAX":
+        outputs = torch.maximum(inp0, inp1)
+    elif self.params['method'].upper() == "MIN":
+        outputs = torch.minimum(inp0, inp1)
+    outputs = fp_activation(outputs, self)
+    outputs = outputs.to(torch.float16) if not is_fuse else outputs
+    outputs = check_out_datalayout(self, [outputs], ['NHWC'])[0]
+    self.outputs[0].betensor = outputs
+    return outputs

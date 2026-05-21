@@ -1,0 +1,10 @@
+{
+  "cast_dtypes_for_lib": "True",
+  "calibration_prompt" : ["Which country did football first originate from?", "Please introduce the cuisine of Shanghai, China.", "What is 1+1? Please explain.", "Who is the current President of the United States?"],
+  "calibration_prompt_max_gen_length" : 2,
+   "running_statistic_momentum" : 0.961,
+  "quant_type" : "fp16 & <{(fully_connected*)}:w4afp8e4m3>",
+  "global_calibration" : "svd_quant[0,0.707, 1.788, 20, 0.092][fullyconnected]",
+  "min_compatible_zhouyi_target" : "X3",
+  "quantize_method_for_weight" : "per_tensor_symmetric_restricted_range & <{(fully_connected*)}:per_block_symmetric_restricted_range>"
+}

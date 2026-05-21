@@ -1,0 +1,290 @@
+from ..engine import register_gt, register_gen_weight, _GEN_WEIGHTS
+from AIPUBuilder.core import OpType
+from AIPUBuilder.logger import INFO, ERROR
+import torch
+import numpy as np
+from .gt_util.aiff import _aiff_compression_bias_combin, _aiff_merge_shifts, use_ptp_or_mtp
+from .gt_util.layout_transfer import layout_convert, check_in_datalayout, check_out_datalayout
+from .gt_util.aiff import _aiif_ahead_shift_biases
+from .gt_util.aiff import _aiff_inner_activation, _aiff_final_output
+from .gt_util.aiff import clip_to_bit, pad_input
+# from .conv import fp_conv # most likely due to a circular import
+from .gt_util.quant_utils import fp_activation
+from .gt_util.quant_utils import (fp_activation,
+                                  linear_dequantize,
+                                  to_fp24,
+                                  clamp,
+                                  )
+from AIPUBuilder.core import Target
+
+
+@register_gt(OpType.DepthwiseConv)
+def depthwiseconv(self, *args, **kwargs):
+    if self.inputs[0].dtype.is_float:
+        return fp_dwconv(self)
+
+    self.sgattrs = kwargs['sgattrs'] if 'sgattrs' in kwargs else None
+    if self.sgattrs is None:
+        self.sgattrs = dict()
+
+    fuse = 'fuse' in kwargs.keys() and kwargs['fuse']
+    target_name = Target().name
+    inp = self.inputs[0].betensor.long()
+    inp = check_in_datalayout(self, [inp], ['NHWC'])[0]
+    stride = (self.params["stride_y"], self.params["stride_x"])
+    dilation = (self.params['dilation_y'], self.params['dilation_x'])
+    padding = (self.params['pad_left'], self.params['pad_right'],
+               self.params['pad_top'], self.params['pad_bottom'])
+    group = self.params['group']
+    oc = self.outputs[0].shape[-1]
+
+    bias_type = self.constants['biases'].betensor_type
+    biases = _aiff_compression_bias_combin(self.constants['biases'].betensor.type(bias_type))
+    weights = self.constants['weights']
+    if 'pads_mode' in self.params:  # for simulator
+        inp = pad_input(self, inp)
+    inp = layout_convert(inp, _from='NHWC', to='NCHW')
+    if 'pads_mode' not in self.params:
+        pad_val = -self.inputs[0].quantization.offset
+        inp = torch.nn.functional.pad(inp, padding, value=pad_val)
+    weights = layout_convert(weights.betensor.long(), _from='NHWC', to='NCHW')
+    # gpu do not support long/double in torch.conv2d
+    inp = inp.float().to('cuda') if torch.cuda.is_available() else inp.long().to('cpu')
+    weights = weights.float().to('cuda') if torch.cuda.is_available() else weights.long().to('cpu')
+
+    outputs = torch.nn.functional.conv2d(inp,
+                                         weights,
+                                         bias=None,
+                                         stride=stride,
+                                         padding=0,
+                                         dilation=dilation,
+                                         groups=group)
+    outputs = layout_convert(outputs, _from='NCHW', to='NHWC')
+
+    sim_x3_itp = self.attrs.get('sim_x3_itp', '')
+    if 'sim_x3_itp_fp_bits' not in self.attrs:
+        print(f"sim_x3_itp_fp_bits not in {self}")
+    #     import pdb
+    #     pdb.set_trace()
+    if 'sim_x3_itp' not in self.attrs:
+        print(f"sim_x3_itp not in {self}")
+
+    fp_bits = self.attrs.get('sim_x3_itp_fp_bits', 24)
+    if sim_x3_itp == 'qdqs':
+        from .gt_util.quant_utils import dequantize_with_scale_approx_method, quantize_with_scale_approx_method
+
+        inp_scale_fp16 = torch.tensor(self.inputs[0].quantization.scales, device=inp.device).half()
+        weight_scale_fp16 = torch.tensor(self.constants['weights'].quantization.scales, device=inp.device).half()
+        out_scale_fp16 = torch.tensor(self.outputs[0].quantization.scales, device=inp.device).half()
+        out_zp = torch.tensor(self.outputs[0].quantization.offsets, device=inp.device)
+
+        inp_weight_scale = inp_scale_fp16.float() * weight_scale_fp16.float()
+
+        inp_weight_scale = to_fp24(inp_weight_scale, fp_bits)
+        out_scale = to_fp24(out_scale_fp16.float(), fp_bits)
+        out_zp = to_fp24(out_zp.float(), fp_bits)
+
+        # 1. mtp result should be converted to fp24, not int32 data
+        x_fp24 = to_fp24(outputs.float(), fp_bits)
+        # 2. then dequantize to fp24 float dtype
+        dequantize_x = dequantize_with_scale_approx_method(x_fp24, inp_weight_scale)
+        dequantize_x = to_fp24(dequantize_x, fp_bits)
+
+        dequantize_bias = 0
+        if 'biases' in self.constants:
+            bias_scale_fp16 = torch.tensor(self.constants['biases'].quantization.scales, device=inp.device).half()
+            bias_scale = to_fp24(bias_scale_fp16.float(), fp_bits)
+            bias_fp24 = to_fp24(biases.float(), fp_bits)
+            # bias_fp24 = biases
+            # 3. dequantize bias to fp24 float dtype
+            dequantize_bias = dequantize_with_scale_approx_method(bias_fp24, bias_scale)
+            dequantize_bias = to_fp24(dequantize_bias, fp_bits)
+
+        deq_x_add_bias = to_fp24(dequantize_x + dequantize_bias, fp_bits)
+        with_activation = self.params['with_activation']
+        if with_activation in ['NONE', 'RELU']:
+            if with_activation == 'RELU':
+                deq_x_add_bias = torch.nn.functional.relu(deq_x_add_bias)
+        else:
+            ERROR(f"now not support with_activation = {with_activation} in conv")
+        if not fuse:
+            q_x_add_bias = (to_fp24(quantize_with_scale_approx_method(deq_x_add_bias, out_scale), fp_bits) - out_zp).round()
+            # q_x_add_bias = (to_fp24(deq_x_add_bias * out_scale) - out_zp).round()
+            x = clamp(q_x_add_bias, self.outputs[0].dtype)
+        else:
+            x = deq_x_add_bias
+            self.outputs[0]._attrs['fused'] = True
+    elif sim_x3_itp == 'qdq':
+        # INFO(f"deptwise enable sim x3 itp")
+        inp_scale = torch.tensor(self.inputs[0].quantization.scales, device=inp.device).float()
+        weight_scale = torch.tensor(self.constants['weights'].quantization.scales, device=inp.device).float()
+        inp_weight_scale = inp_scale * weight_scale
+        out_scale = torch.tensor(self.outputs[0].quantization.scales, device=inp.device).float()
+        out_zp = torch.tensor(self.outputs[0].quantization.offsets, device=inp.device).float()
+
+        inp_weight_scale = to_fp24(1. / inp_weight_scale, fp_bits)
+        out_scale = to_fp24(out_scale, fp_bits)
+        out_zp = to_fp24(out_zp, fp_bits)
+
+        # 1. mtp result should be converted to fp24, not int32 data
+        x_fp24 = to_fp24(outputs.float(), fp_bits)
+        # x_fp24 = x
+        # 2. then dequantize to fp24 float dtype
+        dequantize_x = to_fp24((x_fp24 + torch.zeros_like(inp_weight_scale)) * inp_weight_scale, fp_bits)
+
+        dequantize_bias = 0
+        if 'biases' in self.constants:
+            bias_scale = torch.tensor(self.constants['biases'].quantization.scales, device=inp.device).float()
+            bias_scale = to_fp24(1. / bias_scale, fp_bits)
+            bias_fp24 = to_fp24(biases.float(), fp_bits)
+            # 3. dequantize bias to fp24 float dtype
+            dequantize_bias = to_fp24(((bias_fp24 + 0) * bias_scale), fp_bits)
+
+        deq_x_add_bias = to_fp24(dequantize_x + dequantize_bias, fp_bits)
+        with_activation = self.params['with_activation']
+        if with_activation in ['NONE', 'RELU', 'CLIP']:
+            if with_activation == 'RELU':
+                deq_x_add_bias = torch.nn.functional.relu(deq_x_add_bias)
+            elif with_activation == 'CLIP':
+                clip_max = self.params['clip_max']
+                clip_min = self.params['clip_min']
+                clip_max_f = to_fp24(torch.tensor(clip_max / 256 / out_scale, device=deq_x_add_bias.device), fp_bits)
+                clip_min_f = to_fp24(torch.tensor(clip_min /  256 / out_scale, device=deq_x_add_bias.device), fp_bits)
+
+                deq_x_add_bias = torch.clip(deq_x_add_bias, clip_min_f, clip_max_f)
+        else:
+            ERROR(f"now not support with_activation = {with_activation} in conv")
+
+        if not fuse:
+            q_x_add_bias = (to_fp24(deq_x_add_bias * out_scale, fp_bits) - out_zp).round()
+            outputs = clamp(q_x_add_bias, self.outputs[0].dtype)
+        else:
+            outputs = deq_x_add_bias
+            self.outputs[0]._attrs['fused'] = True
+    elif sim_x3_itp == 'cast':
+
+        x_fp24 = to_fp24(outputs.float(), fp_bits)
+        bias_fp24 = to_fp24(biases.float(), fp_bits)
+        # bias_fp24 = bias.float()
+        out_zp = torch.tensor(self.outputs[0].quantization.offsets, device=inp.device)
+        out_zp_fp24 = to_fp24(out_zp, fp_bits)
+
+        requant_scale = 1
+        requant_shift = 0
+
+        if 'scale_value' in self.params:
+            requant_scale = self.params['scale_value']
+        elif "scale" in self.constants:
+            requant_scale = self.constants["scale"].betensor
+
+        if 'shift_value' in self.params:
+            requant_shift = self.params['shift_value']
+        elif "shift" in self.constants:
+            requant_shift = self.constants["shift"].betensor
+        if isinstance(requant_scale, torch.Tensor) and isinstance(requant_shift, torch.Tensor):
+            requant_scale, requant_shift = _aiff_merge_shifts(requant_scale.long(), requant_shift.long())
+
+        x_add_bias_fp24 = x_fp24 + bias_fp24
+        x = to_fp24(x_add_bias_fp24, fp_bits)
+        with_activation = self.params['with_activation']
+        if with_activation in ['NONE', 'RELU', 'CLIP']:
+            if with_activation == 'RELU':
+                x = torch.nn.functional.relu(x)
+            elif with_activation == 'CLIP':
+                clip_max = self.params['clip_max']
+                clip_min = self.params['clip_min']
+                clip_max_fp24 = to_fp24(torch.tensor(clip_max, device=x_add_bias_fp24.device).float(), fp_bits)
+                clip_min_fp24 = to_fp24(torch.tensor(clip_min, device=x_add_bias_fp24.device).float(), fp_bits)
+
+                deq_x_add_bias = torch.clip(deq_x_add_bias, clip_min_fp24, clip_max_fp24)
+            # req_x = torch.round(x * requant_scale * (0.5 ** requant_shift) - out_zp)
+        else:
+            ERROR(f"now not support with_activation = {with_activation} in conv")
+
+        outputs = torch.round(to_fp24(x * requant_scale, fp_bits) * (0.5 ** requant_shift) - out_zp)
+        if not fuse:
+            outputs = clamp(outputs, self.outputs[0].dtype)
+        else:
+            self.outputs[0]._attrs['fused'] = True
+    else:
+        scales = self.constants["scale"].betensor.long()
+        shifts = self.constants["shift"].betensor.long()
+
+        scale, shift = _aiff_merge_shifts(scales, shifts)
+
+        use_ptp = use_ptp_or_mtp(self, target_name, fuse)
+        if 'simu_op' in self.params and self.params['simu_op'] == 'ptp':
+            use_ptp = True
+
+        remain_shift = shift
+        if use_ptp == True:
+            outputs = clip_to_bit(outputs, 48, True)
+            outputs = outputs.type(torch.int64)
+            outputs += biases
+        # use mtp
+        else:
+            outputs, remain_shift = _aiif_ahead_shift_biases(self, outputs, origin_shift=shift, biases=biases)
+            # biases added in _aiif_ahead_shift_biases
+
+        full_scale = []
+        for s in scale:
+            full_scale += [s] * (oc // self.constants["scale"].betensor.shape[0])
+        outputs, final_scale, final_shift = _aiff_inner_activation(self, outputs, scale, remain_shift, use_ptp)
+        # final doquant and -zp
+        outputs = _aiff_final_output(self, outputs, final_scale, final_shift)
+
+        skip_clamp = False
+
+        if fuse:
+            if len(self.children) > 0:
+                if self.children[0].type.name == 'Eltwise' or \
+                        self.children[0].type.name == 'Activation':
+                    skip_clamp = True
+
+        if not skip_clamp:
+            o_type = self.outputs[0].dtype.np
+            o_bit = self.outputs[0].dtype.bits
+            sign = 'u' not in str(self.outputs[0].dtype)
+            outputs = clip_to_bit(outputs, o_bit, sign=sign, to_type=o_type)
+    outputs = check_out_datalayout(self, [outputs], ['NHWC'])[0]
+    self.outputs[0].betensor = outputs
+    return outputs
+
+def fp_dwconv(self):
+    stride = (self.params['stride_y'], self.params['stride_x'])
+    dilation = (self.params['dilation_y'], self.params['dilation_x'])
+    padding = (self.params['pad_left'], self.params['pad_right'],
+               self.params['pad_top'], self.params['pad_bottom'])
+
+    inputs = self.inputs[0].betensor.to(torch.float32)
+    inputs = check_in_datalayout(self, [inputs], ['NHWC'])[0]
+    inputs = layout_convert(inputs, _from='NHWC', to='NCHW').float()
+    inputs = torch.nn.functional.pad(inputs, padding, value=0)
+    weights = self.constants['weights'].betensor.to(torch.float32)
+    weights = layout_convert(weights, _from='NHWC', to='NCHW').float()
+    biases = self.constants['biases'].betensor.to(torch.float32)
+    output = torch.nn.functional.conv2d(inputs,
+                                        weights,
+                                        bias=biases,
+                                        stride=stride,
+                                        padding=0,
+                                        groups=self.params['group'],
+                                        dilation=dilation)
+    output = output.permute([0, 2, 3, 1])
+    output = fp_activation(output, self)
+    output = output.to(torch.float16)
+    output = check_out_datalayout(self, [output], ['NHWC'])[0]
+    self.outputs[0].betensor = output
+    return output
+
+@register_gen_weight(OpType.DepthwiseConv)
+def gen_random_weight(self):
+    _GEN_WEIGHTS['_all'](self)
+    in_dtype = str(self.inputs[0].dtype)
+    if not in_dtype.startswith('float'):
+        self.constants['biases'].betensor = np.random.randint(-1000, 1000, size=self.constants['biases'].shape,
+                                                              dtype=str(self.constants['biases'].dtype))
+    self.constants['scale'].betensor = np.random.randint(1, 150, self.constants['scale'].shape,
+                                                         str(self.constants['scale'].dtype))
+    self.constants['shift'].betensor = np.random.randint(10, 20, self.constants['shift'].shape,
+                                                         str(self.constants['shift'].dtype))

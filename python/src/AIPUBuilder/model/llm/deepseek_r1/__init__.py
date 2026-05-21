@@ -1,0 +1,8 @@
+
+
+from .deepseek671b_blk0_2 import DeepseekR1CausalLM
+from .deepseek671b_before_mlp import DeepseekR1CausalLM
+from .deepseek671b_experts import DeepseekR1Experts
+from .deepseek671b_share_experts import DeepseekR1ShareExperts
+from .deepseek671b_lm import DeepseekR1Head
+from .deepseek671b_embedding import DeepseekR1Embedding

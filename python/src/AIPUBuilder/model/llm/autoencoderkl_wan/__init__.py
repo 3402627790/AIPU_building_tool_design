@@ -1,0 +1,1 @@
+from .autoencoderkl_wan import *

@@ -1,0 +1,230 @@
+# cython: language_level=3
+#!/usr/bin/python
+# -*- coding: UTF-8 -*-
+
+import argparse
+import sys
+import time
+import numpy as np
+import torch
+from AIPUBuilder.core.tensor import using_cuda
+from AIPUBuilder.core import Graph, aipugb, lower_graph, Target, ISAType, OpType, aipurun, BuilderConfig
+from AIPUBuilder.core.utils import *
+from AIPUBuilder.utils import *
+from AIPUBuilder.logger import DEBUG, INFO, print_trace_stack
+from AIPUBuilder import executor
+from AIPUBuilder.executor import Executor
+from AIPUBuilder.executor.engine import _GEN_INPUTS, _GEN_WEIGHTS
+from AIPUBuilder.executor.ops.gt_util.gen_weight import *
+from AIPUBuilder.utils import enable_monitoring, MonitorStatus
+USE_CUDA = True if torch.cuda.is_available() else False
+using_cuda(USE_CUDA)  # set me True on gpu
+
+
+def main():
+    # with MonitorStatus():
+    if True:
+        args = argparse.ArgumentParser()
+        args.add_argument('-v', '--version', action='version',
+                          version='%(prog)s version ' + executor.__VERSION__)
+        args.add_argument("graph", metavar='<graph.def>',
+                          type=str, help='graph definition file.')
+        args.add_argument('-w', '--weight', type=str, default="",
+                          help='the weight file for the graph. '
+                          'If no weight file is provided, a valid weight file will be generated randomly.')
+        args.add_argument('-i', '--input', type=str, default=None,
+                          help='The inputs file for the graph, if you have multiple inputs, use comma "," to split them. '
+                          'If no input file is provided, a valid input file will be generated randomly. '
+                          'Support multi-groups input, by input a .npy or other format file and specify a dataset plugin')
+        args.add_argument('--svg', type=str,
+                          help='save the graph as svg file.')
+        args.add_argument('-o', '--output', type=str, default="gt.bin",
+                          help='the output file store in binary, if the graph has multi outputs, a index will append to the file, '
+                          'for example gt.bin1 and gt.bin2.')
+        args.add_argument('--target', type=str, default="",
+                          help='the run the graph after build with the target.')
+        args.add_argument('--dump_all_tensors', action='store_true',
+                          help='dump the gt of all layers.')
+        args.add_argument('--debug', action='store_true',
+                          help='run aipurun and compare the gt and output of each layer')
+        args.add_argument('-m', '--mode', default='lg',
+                          help='the mode to lower a graph, support lg and gb, default is lg(lower_graph)'
+                          'lg will call lower_graph to lower the graph, gb will call aipugb to build the graph')
+        args.add_argument('--op_plugin_options', type=str, default=None,
+                          help="Setting some specific options like GBuilder")
+        args.add_argument('--tiling', type=str, default="",
+                          help='Select the memory optimization mode like GBuilder')
+        args.add_argument('--enable-pass', type=str, default="", dest='enable_pass',
+                          help='Enable specific pass like GBuilder')
+        args.add_argument('--disable-pass', type=str, default="", dest='disable_pass',
+                          help='Disable specific pass like GBuilder')
+        args.add_argument('--disable-plugins', type=str, default="", dest='disable_plugins',
+                          help='Disable specific plugin like GBuilder')
+        args.add_argument('--dataset', type=str, default='NumpyDataset',
+                          help='Support multi-groups input, by specify a dataset plugin and input file such as .npy')
+        args.add_argument('-b', '--batch', type=int, default=1,
+                          help='Specify batch size in a run, must be equal to the batch in the graph now')
+        args.add_argument('--simulator', type=str, default=None,
+                          help='Specify simulator path when --debug')
+        args.add_argument('--disable_plugins', type=str, default='', help='the plugin want to disable')
+        args.add_argument('--sim_x3_itp', type=str, default='none',
+                          help='simulate the x3 itp float path')
+        args.add_argument('--sim_x3_itp_fp_bits', type=int, default=24,
+                          help='simulate the float bits in the x3 itp float path')
+        options = args.parse_args(sys.argv[1:])
+        target = Target()
+        bk = target.name
+        g = Graph.parse(options.graph, options.weight)
+
+        # INFO(f"now sim_x3_itp == {options.sim_x3_itp}, bits = {options.sim_x3_itp_fp_bits}")
+        # for n in g.nodes:
+        #     n.attrs['sim_x3_itp'] = options.sim_x3_itp
+        #     n.attrs['sim_x3_itp_fp_bits'] = options.sim_x3_itp_fp_bits
+
+        input_data = []
+        use_dataset_plugin = False
+        if options.input:
+            if options.dataset != 'NumpyDataset' or is_npy(options.input):
+                use_dataset_plugin = True
+                input_data = load_input_from_dataset(options.input, options.dataset, options.batch)
+            else:
+                inputs_name = options.input.split(",")
+                for t, name in zip(g.input_tensors, inputs_name):
+                    input_data.append(np.fromfile(
+                        name, dtype=t.dtype.np).reshape(list(t.shape)))
+        else:
+            INFO('[Executor] generate input randomly...')
+            for i in g.input_tensors:
+                if i.op.children[0].type in _GEN_INPUTS:
+                    _GEN_INPUTS[i.op.children[0].type](i.op.children[0])
+                else:
+                    _GEN_INPUTS[OpType.Input](i.op.children[0])
+            for i, it in enumerate(g.input_tensors):
+                input_name = 'input%d.bin' % i
+                it.betensor.cpu().numpy().astype(it.dtype.np).tofile(input_name)
+                input_data.append(it.betensor.cpu().numpy().astype(it.dtype.np))
+
+        if not options.weight:
+            INFO('[Executor] generate weight randomly...')
+            for n in g.nodes:
+                if n.type in _GEN_WEIGHTS:
+                    _GEN_WEIGHTS[n.type](n)
+                else:
+                    _GEN_WEIGHTS['_all'](n)
+            output_weight2bin(g, options.graph, 'weight.bin')
+            g.load_weight('weight.bin')
+
+
+        if len(options.target) != 0:
+            target.set_target(options.target)
+            arg_map = {"target": options.target, 'dump_all_tensors': True, 'dumpIR': 'dumpIR_debug', "wdc_rate": 0}
+            if not (options.dump_all_tensors or options.debug):
+                # aipurun with dump_all_tensors could be out of 3.5G on big model
+                arg_map.pop('dump_all_tensors')
+            if len(options.tiling) != 0:
+                arg_map["tiling"] = options.tiling
+            if len(options.tiling) != 0 or (options.debug and target.isa >= ISAType.ZYv5):
+                # --tiling or --debug(--disable_schedule_optimization will be force True), load_balance_strategy will be 0
+                BuilderConfig.set("load_balance_strategy", 0)
+            if len(options.enable_pass) != 0:
+                arg_map["enable-pass"] = options.enable_pass
+            arg_map["disable-pass"] = "adapt_concat_strides"  # avoid InternalConcat
+            if len(options.disable_pass) != 0:
+                arg_map["disable-pass"] += ','
+                arg_map["disable-pass"] += options.disable_pass
+            if len(options.disable_plugins) != 0:
+                arg_map["disable-plugins"] = options.disable_plugins
+            arg_x2 = {'disable_schedule_optimization': True}
+            arg_map.update(arg_x2) if (target.isa >= ISAType.ZYv5 and options.debug) else arg_map
+            arg_map.update({'op_plugin_options': options.op_plugin_options}) if options.op_plugin_options else arg_map
+            # g = aipugb(g, arg_map)
+            for t in g.input_tensors:
+                tmp_data = np.zeros(shape=list(t.shape), dtype=t.dtype.np)
+                t.set_data(tmp_data)
+            arg_map['skip_simulator'] = True
+            if options.debug:
+                for t, d in zip(g.input_tensors, input_data):
+                    t.set_data(d.astype(t.dtype.np))
+                arg_debug = {'output': 'out.bin', 'dump': True, 'png': 'graph_debug.png'}
+                arg_map.update(arg_debug)
+                arg_map.pop('skip_simulator')
+                if options.simulator:
+                    INFO('[Executor] use external simulator path: %s' % options.simulator)
+                    simulator_map = {'simulator': options.simulator}
+                    arg_map.update(simulator_map)
+            # g = aipurun(g, g.input_tensors, arg_map)
+
+        all_nodes = extract_real_node(g)
+        # for i, n in enumerate(all_nodes):
+        #     n.attrs['sim_x3_itp'] = options.sim_x3_itp
+        #     n.attrs['sim_x3_itp_fp_bits'] = options.sim_x3_itp_fp_bits
+
+        e = Executor('_GT')
+        cfg = BuilderConfig
+        if options.op_plugin_options:
+            cfg.set("op_plugin_options", options.op_plugin_options)
+
+        INFO("forwarding graph %s" % (str(g)))
+        if options.svg is not None and len(options.svg):
+            g.to_svg(options.svg)
+        torch.set_num_threads(8)
+
+        if use_dataset_plugin:
+            out_dict = {}
+            outputs = []
+            group_num = 0
+            batch_total = input_data.dataset.data[0].shape[0] if isinstance(input_data.dataset.data, list) else \
+                input_data.dataset.data.shape[0]
+            group_total = batch_total // input_data.batch_size
+            for inp, tar in input_data:
+                INFO('[Executor] run multi-groups input using %s, total: %d, now: %d' % (
+                    options.dataset, group_total, group_num + 1))
+                out_g = []
+                out = e.forward(g, inp)
+                for i, o in enumerate(out):
+                    out_g.append(o.betensor.cpu().numpy().astype(o.dtype.np))
+                outputs.append(out_g)
+                group_num += 1
+            for m in range(len(out)):
+                out_m = np.asarray([outputs[n][m] for n in range(group_num)], dtype=outputs[0][m].dtype)
+                out_shape = [out_m.shape[0] * out_m.shape[1]] + list(out_m.shape[2:])
+                out_m = out_m.reshape(out_shape)
+                out_dict[out[m].name] = out_m
+            np.save(options.output.replace('.bin', ''), out_dict)
+            print(f"now save output file {options.output.replace('.bin', '')}")
+        else:
+            out = e.forward(g, input_data)
+            outname = options.output
+            for i, o in enumerate(out):
+                if i == 0:
+                    o.betensor.cpu().numpy().astype(o.dtype.np).tofile(outname)
+                else:
+                    o.betensor.cpu().numpy().astype(o.dtype.np).tofile(outname + str(i))
+
+        if options.dump_all_tensors or options.debug:
+            INFO('[Executor] dump all layers output...')
+            # ir, w = g.serialize()
+            # ir_sections = parse_ir(ir)[1:]
+            all_nodes = extract_real_node(g)
+            for i, node in enumerate(all_nodes):
+                if node.type != OpType.Input:
+                    layer_id = node.attrs['layer_id']
+                    for j, out in enumerate(node.outputs):
+                        data = out.betensor.cpu().numpy().astype(out.dtype.np)
+                        gt_name = '{}_gt_exe_{}_{}.bin'.format(
+                            layer_id, j, out.name.replace('/', '_'))
+                        gt_name = check_filename(gt_name)
+                        data.tofile(gt_name)
+
+        if options.debug:
+            compare_all_tensors_with_gb(g, os.path.abspath(options.output))
+
+        target.set_target(bk)
+    return 0
+
+
+if __name__ == "__main__":
+    main()
+    # ret = main()
+    # print(f"---------{ret}")
+    # sys.exit(ret)

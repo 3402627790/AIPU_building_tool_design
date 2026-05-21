@@ -1,0 +1,2163 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
+import copy
+
+import numpy as np
+import sys
+import sympy as sp
+from ..op import *
+from ...front_end.onnx.buffer import ONNX_NP_TENSOR_MAP
+from ...logger import INFO, DEBUG, WARN, ERROR, FATAL
+from ...common.defs import TYPE_MIN, TYPE_MAX, INT_MIN, INT_MAX
+from ...common.utils import expr_has_symbols
+
+
+class BitShiftOp(OpNeedBroadcast, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {11: {'direction': {'type': AttrType.STRING, 'required': True, 'options': ['RIGHT', 'LEFT']}}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(BitShiftOp, self).__init__(graph, attr_dict)
+        self.update_attributes(BitShiftOp, attr_dict)
+        assert self.check_required(), 'BitShiftOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(BitShiftOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        if inputs[0].dtype == 'uint64':
+            WARN(
+                '[Parser]: input dtype will be converted to uint32 with possible loss of precision!')
+        # Extend onnx BitShift to support both unsigned and signed inputs.
+        # opset 11 only supports BitShift with unsigned inputs, but numpy and torch supports unsigned and signed inputs.
+        if self.direction == 'LEFT':
+            out_tensor = np.left_shift(inputs[0], inputs[1])
+        else:
+            out_tensor = np.right_shift(inputs[0], inputs[1])
+        self.set_out_tensor(out_tensor)
+
+
+class CastOp(LayoutUnawareOp, SameShapeOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'to': {'type': AttrType.STRING, 'required': True}},
+                6: {'to': {'type': AttrType.INT, 'required': True}},
+                9: {'to': {'type': AttrType.INT, 'required': True}},
+                13: {'to': {'type': AttrType.INT, 'required': True}},
+                19: {'to': {'type': AttrType.INT, 'required': True}, 'saturate': {'type': AttrType.BOOL, 'default': True}}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(CastOp, self).__init__(graph, attr_dict)
+        self.update_attributes(CastOp, attr_dict)
+        assert self.check_required(), 'CastOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        cur_ver = self.__dict__['_attr']['cur_version'].value
+        try:
+            if item == 'to':
+                ret = self._attr[item].value
+                if not isinstance(ret, str):
+                    ret = np.dtype(ONNX_NP_TENSOR_MAP[ret][1]).name
+            elif item == 'saturate':
+                if cur_ver < 19:
+                    ret = False
+                    if item in self.__dict__['_attr']:
+                        self.__dict__['_attr'][item].value = ret
+                    else:
+                        self.__dict__['_attr'][item] = Attribute(item, {'type': AttrType.BOOL, 'value': ret})
+                else:
+                    ret = bool(self._attr[item].value)
+        except:
+            ret = None
+        if ret is None:
+            ret = super(CastOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(CastOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = inputs[0].astype(np.dtype(self.to))
+        self.infer_symbol()
+        self.set_out_tensor(out_tensor)
+
+    def infer_symbol(self):
+        if self.ds_mode:
+            out_symbol = self.get_input_symbols()[0]
+            self.set_out_symbol(out_symbol)
+
+            input_value_symbols = self.get_input_value_symbols()
+            invalid = any([inp is None for inp in input_value_symbols])
+
+            out_symbol = None
+            if not invalid:
+                out_symbol = input_value_symbols[0]
+            self.set_out_value_symbol(out_symbol)
+
+
+class CenterCropPadOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {18: {'axes': {'required': False}}}
+
+    def __init__(self, graph, attr_dict=None):
+        super(CenterCropPadOp, self).__init__(graph, attr_dict)
+        self.update_attributes(CenterCropPadOp, attr_dict)
+        assert self.check_required(), 'CenterCropPadOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            if item == 'axes':
+                ret = self.__dict__['_attr'][item].value
+                if ret is None:
+                    inputs = self.get_input_tensors()
+                    ret = list(range(len(inputs[0].shape)))
+                    self.__dict__['_attr'][item].value = ret
+        except:
+            ret = None
+        if ret is None:
+            ret = super(CenterCropPadOp, self).__getattr__(item)
+        return ret
+
+    @staticmethod
+    def get_shape_and_crop_pad_slices(input_shape, new_shape_at_axes, axes):
+        '''Return new shape, slice object of crop and pad calculated basing on input_shape,
+        new_shape_at_axes and axes.
+        '''
+        new_shape = copy.deepcopy(input_shape)
+        pad_slices = [slice(0, None)] * len(input_shape)
+        crop_slices = copy.deepcopy(pad_slices)
+        for axis, shape in zip(axes, new_shape_at_axes):
+            if input_shape[axis] == shape:
+                continue
+            elif input_shape[axis] > shape:  # need slice
+                new_shape[axis] = shape
+                begin = (input_shape[axis] - shape) // 2
+                end = begin + shape
+                crop_slices[axis] = slice(begin, end)
+            else:  # input_shape[axis] < shape, need pad
+                new_shape[axis] = shape
+                begin = (shape - input_shape[axis]) // 2
+                end = begin + input_shape[axis]
+                pad_slices[axis] = slice(begin, end)
+        return (new_shape, crop_slices, pad_slices)
+
+    def infer_shape(self):
+        super(CenterCropPadOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        assert len(inputs) == 2, 'CenterCropPadOp expects 2 inputs, but got %d' % len(inputs)
+        input_data = inputs[0]
+        new_shape_at_axes = inputs[1].tolist()
+        original_input_shape = list(input_data.shape)
+        self.axes = OpHasAxis.make_axes_non_negative(self.axes, len(original_input_shape))
+        new_shape, crop_slices, pad_slices = self.get_shape_and_crop_pad_slices(
+            original_input_shape, new_shape_at_axes, self.axes)
+        cropped = input_data[tuple(crop_slices)]
+        out_tensor = np.zeros(new_shape, dtype=inputs[0].dtype)
+        out_tensor[tuple(pad_slices)] = cropped
+        self.set_out_tensor(out_tensor)
+
+
+class CompressOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {9: {'axis': {'default': None}},
+                11: {'axis': {'default': None}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(CompressOp, self).__init__(graph, attr_dict)
+        self.update_attributes(CompressOp, attr_dict)
+        assert self.check_required(), 'CompressOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(CompressOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.compress(inputs[1], inputs[0], axis=self.axis)
+        self.set_out_tensor(out_tensor)
+
+
+class ConcatOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'axis': {'dafault': 1, 'required': False}},
+                4: {'axis': {'required': True}},
+                11: {'axis': {'required': True}}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ConcatOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ConcatOp, attr_dict)
+        assert self.check_required(), 'ConcatOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(ConcatOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.concatenate([*inputs], axis=self.axis)
+        out_symbol = self.cal_output_symbol()
+        self.set_out_tensor(out_tensor, shape_symbol=out_symbol)
+
+    def cal_output_symbol(self):
+        if not self.ds_mode:
+            return None
+        input_symbols = self.get_input_symbols()
+        output_symbol = input_symbols[0]
+        concat_axis_symbol = 0
+        for inp_s in input_symbols:
+            concat_axis_symbol += inp_s[self.axis]
+        output_symbol[self.axis] = concat_axis_symbol
+
+        input_tensor_symbols = self.get_input_value_symbols()
+        invalid = any([inp is None for inp in input_tensor_symbols])
+        if invalid:
+            out_symbol_value = None
+        else:
+            assert self.axis == 0, 'concat symbol value infer only support axis 0.'
+            out_symbol_value = []
+            for inp in input_tensor_symbols:
+                out_symbol_value.extend(inp)
+        self.set_out_value_symbol(out_symbol_value)
+        return output_symbol
+
+
+class ConstantOp(OpHasOneOutPort, ConstOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'value': {'type': AttrType.TENSOR, 'required': True}},
+                9: {'value': {'type': AttrType.TENSOR, 'required': True}},
+                11: {'sparse_value': {'type': AttrType.SPARSE_TENSOR},
+                     'value': {'type': AttrType.TENSOR}},
+                12: {
+                    'sparse_value': {'type': AttrType.SPARSE_TENSOR},
+                    'value': {'type': AttrType.TENSOR},
+                    'value_float': {'type': AttrType.FLOAT},
+                    'value_floats': {'type': AttrType.FLOATS},
+                    'value_int': {'type': AttrType.INT},
+                    'value_ints': {'type': AttrType.INTS},
+                    'value_string': {'type': AttrType.STRING},
+                    'value_strings': {'type': AttrType.STRINGS}},
+                13: {
+                    'sparse_value': {'type': AttrType.SPARSE_TENSOR},
+                    'value': {'type': AttrType.TENSOR},
+                    'value_float': {'type': AttrType.FLOAT},
+                    'value_floats': {'type': AttrType.FLOATS},
+                    'value_int': {'type': AttrType.INT},
+                    'value_ints': {'type': AttrType.INTS},
+                    'value_string': {'type': AttrType.STRING},
+                    'value_strings': {'type': AttrType.STRINGS}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ConstantOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ConstantOp, attr_dict)
+        assert self.check_required(), 'ConstantOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(ConstantOp, self).infer_shape()
+        self.set_out_tensor(self.value, shape_symbol=list(self.value.shape))
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            cur_ver = self.__dict__['_attr']['cur_version'].value
+            if item == 'value':
+                if cur_ver in (1, 9):
+                    return self._attr['value'].value
+                elif cur_ver in (11, 12, 13):
+                    keys = [k for k in type(
+                        self).attributes()[cur_ver].keys() if self._attr[k].value is not None]
+                    assert len(
+                        keys) == 1, 'Meets invalid value in ConstantOp (%s)!' % self.name
+                    value = np.asarray(self._attr[keys[0]].value)
+                    if keys[0] in ('value_float', 'value_floats'):
+                        value = value.astype(np.float32)
+                    return value
+                else:
+                    ERROR('[Parser]: Unsupported op version [%s] for %s!' %
+                          (cur_ver, type(self).__name__))
+        except:
+            ret = None
+        if ret is None:
+            ret = super(ConstantOp, self).__getattr__(item)
+        return ret
+
+    def __setattr__(self, item, value):
+        if item == 'value':
+            cur_ver = self.__dict__['_attr']['cur_version'].value
+            if cur_ver in (1, 9, 11, 12, 13):
+                self._attr['value'].value = value
+            else:
+                ERROR('[Parser]: Unsupported op version [%s] for %s!' %
+                      (cur_ver, type(self).__name__))
+        else:
+            super(ConstantOp, self).__setattr__(item, value)
+
+
+class ConstantOfShapeOp(OpHasOneOutPort, ConstLikeOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {9: {'value': {'type': AttrType.TENSOR, 'required': False}}}
+
+    def __init__(self, graph, attr_dict=None):
+        super(ConstantOfShapeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ConstantOfShapeOp, attr_dict)
+        assert self.check_required(), 'ConstantOfShapeOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(ConstantOfShapeOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        if len(inputs) >= 1 and inputs[0] is not None:
+            inp = inputs[0].astype(np.int64)
+            out_tensor = np.ndarray(inp.tolist())
+            if self.value is not None:
+                out_tensor.fill(self.value.item())
+                out_tensor = out_tensor.astype(self.value.dtype)
+            else:
+                out_tensor.fill(0)
+                out_tensor = out_tensor.astype(np.float32)
+        else:
+            out_tensor = None
+        self.infer_symbol(out_tensor)
+        self.set_out_tensor(out_tensor)
+
+    def infer_symbol(self, out_tensor):
+        if self.ds_mode:
+            input_tensor_symbols = self.get_input_value_symbols()
+            invalid = any([inp is None for inp in input_tensor_symbols])
+            out_symbol = None
+            if not invalid:
+                if len(input_tensor_symbols[0]) == 1 and not expr_has_symbols(input_tensor_symbols[0][0]):
+                    out_symbol_value = out_tensor.tolist()
+                    self.set_out_value_symbol(out_symbol_value)
+                if input_tensor_symbols[0] is not None and \
+                        Op.is_all_global_symbols(input_tensor_symbols[0], self._graph._attr['global_symbols']):
+                    out_symbol = input_tensor_symbols[0]
+            self.set_out_symbol(out_symbol)
+
+
+class DepthToSpaceOp(LayoutConcernedOp, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'blocksize': {'type': AttrType.INT, 'required': True}
+                    },
+                11: {'blocksize': {'type': AttrType.INT, 'required': True},
+                     'mode': {'type': AttrType.STRING, 'default': 'DCR', 'options': ['DCR', 'CRD']}
+                     },
+                13: {'blocksize': {'type': AttrType.INT, 'required': True},
+                     'mode': {'type': AttrType.STRING, 'default': 'DCR', 'options': ['DCR', 'CRD']}
+                     }
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(DepthToSpaceOp, self).__init__(graph, attr_dict)
+        self.update_attributes(DepthToSpaceOp, attr_dict)
+        assert self.check_required(), 'DepthToSpaceOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(DepthToSpaceOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        if self.data_format == 'NHWC':
+            if self.mode == 'DCR':
+                n, h, w, c = inputs[0].shape
+                inp = np.reshape(
+                    inputs[0], (n, h, w, self.blocksize, self.blocksize, c // self.blocksize ** 2))
+                out = np.transpose(inp, (0, 3, 4, 1, 5, 2))
+                out_tensor = np.reshape(
+                    out, (n, h * self.blocksize, w * self.blocksize, c // self.blocksize ** 2))
+            else:
+                n, h, w, c = inputs[0].shape
+                inp = np.reshape(
+                    inputs[0], (n, h, w, c // self.blocksize ** 2, self.blocksize, self.blocksize))
+                out = np.transpose(inp, (0, 1, 4, 2, 5, 3))
+                out_tensor = np.reshape(
+                    out, (n, h * self.blocksize, w * self.blocksize, c // self.blocksize ** 2))
+        else:
+            if self.mode == 'DCR':
+                n, c, h, w = inputs[0].shape
+                inp = np.reshape(
+                    inputs[0], (n, self.blocksize, self.blocksize, c // self.blocksize ** 2, h, w))
+                out = np.transpose(inp, (0, 3, 4, 1, 5, 2))
+                out_tensor = np.reshape(
+                    out, (n, c // self.blocksize ** 2, h * self.blocksize, w * self.blocksize))
+            else:
+                n, c, h, w = inputs[0].shape
+                inp = np.reshape(
+                    inputs[0], (n, c // self.blocksize ** 2, self.blocksize, self.blocksize, h, w))
+                out = np.transpose(inp, (0, 1, 4, 2, 5, 3))
+                out_tensor = np.reshape(
+                    out, (n, c // self.blocksize ** 2, h * self.blocksize, w * self.blocksize))
+        self.set_out_tensor(out_tensor)
+
+    def __getattr__(self, item):
+        ret = None
+        cur_ver = self.__dict__['_attr']['cur_version'].value
+        try:
+            if item == 'mode':
+                if cur_ver < 11:
+                    ret = 'DCR'
+                else:
+                    ret = self.__dict__['_attr'][item].value
+        except:
+            ret = None
+        if ret is None:
+            ret = super(DepthToSpaceOp, self).__getattr__(item)
+        return ret
+
+    def __setattr__(self, item, value):
+        if item == 'mode':
+            try:
+                self.__dict__['_attr'][item].value = str(value)
+            except:
+                self.__dict__['_attr'][item] = Attribute(
+                    item, {'type': AttrType.INTS, 'value': str(value)})
+        else:
+            super(DepthToSpaceOp, self).__setattr__(item, value)
+
+
+class ExpandOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {8: {},
+                13: {}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ExpandOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ExpandOp, attr_dict)
+        assert self.check_required(), 'ExpandOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(ExpandOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = inputs[0] * np.ones(inputs[1].tolist(), inputs[0].dtype)
+        out_symbol = self.cal_output_symbol()
+        self.set_out_tensor(out_tensor, shape_symbol=out_symbol)
+
+    def cal_output_symbol(self):
+        if not self.ds_mode:
+            return None
+        # only support the expanded axis is fixed
+        inputs = self.get_input_tensors()
+        expanded_list = inputs[1].tolist()
+        input_shape = inputs[0].shape
+        if len(expanded_list) != len(input_shape):
+            ERROR(f'Symbol infer of ExpandOp({self.name}) only support same length of input and shape.')
+            return None
+        input_symbol = self.get_input_symbols()[0]
+        out_symbol = []
+        for i in range(len(input_shape)):
+            if input_shape[i] == expanded_list[i] or expanded_list[i] == 1:
+                out_symbol.append(input_symbol[i])
+            else:
+                out_symbol.append(expanded_list[i])
+        return out_symbol
+
+
+class EyeLikeOp(OpHasOneOutPort, ConstLikeOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {9: {'dtype': {'type': AttrType.STRING},
+                    'k': {'type': AttrType.INT, 'default': 0}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(EyeLikeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(EyeLikeOp, attr_dict)
+        assert self.check_required(), 'EyeLikeOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(EyeLikeOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        if inputs and inputs[0] is not None:
+            out_tensor = np.eye(inputs[0].shape[0], inputs[0].shape[1], k=self.k,
+                                dtype=np.dtype(self.dtype) if self.dtype is not None else inputs[0].dtype)
+        else:
+            out_tensor = None
+        self.set_out_tensor(out_tensor)
+
+
+class FlattenOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'axis': {'default': 1}},
+                9: {'axis': {'default': 1}},
+                11: {'axis': {'default': 1}},
+                13: {'axis': {'default': 1}}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(FlattenOp, self).__init__(graph, attr_dict)
+        self.update_attributes(FlattenOp, attr_dict)
+        assert self.check_required(), 'FlattenOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(FlattenOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        self.axis = int(OpHasAxis.make_axes_non_negative(
+            self.axis, len(inputs[0].shape)))
+        if np.ndim(inputs[0]) in (0, 1):
+            inp = np.expand_dims(inputs[0], axis=0)
+            inp = np.reshape(inp, (1, inp.size))
+        else:
+            inp = inputs[0]
+        new_shape = (int(np.prod(inp.shape[0:self.axis])),
+                     int(np.prod(inp.shape[self.axis:])))
+        out_tensor = np.reshape(inp, new_shape)
+        self.set_out_tensor(out_tensor)
+
+
+class GatherOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'axis': {'default': 0}},
+                11: {'axis': {'default': 0}},
+                13: {'axis': {'default': 0}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(GatherOp, self).__init__(graph, attr_dict)
+        self.update_attributes(GatherOp, attr_dict)
+        assert self.check_required(), 'GatherOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(GatherOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        indices = inputs[1]
+        try:
+            out_tensor = np.take(inputs[0], np.array(
+                indices, np.int32), axis=self.axis)
+        except:
+            in_consts = self.sorted_in_consts()
+            if len(in_consts) == 2 \
+                    or (len(in_consts) == 1 and in_consts[0][1] == 1):
+                # if exception met when const indices, that's error
+                ERROR('[Parser]: Meets invalid indices input of Gather Op (%s) in infer_shape!' % self.name)
+                out_tensor = None
+            else:
+                WARN('[Parser]: Random indices of Gather Op (%s) are replaced by zeros indices in infer_shape!' % self.name)
+                indices = np.zeros_like(indices, dtype=np.int32)
+                out_tensor = np.take(inputs[0], indices, axis=self.axis)
+        out_symbol = self.cal_output_symbol()
+        is_const, is_dynamic = self.infer_symbol()
+        self.set_out_tensor(out_tensor, is_const=is_const, is_dynamic=is_dynamic, shape_symbol=out_symbol)
+
+    def cal_output_symbol(self):
+        if self.ds_mode:
+            input_symbols = self.get_input_symbols()
+            out_symbol = input_symbols[0]
+            if input_symbols[1]:
+                out_symbol[self.axis:self.axis] = input_symbols[1]
+                out_symbol.pop(self.axis + len(input_symbols[1]))
+            else:
+                # indice is scalar
+                out_symbol.pop(self.axis)
+        else:
+            out_symbol = None
+        return out_symbol
+
+    def infer_symbol(self):
+        if not self.ds_mode:
+            return None, None
+        input_tensor_symbols = self.get_input_value_symbols()
+        if input_tensor_symbols[0] is None or input_tensor_symbols[1] is None:
+            out_symbol_value = None
+        else:
+            inp_symbol_value = input_tensor_symbols[0]
+            idx = input_tensor_symbols[1]
+            assert self.axis == 0
+            out_symbol_value = inp_symbol_value[idx] if not isinstance(
+                idx, list) else [inp_symbol_value[i] for i in idx]
+        self.set_out_value_symbol(out_symbol_value)
+        if out_symbol_value is not None and not expr_has_symbols(out_symbol_value):
+            return True, False
+        else:
+            return False, True
+
+
+class GatherElementsOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {11: {'axis': {'default': 0}},
+                13: {'axis': {'default': 0}},
+                }
+
+    @staticmethod
+    def make_indices_non_negative(indices, ref_shape):
+        '''If indice is negative, return non-negative indices.'''
+        mask = indices < 0
+        indices[mask] = (indices + ref_shape)[mask]
+        return indices
+
+    def __init__(self, graph, attr_dict=None):
+        super(GatherElementsOp, self).__init__(graph, attr_dict)
+        self.update_attributes(GatherElementsOp, attr_dict)
+        assert self.check_required(), 'GatherElementsOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(GatherElementsOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        indices = inputs[1]
+        indices = GatherElementsOp.make_indices_non_negative(
+            indices, inputs[0].shape[self.axis])
+        torch_input = torch.from_numpy(inputs[0].astype(np.float32))
+        torch_indices = torch.from_numpy(np.array(indices, np.int64))
+        out_tensor = torch.gather(torch_input, self.axis, torch_indices)
+        out_tensor = out_tensor.numpy().astype(inputs[0].dtype)
+        self.set_out_tensor(out_tensor)
+
+
+class GatherNDOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {11: {},
+                12: {'batch_dims': {'default': 0}},
+                13: {'batch_dims': {'default': 0}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(GatherNDOp, self).__init__(graph, attr_dict)
+        self.update_attributes(GatherNDOp, attr_dict)
+        assert self.check_required(), 'GatherNDOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        cur_ver = self.__dict__['_attr']['cur_version'].value
+        try:
+            if item == 'batch_dims':
+                if cur_ver >= 12:
+                    ret = self.__dict__['_attr'][item].value
+                else:
+                    ret = 0
+        except:
+            ret = None
+        if ret is None:
+            ret = super(GatherNDOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(GatherNDOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        in_rank = len(inputs[0].shape)
+        assert inputs[1].shape[-1] <= in_rank, 'The shape of input is invalid in GatherNDOp.'
+        batch_dims_shape = []
+        batch_dims_size = 1
+        for i in range(self.batch_dims):
+            batch_dims_shape.append(inputs[1].shape[i])
+            batch_dims_size *= inputs[1].shape[i]
+        output_shape = batch_dims_shape + list(inputs[1].shape)[self.batch_dims:-1] \
+            if (inputs[1].shape[-1] == in_rank - self.batch_dims) \
+            else batch_dims_shape + list(inputs[1].shape)[self.batch_dims:-1] + list(inputs[0].shape)[self.batch_dims + inputs[1].shape[-1]:]
+
+        out_data = []
+        reshaped_indices = inputs[1].reshape(
+            batch_dims_size, -1, inputs[1].shape[-1])
+        reshaped_data = inputs[0].reshape(
+            (batch_dims_size,) + inputs[0].shape[self.batch_dims:])
+        for batch_dim in range(reshaped_indices.shape[0]):
+            for outer_dim in range(reshaped_indices.shape[1]):
+                gather_index = tuple(reshaped_indices[batch_dim][outer_dim])
+                try:
+                    out_data.append(reshaped_data[(batch_dim,) + gather_index])
+                except:
+                    gather_index = tuple(np.zeros_like(reshaped_indices[batch_dim][outer_dim]))
+                    out_data.append(reshaped_data[(batch_dim,) + gather_index])
+        out_tensor = np.asarray(
+            out_data, dtype=inputs[0].dtype).reshape(output_shape)
+        self.set_out_tensor(out_tensor)
+
+
+class IdentityOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {},
+                13: {},
+                14: {},
+                16: {},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(IdentityOp, self).__init__(graph, attr_dict)
+        self.update_attributes(IdentityOp, attr_dict)
+        assert self.check_required(), 'IdentityOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(IdentityOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = inputs[0].copy()
+        self.set_out_tensor(out_tensor)
+
+
+class OneHotOp(OpHasOneOutPort, OpHasAxis, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {
+            9: {'axis': {'type': AttrType.INT, 'default': -1},
+                },
+            11: {'axis': {'type': AttrType.INT, 'default': -1}
+                 }
+        }
+
+    def __init__(self, graph, attr_dict=None):
+        super(OneHotOp, self).__init__(graph, attr_dict)
+        self.update_attributes(OneHotOp, attr_dict)
+        assert self.check_required(), 'OneHotOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(OneHotOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        indices = inputs[0].astype(np.int64)
+        depth, values = inputs[1:]
+        depth = int(depth.item()) if isinstance(
+            depth, np.ndarray) else int(depth)
+
+        reps = [1] * (len(indices.shape) + 1)
+        reps[self.axis] = depth
+
+        tiled_indices = np.tile(np.expand_dims(indices, axis=self.axis), reps)
+        out_tensor = (np.ones_like(tiled_indices) *
+                      values[1]).astype(values.dtype)
+        off_mask = np.logical_and(
+            tiled_indices >= -depth, tiled_indices < depth - 1)
+        out_tensor[off_mask] = values[0]
+        self.set_out_tensor(out_tensor)
+
+
+class PadOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'mode': {'type': AttrType.STRING, 'default': 'constant', 'options': ['constant', 'reflect', 'edge', 'symmetric']},
+                    'paddings': {'type': AttrType.INTS, 'required': True},
+                    'value': {'type': AttrType.FLOAT, 'default': 0.0}
+                    },
+                2: {'mode': {'type': AttrType.STRING, 'default': 'constant', 'options': ['constant', 'reflect', 'edge', 'symmetric']},
+                    'pads': {'type': AttrType.INTS, 'required': True},
+                    'value': {'type': AttrType.FLOAT, 'default': 0.0}
+                    },
+                11: {'mode': {'type': AttrType.STRING, 'default': 'constant', 'options': ['constant', 'reflect', 'edge', 'symmetric']}},
+                13: {'mode': {'type': AttrType.STRING, 'default': 'constant', 'options': ['constant', 'reflect', 'edge', 'symmetric']}},
+                18: {'mode': {'type': AttrType.STRING, 'default': 'constant', 'options': ['constant', 'reflect', 'edge', 'symmetric']}},
+                19: {'mode': {'type': AttrType.STRING, 'default': 'constant', 'options': ['constant', 'reflect', 'edge', 'symmetric', 'wrap']}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(PadOp, self).__init__(graph, attr_dict)
+        self.update_attributes(PadOp, attr_dict)
+        assert self.check_required(), 'PadOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        cur_ver = self.__dict__['_attr']['cur_version'].value
+        try:
+            if item == 'pads':
+                if cur_ver == 1:
+                    ret = self.__dict__['_attr']['paddings'].value
+                elif cur_ver >= 11:
+                    inputs = self.get_input_tensors()
+                    ret = inputs[1].flatten().tolist()
+                    if cur_ver >= 18 and len(inputs) > 3 and inputs[3] is not None and len(inputs[3]) > 0:
+                        axes = inputs[3].tolist()
+                        input_length = len(inputs[0].shape)
+                        new_pads = np.zeros([input_length * 2], np.int64)
+                        positive_axes = [(axis + input_length) if axis < 0 else axis for axis in axes]
+                        complete_idx = positive_axes + [(axis + input_length) for axis in positive_axes]
+                        np.put(new_pads, complete_idx, np.array(ret[:(len(axes) * 2)]))
+                        ret = new_pads.tolist()
+            elif item == 'value':
+                if cur_ver <= 2:
+                    ret = self.__dict__['_attr'][item].value
+                elif cur_ver >= 11:
+                    inputs = self.get_input_tensors()
+                    ret = 0 if len(inputs) <= 2 or (
+                        len(inputs) > 2 and inputs[2] is None) else inputs[2].flatten().item()
+        except:
+            ret = None
+        if ret is None:
+            ret = super(PadOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(PadOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        cur_ver = self.cur_version
+
+        if cur_ver == 1:
+            pads = self.paddings
+            const_value = self.value
+        elif cur_ver == 2:
+            pads = self.pads
+            const_value = self.value
+        else:
+            pads = self.pads
+            const_value = 0 if len(inputs) <= 2 or (
+                len(inputs) > 2 and inputs[2] is None) else inputs[2].flatten().item()
+        negative_pads = [pad if pad < 0 else None for pad in pads]
+        if all(pad is None for pad in negative_pads):
+            sliced_input = inputs[0]
+        else:
+            input_length = len(inputs[0].shape)
+            slice_obj = [slice(-begin if begin is not None else None, end, 1)
+                         for begin, end in zip(negative_pads[:input_length], negative_pads[input_length:])]
+            sliced_input = inputs[0][tuple(slice_obj)]
+            pads = [pad if pad >= 0 else 0 for pad in pads]
+        if self.mode in ('reflect', 'edge', 'symmetric', 'wrap'):
+            pads = np.reshape(np.array(pads, np.int32), (2, -1))
+            pads = np.transpose(pads)
+            out_tensor = np.pad(sliced_input, pads, mode=self.mode)
+        else:
+            torch_input = torch.from_numpy(sliced_input.astype(np.float32))
+            out_tensor = torch.nn.functional.pad(torch_input,
+                                                 OpHasPaddingStrides.onnx_to_torch(
+                                                     pads),
+                                                 mode=self.mode if self.mode in (
+                                                     'constant', 'reflect') else 'replicate',
+                                                 value=const_value).numpy().astype(inputs[0].dtype)
+        self.set_out_tensor(out_tensor)
+
+    def is_fusable(self):
+        pads = np.reshape(np.array(self.pads, np.int64), (2, -1))
+        non_space_pads = pads[:, 0:2] if self.data_format == 'NCHW' else np.concatenate(
+            [pads[:, 0:1], pads[:, -1:]], axis=1)
+        return self.mode == 'constant' and np.all(non_space_pads == 0)
+
+    def space_pads(self):
+        pads = np.reshape(np.array(self.pads, np.int64), (2, -1))
+        space = pads[:, 2:] if self.data_format == 'NCHW' else pads[:, 1:-1]
+        return space.flatten().tolist()
+
+
+class RangeOp(OpHasOneOutPort, ConstLikeOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {11: {'start': {'default': None},
+                     'limit': {'default': None},
+                     'delta': {'default': None}}}
+
+    def __init__(self, graph, attr_dict=None):
+        super(RangeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(RangeOp, attr_dict)
+        assert self.check_required(), 'RangeOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            if item == 'start':
+                in_edges = self._graph.sorted_in_edges(self.name, data=True)
+                ret = in_edges[0][2]['tensor'].value
+            elif item == 'limit':
+                in_edges = self._graph.sorted_in_edges(self.name, data=True)
+                ret = in_edges[1][2]['tensor'].value
+            elif item == 'delta':
+                in_edges = self._graph.sorted_in_edges(self.name, data=True)
+                ret = in_edges[2][2]['tensor'].value
+        except:
+            ret = None
+        if ret is None:
+            ret = super(RangeOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(RangeOp, self).infer_shape()
+        if any(val is None for val in [self.start, self.limit, self.delta]):
+            out_tensor = None
+        else:
+            out_tensor = np.arange(self.start, self.limit, self.delta).astype(self.start.dtype)
+        is_const, is_dynamic = self.infer_symbol()
+        self.set_out_tensor(out_tensor, is_const=is_const, is_dynamic=is_dynamic)
+
+    def infer_symbol(self):
+        if self.ds_mode:
+            is_const = None
+            is_dynamic = None
+            input_tensor_symbols = self.get_input_value_symbols()
+            invalid = any([inp is None for inp in input_tensor_symbols])
+            if not invalid:
+                assert len(input_tensor_symbols) == 3
+                if isinstance(input_tensor_symbols[2], int) and input_tensor_symbols[2] == 1:
+                    out_symbol = input_tensor_symbols[1] - input_tensor_symbols[0]
+                else:
+                    out_symbol = sp.ceiling(
+                        (input_tensor_symbols[1] - input_tensor_symbols[0]) / input_tensor_symbols[2])
+                if expr_has_symbols(out_symbol):
+                    is_const = False
+                    is_dynamic = True
+                else:
+                    is_const = True
+                    is_dynamic = False
+                self.set_out_symbol([out_symbol])
+            return is_const, is_dynamic
+        else:
+            return None, None
+
+
+class ReshapeOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'shape': {'type': AttrType.INTS, 'required': True, 'default': None},
+                    'consumed_inputs': {'type': AttrType.INTS}},
+                5: {},
+                13: {},
+                14: {'allowzero': {'type': AttrType.INT, 'default': 0}}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ReshapeOp, self).__init__(graph, attr_dict)
+        self.origin_shape = None
+        self.update_attributes(ReshapeOp, attr_dict)
+        assert self.check_required(), 'ReshapeOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            cur_ver = self.__dict__['_attr']['cur_version'].value
+            if item == 'shape':
+                if cur_ver == 1:
+                    shape = self._attr[item].value
+                    self.origin_shape = shape
+                else:
+                    in_edges = self._graph.sorted_in_edges(
+                        self.name, data=True)
+                    try:
+                        shape = np.array(
+                            in_edges[1][2]['tensor'].value, np.int32).tolist()
+                        if cur_ver == 14 and bool(self.allowzero) and 0 in shape:
+                            WARN('[Parser]: Reshape-%d(%s) with allowzero is not supported!' % (cur_ver, self.name))
+                    except:
+                        ERROR(
+                            '[Parser]: Meets exception when obtaining shape of Reshape(%s) for %s!' % self.name)
+                        shape = None
+                try:
+                    if np.ndim(shape) == 0:
+                        shape = [shape]
+                    self.origin_shape = shape.copy()
+                    if 0 in shape:
+                        for idx, val in enumerate(shape):
+                            if val == 0:
+                                shape[idx] = self.get_input_tensors()[
+                                    0].shape[idx]
+                    if -1 in shape:
+                        idx = shape.index(-1)
+                        shape[idx] = int(np.prod(self.get_input_shapes()[0]) // -np.prod(shape))
+                except:
+                    ERROR(
+                        '[Parser]: Meets exception when obtaining shape of Reshape(%s) for %s!' % self.name)
+                    shape = None
+                if shape is not None:
+                    self.__dict__['_attr'][item] = Attribute(
+                        item, {'type': AttrType.INTS, 'value': shape})
+                ret = shape
+        except:
+            ret = None
+        if ret is None:
+            ret = super(ReshapeOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(ReshapeOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.reshape(inputs[0], self.shape)
+        out_symbol = self.cal_output_symbol()
+        self.set_out_tensor(out_tensor, shape_symbol=out_symbol)
+
+    def cal_output_symbol(self):
+        if not self.ds_mode:
+            return None
+
+        input_tensor_symbols = self.get_input_value_symbols()
+        invalid = any([inp is None for inp in input_tensor_symbols])
+        if not invalid:
+            if any(not isinstance(x, int) for x in input_tensor_symbols[1]):
+                invalid = True
+        if invalid:
+            out_symbol_value = None
+        else:
+            out_tensor = np.reshape(np.array(input_tensor_symbols[0]), input_tensor_symbols[-1])
+            out_symbol_value = out_tensor.tolist()
+        self.set_out_value_symbol(out_symbol_value)
+        if len(input_tensor_symbols) > 1 and input_tensor_symbols[1] is not None and \
+                not all(isinstance(x, int) for x in input_tensor_symbols[1]) and \
+                Op.is_all_global_symbols(input_tensor_symbols[1], self._graph._attr['global_symbols']) and \
+                -1 not in input_tensor_symbols[1]:
+            self.set_out_symbol(input_tensor_symbols[1])
+
+        input_shape = self.get_input_shapes()[0]
+        out_symbol = self.get_output_symbols()
+
+        if out_symbol and out_symbol[0] is not None:
+            inferred_shape = self.eval_symbol([input_shape], out_symbol)
+            if inferred_shape[0] == self.shape:
+                return out_symbol[0]
+        input_symbol = self.get_input_symbols()[0]
+        output_shape = self.shape if self.origin_shape is None else self.origin_shape
+        output_symbol = [None] * len(output_shape)
+        const_info = self.sorted_in_consts()
+        if const_info and const_info[-1][1] == 1 and not self._attr.get('from_parser', False):
+            out_shape = const_info[-1][2].tolist()
+            output_symbol = out_shape.copy()
+            for i, s in enumerate(output_symbol):
+                if s == 0:
+                    output_symbol[i] = input_symbol[i]
+            if -1 in output_symbol:
+                idx = output_symbol.index(-1)
+                inp_prod = 1
+                for inp_s in input_symbol:
+                    inp_prod *= inp_s
+                out_prod = -1
+                for out_s in output_symbol:
+                    out_prod *= out_s
+                output_symbol[idx] = inp_prod // out_prod
+            return output_symbol
+        else:
+            axes_map = Op.cal_reshape_changed_axis_map(input_shape, output_shape)
+            if axes_map:
+                inp_unchanged_axis = 0
+                for i in range(len(output_shape)):
+                    changed_axis = False
+                    skip_axis = False
+                    for am in axes_map:
+                        if i in am[1]:
+                            if i == am[1][0]:
+                                changed_axis = True
+                                break
+                            else:
+                                skip_axis = True
+                    if skip_axis:
+                        continue
+                    if not changed_axis:
+                        output_symbol[i] = input_symbol[inp_unchanged_axis]
+                        inp_unchanged_axis += 1
+                    else:
+                        for in_axes, out_axes in axes_map:
+                            if out_axes[0] == i:
+                                if len(out_axes) == 1:
+                                    out_axis = out_axes[0]
+                                    _symbol = 1
+                                    for axis in in_axes:
+                                        _symbol *= input_symbol[axis]
+                                        inp_unchanged_axis += 1
+                                    output_symbol[out_axis] = _symbol
+                                else:
+                                    _symbol = 1
+                                    for axis in in_axes:
+                                        _symbol *= input_symbol[axis]
+                                        inp_unchanged_axis += 1
+                                    out_prod = 1
+                                    for axis in out_axes:
+                                        if axis == out_axes[-1]:
+                                            output_symbol[axis] = _symbol // out_prod
+                                        else:
+                                            output_symbol[axis] = output_shape[axis]
+                                            out_prod *= output_shape[axis]
+                                break
+            else:
+                output_symbol = input_symbol.copy()
+
+        if 0 in output_shape:
+            # or -1 in output_shape:
+            for i, s in enumerate(output_shape):
+                if s == 0:
+                    output_symbol[i] = input_symbol[i]
+                # elif s == -1:
+                #     output_symbol[i] = -1
+
+        return output_symbol
+
+
+class ReverseSequenceOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {10: {'batch_axis': {'type': AttrType.INT, 'default': 1, 'options': [0, 1]},
+                     'time_axis': {'type': AttrType.INT, 'default': 0, 'options': [0, 1]}
+                     }
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ReverseSequenceOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ReverseSequenceOp, attr_dict)
+        assert self.check_required(), 'ReverseSequenceOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(ReverseSequenceOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.flip(inputs[0], axis=self.time_axis)
+        self.set_out_tensor(out_tensor)
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            if item == 'batch_axis':
+                attr = self.__dict__['_attr'][item].value
+                ret = int(attr.value) if attr is not None else 1
+            elif item == 'time_axis':
+                attr = self.__dict__['_attr'][item].value
+                return int(attr.value) if attr is not None else 0
+        except:
+            ret = None
+        if ret is None:
+            ret = super(ReverseSequenceOp, self).__getattr__(item)
+        return ret
+
+    def __setattr__(self, item, value):
+        if item == 'batch_axis':
+            try:
+                self.__dict__['_attr'][item].value = int(value)
+            except:
+                self.__dict__['_attr'][item] = Attribute(
+                    item, {'type': AttrType.INTS, 'value': int(value)})
+        elif item == 'time_axis':
+            try:
+                self.__dict__['_attr'][item].value = int(value)
+            except:
+                self.__dict__['_attr'][item] = Attribute(
+                    item, {'type': AttrType.INTS, 'value': int(value)})
+        else:
+            super(ReverseSequenceOp, self).__setattr__(item, value)
+
+
+class ScatterNDOp(OpHasOneOutPort, OnnxOp):
+    @staticmethod
+    def scatternd(data, indices, updates, reduction='none', inplace=False):
+        out_data = data if inplace else copy.deepcopy(data)
+        indices_len = indices.shape[-1]
+        reshaped_indices = np.reshape(indices, [-1, indices_len])
+        reshaped_updates = np.reshape(updates, [-1] + list(data.shape[indices_len:]))
+        if reduction == 'add':
+            np.add.at(out_data, tuple(reshaped_indices.transpose()), reshaped_updates)
+        elif reduction == 'mul':
+            np.multiply.at(out_data, tuple(reshaped_indices.transpose()), reshaped_updates)
+        elif reduction == 'min':
+            np.minimum.at(out_data, tuple(reshaped_indices.transpose()), reshaped_updates)
+        elif reduction == 'max':
+            np.maximum.at(out_data, tuple(reshaped_indices.transpose()), reshaped_updates)
+        elif reduction == 'none':
+            out_data[tuple(reshaped_indices.transpose())] = reshaped_updates
+        return out_data
+
+    @classmethod
+    def attributes(cls):
+        return {11: {},
+                13: {},
+                16: {'reduction': {'type': AttrType.STRING, 'options': ['none', 'mul', 'add'], 'default': 'none'}},
+                18: {'reduction': {'type': AttrType.STRING, 'options': ['none', 'mul', 'add', 'max', 'min'], 'default': 'none'}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ScatterNDOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ScatterNDOp, attr_dict)
+        assert self.check_required(), 'ScatterNDOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            cur_ver = self.__dict__['_attr']['cur_version'].value
+            if item == 'reduction':
+                if cur_ver < 16:
+                    ret = 'none'
+                    self.__dict__['_attr'][item] = Attribute(
+                        item, {'type': AttrType.STRING, 'value': str(ret)})
+                else:
+                    ret = self.__dict__['_attr'][item].value
+        except:
+            ret = None
+        if ret is None:
+            ret = super(ScatterNDOp, self).__getattr__(item)
+        return ret
+
+    def __setattr__(self, item, value):
+        if item == 'reduction':
+            try:
+                assert value in [
+                    'none', 'mul', 'add', 'max', 'min'], 'ScatterNDOp __setattr__ has an invalid value.'
+                cur_ver = self.__dict__['_attr']['cur_version'].value
+                if cur_ver < 16:
+                    assert value == 'none', 'ScatterNDOp __setattr__ has an invalid value.'
+                    self.__dict__['_attr'][item] = Attribute(
+                        item, {'type': AttrType.STRING, 'value': str(value)})
+                else:
+                    self.__dict__['_attr'][item].value = str(value)
+            except:
+                self.__dict__['_attr'][item] = Attribute(
+                    item, {'type': AttrType.STRING, 'value': 'none'})
+        else:
+            super(ScatterNDOp, self).__setattr__(item, value)
+
+    def infer_shape(self):
+        super(ScatterNDOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        data, indices, updates = inputs
+        const_inputs = self.sorted_in_consts()
+        inplace = True if all(in_port != 0 for _, in_port, _ in const_inputs) else False
+        if self.is_inputs_dynamic():
+            out_tensor = data if inplace else copy.deepcopy(data)
+        else:
+            out_tensor = ScatterNDOp.scatternd(data, indices, updates, reduction=self.reduction, inplace=inplace)
+        self.set_out_tensor(out_tensor)
+
+
+class ScatterOp(OpHasOneOutPort, OpHasAxis, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {9: {'axis': {'type': AttrType.INT, 'default': 0}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ScatterOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ScatterOp, attr_dict)
+        assert self.check_required(), 'ScatterOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(ScatterOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        data, indices, updates = inputs
+        data_torch = torch.from_numpy(data.astype(np.float32))
+        indices = GatherElementsOp.make_indices_non_negative(
+            indices, inputs[0].shape[self.axis])
+        index_torch = torch.from_numpy(np.array(indices).astype(np.int64))
+        update_torch = torch.from_numpy(updates.astype(np.float32))
+        out_tensor = torch.Tensor.scatter_(
+            data_torch, src=update_torch, dim=self.axis, index=index_torch).numpy().astype(inputs[0].dtype)
+        self.set_out_tensor(out_tensor)
+
+
+class ScatterElementsOp(OpHasOneOutPort, OpHasAxis, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {11: {'axis': {'type': AttrType.INT, 'default': 0}},
+                13: {'axis': {'type': AttrType.INT, 'default': 0}},
+                # TODO: in order to support torch index_reduce, expand 'reduction' ['none', 'mul', 'add'] to ['none', 'mul', 'add', 'max', 'min'].
+                # will remove after torch suppport converting onnx model to onnx opset 18.
+                16: {'axis': {'type': AttrType.INT, 'default': 0},
+                     'reduction': {'type': AttrType.STRING, 'options': ['none', 'mul', 'add', 'max', 'min'], 'default': 'none'}},
+                18: {'axis': {'type': AttrType.INT, 'default': 0},
+                     'reduction': {'type': AttrType.STRING, 'options': ['none', 'mul', 'add', 'max', 'min'], 'default': 'none'}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ScatterElementsOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ScatterElementsOp, attr_dict)
+        assert self.check_required(), 'ScatterElementsOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            cur_ver = self.__dict__['_attr']['cur_version'].value
+            if item == 'reduction':
+                if cur_ver < 16:
+                    ret = 'none'
+                    self.__dict__['_attr'][item] = Attribute(
+                        item, {'type': AttrType.STRING, 'value': str(ret)})
+                else:
+                    ret = self.__dict__['_attr'][item].value
+        except:
+            ret = None
+        if ret is None:
+            ret = super(ScatterElementsOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(ScatterElementsOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        data, indices, updates = inputs
+        # data_torch = torch.from_numpy(data)  # data_torch and data share the same memory
+        data_torch = torch.from_numpy(np.array(data).astype(np.float32))
+        indices = GatherElementsOp.make_indices_non_negative(
+            indices, inputs[0].shape[self.axis])
+        index_torch = torch.from_numpy(np.array(indices).astype(np.int64))
+        update_torch = torch.from_numpy(np.array(updates).astype(np.float32))
+        if self.reduction == 'none':
+            out_tensor = torch.Tensor.scatter_(
+                data_torch, src=update_torch, dim=self.axis, index=index_torch).numpy()  # in place operation
+        else:
+            onnx_reduction_map = {'mul': 'prod', 'add': 'sum', 'max': 'amax', 'min': 'amin'}
+            assert self.reduction in onnx_reduction_map, 'Meets invalid reduction %s in infer_shape of ScatterElementsOp!' % self.reduction
+            out_tensor = torch.Tensor.scatter_reduce(
+                data_torch, src=update_torch, dim=self.axis, index=index_torch, reduce=onnx_reduction_map[self.reduction]).numpy()
+        out_tensor = out_tensor.astype(inputs[0].dtype)
+        self.set_out_tensor(out_tensor)
+
+
+class ShapeOp(OpHasOneOutPort, ConstLikeOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {},
+                13: {},
+                15: {'end': {'type': AttrType.INT, 'required': False, 'default': None},
+                     'start': {'type': AttrType.INT, 'required': False, 'default': 0}}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(ShapeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(ShapeOp, attr_dict)
+        assert self.check_required(), 'ShapeOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(ShapeOp, self).infer_shape()
+        input_shapes = self.get_input_shapes()
+        if input_shapes and input_shapes[0] is not None:
+            shape = input_shapes[0]
+            if self.cur_version >= 15:
+                rank = len(shape)
+                true_end = rank
+                true_start = 0
+                need_slicing = False
+                if self.end is not None:
+                    true_end = (self.end + rank) if self.end < 0 else self.end
+                    true_end = 0 if true_end < 0 else (
+                        rank if true_end > rank else true_end)
+                    need_slicing = True
+                if self.start != 0:
+                    true_start = (
+                        self.start + rank) if self.start < 0 else self.start
+                    true_start = 0 if true_start < 0 else (
+                        rank - 1 if true_start >= rank else true_start)
+                    need_slicing = True
+                if need_slicing:
+                    shape = shape[true_start: true_end] if (
+                        true_end - true_start) >= 0 else []
+            out_tensor = np.array(shape, np.int64)
+        else:
+            out_tensor = None
+        is_const, is_dynamic = self.infer_symbol()
+        self.set_out_tensor(out_tensor, is_const=is_const, is_dynamic=is_dynamic)
+
+    def infer_symbol(self):
+        if not self.ds_mode:
+            return None, None
+        inp_symbol = self.get_input_symbols()[0]
+        is_const = None
+        is_dynamic = None
+        if inp_symbol and None not in inp_symbol:
+            if Op.is_all_global_symbols(inp_symbol, self._graph._attr['global_symbols']):
+                self.set_out_value_symbol(inp_symbol)
+                self.set_out_symbol([len(inp_symbol)])
+            for expr in inp_symbol:
+                if expr_has_symbols(expr):
+                    is_const = False
+                    is_dynamic = True
+                    break
+        return is_const, is_dynamic
+
+
+class SizeOp(OpHasOneOutPort, ConstLikeOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {}, 13: {}}
+
+    def __init__(self, graph, attr_dict=None):
+        super(SizeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(SizeOp, attr_dict)
+        assert self.check_required(), 'SizeOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(SizeOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.array(inputs[0].size)
+        self.set_out_tensor(out_tensor)
+
+
+class SliceOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'axes': {'type': AttrType.INTS, 'required': False},
+                    'ends': {'type': AttrType.INTS, 'required': True},
+                    'starts': {'type': AttrType.INTS, 'required': True}
+                    },
+                10: {},
+                11: {},
+                13: {}
+                }
+
+    @staticmethod
+    def cal_sliced(starts, ends, input_shape):
+        assert (len(starts) == len(ends)) and (len(starts) == len(input_shape)), \
+            'input_shape is invalid in SliceOp.'
+        starts_np, ends_np, in_shape_np = [np.array(s, np.int64) for s in [
+            starts, ends, input_shape]]
+        end_neg_mask = ends_np < 0
+        ends_np[end_neg_mask] = (ends_np + in_shape_np)[end_neg_mask]
+        ends_np = in_shape_np - ends_np
+        ends_np[ends_np < 0] = 0
+        return starts_np.tolist() + ends_np.tolist()
+
+    @staticmethod
+    def trim_start_end(dim, start, end, step=1):
+        def clamp(val, min_v, max_v):
+            return min(max(val, min_v), max_v)
+        assert step != 0, 'SliceOp step is zero in trim_start_end.'
+        if start < 0:
+            start += dim
+        if step < 0:
+            if end < -1:
+                end += dim
+            start = clamp(start, 0, dim - 1)
+            end = clamp(end, -1, dim - 1)
+        else:
+            if end < 0:
+                end += dim
+            start = clamp(start, 0, dim)
+            end = clamp(end, 0, dim)
+        return start, end
+
+    def __init__(self, graph, attr_dict=None):
+        super(SliceOp, self).__init__(graph, attr_dict)
+        self.update_attributes(SliceOp, attr_dict)
+        assert self.check_required(), 'SliceOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        try:
+            ret = super(SliceOp, self).__getattr__(item)
+        except:
+            ret = None
+        if not ret and item in ('starts', 'ends', 'axes', 'steps'):
+            cur_ver = self.__dict__['_attr']['cur_version'].value
+            try:
+                if item == 'axes':
+                    if cur_ver == 1:
+                        ret = list(
+                            range(len(self.__dict__['_attr']['starts'].value)))
+                    else:
+                        inputs = self.get_input_tensors()
+                        ret = np.array(inputs[3]).tolist() if len(
+                            inputs) > 3 else list(range(len(self.get_input_shapes()[0])))
+                elif item in ('starts', 'ends'):
+                    if cur_ver == 1:
+                        ret = self.__dict__['_attr'][item].value
+                    else:
+                        inputs = self.get_input_tensors()
+                        if item == 'starts':
+                            ret = np.array(inputs[1]).tolist()
+                        else:
+                            ret = np.array(inputs[2]).tolist()
+                elif item == 'steps':
+                    inputs = self.get_input_tensors()
+                    input_shapes = self.get_input_shapes()
+                    if cur_ver == 1:
+                        ret = [1] * len(input_shapes[0])
+                    else:
+                        const_inputs = self.sorted_in_consts()
+                        non_const_in_ports = list(range(len(self.get_input_tensors())))
+                        for _, in_port, _ in const_inputs:
+                            if in_port in non_const_in_ports:
+                                non_const_in_ports.remove(in_port)
+                        if 4 in non_const_in_ports:
+                            ret = [1] * len(input_shapes[0])
+                        else:
+                            ret = np.array(inputs[4]).tolist() if len(
+                                inputs) > 4 else [1] * len(input_shapes[0])
+            except:
+                ret = None
+        return ret
+
+    def __setattr__(self, item, value):
+        if item in ('starts', 'ends', 'axes', 'steps'):
+            try:
+                self.__dict__['_attr'][item].value = list(value)
+            except:
+                self.__dict__['_attr'][item] = Attribute(
+                    item, {'type': AttrType.INTS, 'value': list(value)})
+        else:
+            super(SliceOp, self).__setattr__(item, value)
+
+    def infer_shape(self):
+        super(SliceOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        cur_ver = self.cur_version
+        if cur_ver not in list(SliceOp.attributes().keys()):
+            ERROR('[Parser]: Unsupported op version [%s] for %s!' %
+                  (cur_ver, type(self).__name__))
+
+        if inputs[0] is None or inputs[0].size == 0:
+            ERROR(
+                '[Parser]: Meets invalid input tensor in Slice(%s) infer_shape!' % self.name)
+            return
+
+        rank = len(inputs[0].shape)
+        if cur_ver == 1:
+            assert len(inputs) == 1, \
+                ('[Parser]: Only support one input for Onnx Slice (%s) of ver %d!' % (
+                    self.name, cur_ver))
+            assert len(self.starts) == len(self.ends), \
+                ('[Parser]: Length of starts should be equal to length of ends for Onnx Slice (%s) of ver %d!' % (
+                    self.name, cur_ver))
+            if self.axes is None:
+                self.axes = list(range(len(self.starts)))
+            else:
+                assert len(self.axes) == len(self.starts), \
+                    ('[Parser]: Length of starts should be equal to length of axes for Onnx Slice (%s) of ver %d!' % (
+                        self.name, cur_ver))
+                self.axes = OpHasAxis.make_axes_non_negative(
+                    self.axes, len(inputs[0].shape))
+        else:
+            assert 3 <= len(inputs) <= 5, \
+                ('[Parser]: Only support 3-5 inputs for Onnx Slice (%s) of ver %d!' %
+                 (self.name, cur_ver))
+            if self.axes is None:
+                self.axes = list(range(len(self.starts)))
+            else:
+                self.axes = OpHasAxis.make_axes_non_negative(
+                    self.axes, len(inputs[0].shape))
+            if self.starts and len(self.ends) < len(self.starts):
+                self.ends = self.ends + [sys.maxsize] * \
+                    (len(self.starts) - len(self.ends))
+
+        if self.axes != sorted(self.axes):
+            indices = [self.axes.index(x) for x in sorted(self.axes)]
+            self.axes = sorted(self.axes)
+            self.starts = np.take(
+                np.array(self.starts, np.int64), indices).tolist()
+            self.ends = np.take(
+                np.array(self.ends, np.int64), indices).tolist()
+            self.steps = np.take(
+                np.array(self.steps, np.int64), indices).tolist()
+        axes = list(range(rank))
+        starts = [0] * rank
+        ends = list(inputs[0].shape)
+        steps = [1] * rank
+        j = 0
+        for i, d in enumerate(inputs[0].shape):
+            if j < len(self.axes) and i == self.axes[j]:
+                meta_step = 1 if cur_ver == 1 else self.steps[j]
+                start, end = SliceOp.trim_start_end(
+                    d, self.starts[j], self.ends[j], meta_step)
+                starts[i], ends[i], steps[i] = start, end, meta_step
+                j += 1
+        self.axes, self.starts, self.ends, self.steps = axes, starts, ends, steps
+
+        obj = tuple(slice(s, None if (p < 0 and e < 0) else e, p)
+                    for s, e, p in zip(self.starts, self.ends, self.steps))
+        out_tensor = inputs[0][obj]
+        is_const, is_dynamic = self.infer_symbol()
+        self.set_out_tensor(out_tensor, is_const=is_const, is_dynamic=is_dynamic)
+
+    def convert_version(self):
+        from ...front_end.onnx.passes.common_passes import insert_constant
+        max_ver = type(self).max_ver()
+        cur_ver = self.cur_version
+        if cur_ver < max_ver:
+            if cur_ver == 1:
+                insert_constant(self._graph, self.name + '_starts',
+                                np.array(self.starts, np.int32), self.name, in_port=1)
+                insert_constant(self._graph, self.name + '_ends',
+                                np.array(self.ends, np.int32), self.name, in_port=2)
+            self.cur_version = max_ver
+
+        in_edges = self._graph.sorted_in_edges(self.name, keys=True, data=True)
+        # return if any one of starts/ends/axes/steps is not const
+        if any(in_attr.get('tensor', None) is not None and not in_attr['tensor'].is_const for _, _, _, in_attr in in_edges[1:]):
+            return
+
+        if len(in_edges) >= 2:
+            src, _, k, in_attr = in_edges[1]
+            if in_attr.get('tensor', None) is None \
+                    or (in_attr['tensor'].is_const
+                        and (in_attr['tensor'].value is None or np.array(in_attr['tensor'].value).tolist() != self.starts)):
+                self._graph.remove_edge(src, self.name, key=k)
+                insert_constant(self._graph, self.name + '_starts',
+                                np.array(self.starts, np.int32), self.name, in_port=1)
+
+        if len(in_edges) >= 3:
+            src, _, k, in_attr = in_edges[2]
+            if in_attr.get('tensor', None) is None \
+                    or (in_attr['tensor'].is_const
+                        and (in_attr['tensor'].value is None or np.array(in_attr['tensor'].value).tolist() != self.ends)):
+                self._graph.remove_edge(src, self.name, key=k)
+                insert_constant(self._graph, self.name + '_ends',
+                                np.array(self.ends, np.int32), self.name, in_port=2)
+
+        if len(in_edges) < 4:
+            insert_constant(self._graph, self.name + '_axes',
+                            np.array(self.axes, np.int32), self.name, in_port=3)
+        else:
+            src, _, k, in_attr = in_edges[3]
+            if in_attr.get('tensor', None) is None \
+                    or (in_attr['tensor'].is_const
+                        and (in_attr['tensor'].value is None or np.array(in_attr['tensor'].value).tolist() != self.axes)):
+                self._graph.remove_edge(src, self.name, key=k)
+                insert_constant(self._graph, self.name + '_axes',
+                                np.array(self.axes, np.int32), self.name, in_port=3)
+
+        if len(in_edges) < 5:
+            insert_constant(self._graph, self.name + '_steps',
+                            np.array(self.steps, np.int32), self.name, in_port=4)
+        else:
+            src, _, k, in_attr = in_edges[4]
+            if in_attr.get('tensor', None) is None \
+                    or (in_attr['tensor'].is_const
+                        and (in_attr['tensor'].value is None or np.array(in_attr['tensor'].value).tolist() != self.steps)):
+                self._graph.remove_edge(src, self.name, key=k)
+                insert_constant(self._graph, self.name + '_steps',
+                                np.array(self.steps, np.int32), self.name, in_port=4)
+
+    def infer_symbol(self):
+        if not self.ds_mode:
+            return None, None
+        is_const = None
+        is_dynamic = None
+        input_symbol_values = self.get_input_value_symbols()
+        invalid = any([inp is None for inp in input_symbol_values])
+        if invalid:
+            out_symbol_value = None
+        else:
+            if len(input_symbol_values) == 1:
+                assert len(
+                    np.array(input_symbol_values[0]).shape) == 1, 'Only support 1d list in symbol value infer now.'
+                start = self.starts[0]
+                end = self.ends[0]
+                step = self.steps[0]
+                out_symbol_value = input_symbol_values[0][start:end:step]
+            else:
+                assert input_symbol_values[3] == [
+                    0], 'set infer symbol value still not support multi-dimensional tensors.'
+                start = input_symbol_values[1][0]
+                end = input_symbol_values[2][0]
+                step = input_symbol_values[4][0] if len(input_symbol_values) > 4 else 1
+                if isinstance(start, int) and isinstance(end, int) and isinstance(step, int):
+                    out_symbol_value = input_symbol_values[0][start:end:step]
+                else:
+                    out_symbol_value = None
+        if out_symbol_value is not None:
+            if expr_has_symbols(out_symbol_value):
+                is_const = False
+                is_dynamic = True
+            else:
+                is_const = True
+                is_dynamic = False
+        self.set_out_value_symbol(out_symbol_value)
+
+        inp_symbol = self.get_input_symbols()[0]
+        if inp_symbol is not None and inp_symbol:
+            invalid = False
+            if len(input_symbol_values) > 1:
+                const_info = self.sorted_in_consts()
+                const_axes = [info[1] for info in const_info]
+                if (len(input_symbol_values) > 3 and 3 not in const_axes) or (len(input_symbol_values) > 4 and 4 not in const_axes):
+                    invalid = True
+                for inp in input_symbol_values[1:]:
+                    if inp is None:
+                        invalid = True
+                        break
+            if invalid:
+                ERROR(f'Cannot infer symbol of slice op({self.name}) for unknown inputs.')
+            else:
+                inp_rank = len(inp_symbol)
+                if len(input_symbol_values) == 1:
+                    starts = self.starts
+                    ends = self.ends
+                    steps = self.steps
+                    axes = list(range(inp_rank))
+                else:
+                    starts = input_symbol_values[1]
+                    ends = input_symbol_values[2]
+                    axes = input_symbol_values[3] if len(input_symbol_values) > 3 else list(range(inp_rank))
+                    steps = input_symbol_values[4] if len(input_symbol_values) > 4 else [1] * inp_rank
+                    axes = [axis + inp_rank if axis < 0 else axis for axis in axes]
+                out_symbol = []
+                inp_shape = self.get_input_shapes()[0]
+                for i in range(inp_rank):
+                    if i not in axes:
+                        out_symbol.append(inp_symbol[i])
+                    else:
+                        idx = axes.index(i)
+                        start = starts[idx]
+                        end = ends[idx]
+                        step = steps[idx]
+                        if isinstance(step, int):
+                            if steps[idx] > 0:
+                                if isinstance(start, int):
+                                    start = start if start >= 0 else start + inp_shape[i]
+                                    start = min(max(0, start), inp_shape[i])
+                                if isinstance(end, int):
+                                    end = end if end >= 0 else end + inp_shape[i]
+                                    end = min(max(0, end), inp_shape[i])
+                            else:
+                                if isinstance(start, int):
+                                    start = start if start >= 0 else start + inp_shape[i]
+                                    start = min(max(0, start), inp_shape[i] - 1)
+                                if isinstance(end, int):
+                                    end = end if end >= 0 else end + inp_shape[i]
+                                    end = min(max(-1, end), inp_shape[i] - 1)
+                            if step == 1:
+                                out = end - start
+                            elif step == -1:
+                                out = start - end
+                            else:
+                                out = (end - start) // step
+                        else:
+                            out = (end - start) // step
+                        if expr_has_symbols(out):
+                            out_symbol.append(out)
+                        else:
+                            out_symbol.append(int(out))
+                self.set_out_symbol(out_symbol)
+                if expr_has_symbols(out_symbol):
+                    is_const = False
+                    is_dynamic = True
+        else:
+            is_const = False
+            is_dynamic = True
+        return is_const, is_dynamic
+
+
+class SpaceToDepthOp(LayoutConcernedOp, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'blocksize': {'type': AttrType.INT, 'required': True}},
+                13: {'blocksize': {'type': AttrType.INT, 'required': True}}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(SpaceToDepthOp, self).__init__(graph, attr_dict)
+        self.update_attributes(SpaceToDepthOp, attr_dict)
+        assert self.check_required(), 'SpaceToDepthOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(SpaceToDepthOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        if self.blocksize == 1:
+            out_tensor = inputs[0]
+        else:
+            if self.data_format == 'NHWC':
+                out_tensor = tf.nn.space_to_depth(
+                    inputs[0], self.blocksize).numpy()
+            else:
+                torch_input = torch.from_numpy(inputs[0].astype(np.float32))
+                n, c, h, w = torch_input.size()
+                block_size = self.blocksize
+                out_tensor = torch_input.view(
+                    n, c, h // block_size, block_size, w // block_size, block_size)
+                out_tensor = out_tensor.permute(0, 3, 5, 1, 2, 4).contiguous()
+                out_tensor = out_tensor.view(
+                    n, c * (block_size ** 2), h // block_size, w // block_size)
+                out_tensor = out_tensor.numpy().astype(inputs[0].dtype)
+        self.set_out_tensor(out_tensor)
+
+
+class SplitOp(OpHasAxis, OpHasMultipleOutPorts, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'axis': {'type': AttrType.INT},
+                    'split': {'type': AttrType.INTS, 'required': False}
+                    },
+                2: {'axis': {'type': AttrType.INT, 'default': 0},
+                    'split': {'type': AttrType.INTS, 'required': False}
+                    },
+                11: {'axis': {'type': AttrType.INT, 'default': 0},  # Accepted range is [-rank, rank-1] where r = rank(input).
+                     # >= 0
+                     'split': {'type': AttrType.INTS, 'required': False}
+                     },
+                13: {'axis': {'type': AttrType.INT, 'default': 0},
+                     },
+                18: {'axis': {'type': AttrType.INT, 'default': 0},
+                     'num_outputs': {'type': AttrType.INT, 'default': None},
+                     }}
+
+    def __init__(self, graph, attr_dict=None):
+        super(SplitOp, self).__init__(graph, attr_dict)
+        self.update_attributes(SplitOp, attr_dict)
+        assert self.check_required(), 'SplitOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            if item == 'split':
+                try:
+                    ret = self.__dict__['_attr'][item].value
+                except:
+                    pass
+                if ret is None:
+                    inputs = self.get_input_tensors()
+                    if len(inputs) == 2:
+                        ret = np.array(inputs[1]).tolist()
+                    else:
+                        split_size = inputs[0].shape[self.axis]
+                        if self.cur_version >= 18:
+                            size = int(np.ceil(split_size / self.num_outputs))
+                            remainder = split_size % size
+                            ret = [size] * self.num_outputs
+                            if remainder != 0:
+                                ret[-1] = remainder
+                        else:
+                            ret = [split_size //
+                                   len(self.get_out_ports())] * len(self.get_out_ports())
+                    if self.cur_version < 13:
+                        self.__dict__['_attr'][item].value = ret
+                    else:
+                        self.__dict__['_attr'][item] = Attribute(
+                            item, {'type': AttrType.INTS, 'value': list(ret)})
+        except:
+            ret = None
+        if ret is None:
+            ret = super(SplitOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(SplitOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        cur_ver = self.cur_version
+        if cur_ver == 1:
+            assert len(inputs) in (
+                1, 2), 'The length of input is invalid in SplitOp.'
+        elif cur_ver >= 18:
+            assert (len(inputs) == 2 and self.num_outputs is None) or (len(inputs) == 1 and self.num_outputs is not None), \
+                'Either the second input split or attribute num_outputs should be specified in SplitOp.'
+        else:
+            assert len(
+                inputs) >= 1, 'The length of input is invalid in SplitOp.'
+        out_tensors = tf.split(inputs[0],
+                               np.array(self.split, np.int64),
+                               axis=self.axis)
+        self.set_out_tensor([o.numpy() for o in out_tensors])
+
+
+class SqueezeOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {},
+                11: {},
+                13: {}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(SqueezeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(SqueezeOp, attr_dict)
+        assert self.check_required(), 'SqueezeOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        try:
+            ret = super(SqueezeOp, self).__getattr__(item)
+        except:
+            ret = None
+        if ret is None:
+            cur_ver = self.__dict__['_attr']['cur_version'].value
+            if item == 'axes':
+                if cur_ver >= 13:
+                    inputs = self.get_input_tensors()
+                    if len(inputs) == 1:
+                        ret = None
+                        if item not in self.__dict__['_attr']:
+                            self.__dict__['_attr'][item] \
+                                = Attribute(item, {'type': AttrType.INTS, 'value': ret})
+                    elif len(inputs) == 2:
+                        ret = np.array(inputs[1], np.int64).tolist()
+                        self.__dict__['_attr'][item] \
+                            = Attribute(item, {'type': AttrType.INTS, 'value': ret})
+                    else:
+                        ERROR(
+                            '[Parser]: Invalid inputs number of Squeeze(%s)!' % self.name)
+        return ret
+
+    def infer_shape(self):
+        super(SqueezeOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.squeeze(np.array(inputs[0]), axis=tuple(
+            self.axes) if self.axes else None)
+        self.infer_symbol()
+        self.set_out_tensor(out_tensor)
+
+    def infer_symbol(self):
+        if self.ds_mode:
+            input_symbols = self.get_input_symbols()
+            keep_axes = []
+            for axis in range(len(input_symbols[0])):
+                if axis not in self.axes:
+                    keep_axes.append(axis)
+            out_symbol = []
+            for axis in keep_axes:
+                out_symbol.append(input_symbols[0][axis])
+            self.set_out_symbol(out_symbol)
+            input_symbol_values = self.get_input_value_symbols()
+            invalid = any([inp is None for inp in input_symbol_values])
+            if invalid:
+                out_symbol_value = None
+            else:
+                assert input_symbol_values[1] == [0], 'infer symbol value only support 1D.'
+                out_symbol_value = input_symbol_values[0][0]
+            self.set_out_value_symbol(out_symbol_value)
+
+
+class TileOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {},
+                6: {},
+                13: {}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(TileOp, self).__init__(graph, attr_dict)
+        self.update_attributes(TileOp, attr_dict)
+        assert self.check_required(), 'TileOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(TileOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        cur_ver = self.cur_version
+        if cur_ver == 1:
+            assert len(inputs) == 3, 'The length of input is invalid in TileOp.'
+            out_tensor = None
+        else:
+            assert len(inputs) == 2, 'The length of input is invalid in TileOp.'
+            out_tensor = np.tile(*inputs)
+        out_symbol = self.cal_output_symbol()
+        self.set_out_tensor(out_tensor, shape_symbol=out_symbol)
+
+    def cal_output_symbol(self):
+        if not self.ds_mode:
+            return None
+        const_info = self.sorted_in_consts()
+        if const_info and const_info[-1][1] == 1:
+            repeats = self.get_input_tensors()[1].tolist()
+            inp_symbol = self.get_input_symbols()[0]
+            out_symbol = []
+            for i, s in enumerate(inp_symbol):
+                if repeats[i] == 1:
+                    out_symbol.append(s)
+                else:
+                    out_symbol.append(s * repeats[i])
+        else:
+            return None
+        return out_symbol
+
+
+class TransposeOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'perm': {'type': AttrType.INTS, 'default': [], 'required': False}},
+                13: {'perm': {'type': AttrType.INTS, 'default': [], 'required': False}},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(TransposeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(TransposeOp, attr_dict)
+        assert self.check_required(), 'TransposeOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            if item == 'perm':
+                ret = self.__dict__['_attr'][item].value
+                if not ret:
+                    inputs = self.get_input_tensors()
+                    ret = list(range(0, len(inputs[0].shape)))[::-1]
+                    self.__dict__['_attr'][item].value = ret
+        except:
+            ret = None
+        if ret is None:
+            ret = super(TransposeOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(TransposeOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.transpose(
+            inputs[0], axes=self.perm if self.perm else None)
+        perm = self.perm if self.perm else list(range(len(inputs[0].shape) - 1, -1, -1))
+        if self.ds_mode:
+            inp_symbol = self.get_input_symbols()[0]
+            out_symbol = [inp_symbol[axis] for axis in perm]
+        else:
+            out_symbol = None
+        self.set_out_tensor(out_tensor, shape_symbol=out_symbol)
+
+
+class TriluOp(OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {
+            14: {'upper': {'type': AttrType.BOOL, 'default': True, 'required': False}},
+        }
+
+    def __init__(self, graph, attr_dict=None):
+        super(TriluOp, self).__init__(graph, attr_dict)
+        self.update_attributes(TriluOp, attr_dict)
+        assert self.check_required(), 'TriluOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(TriluOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        k = inputs[1].item()
+        if self.upper:
+            out_tensor = np.triu(inputs[0].astype(np.float32), k)
+        else:
+            out_tensor = np.tril(inputs[0].astype(np.float32), k)
+        out_tensor = out_tensor.astype(inputs[0].dtype)
+        self.set_out_tensor(out_tensor)
+
+
+class UniqueOp(OpHasVariableOutPorts, OpHasAxis, DynamicShapeOp, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {11: {'axis': {'required': False},
+                     'sorted': {'type': AttrType.INT, 'default': 1, 'required': False, 'options': [0, 1]}
+                     }}
+
+    def __init__(self, graph, attr_dict=None):
+        super(UniqueOp, self).__init__(graph, attr_dict)
+        self.update_attributes(UniqueOp, attr_dict)
+        assert self.check_required(), 'UniqueOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        try:
+            if item == 'sorted':
+                ret = bool(self.__dict__['_attr'][item].value)
+        except:
+            ret = None
+        if ret is None:
+            ret = super(UniqueOp, self).__getattr__(item)
+        return ret
+
+    def infer_shape(self):
+        super(UniqueOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        if self.is_all_inputs_const():
+            inp = inputs[0]
+        else:
+            inp_shape = inputs[0].shape
+            inp = np.arange(int(np.prod(inp_shape)), dtype=inputs[0].dtype).reshape(inp_shape)
+        y, indices, inverse_indices, counts = np.unique(
+            inp, True, True, True, axis=self.axis)
+        if self.sorted is False:
+            argsorted_indices = np.argsort(indices)
+            inverse_indices_map = {i: si for i, si in zip(
+                argsorted_indices, np.arange(len(argsorted_indices)))}
+            indices = indices[argsorted_indices]
+            y = np.take(inp, indices, axis=self.axis)
+            inverse_indices = np.asarray(
+                [inverse_indices_map[i] for i in inverse_indices], dtype=np.int64)
+            counts = counts[argsorted_indices]
+        out_ports = self.get_out_ports()
+        out_dict = {
+            0: y,
+            1: indices,
+            2: inverse_indices,
+            3: counts
+        }
+        out_tensors = []
+        for port in out_ports:
+            out_tensors.append(out_dict[port])
+        self.set_out_tensor(out_tensors)
+
+
+class UnsqueezeOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {1: {'axes': {'required': True}},    # non-negative
+                11: {'axes': {'required': True}},
+                13: {}
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(UnsqueezeOp, self).__init__(graph, attr_dict)
+        self.update_attributes(UnsqueezeOp, attr_dict)
+        assert self.check_required(), 'UnsqueezeOp is missing a required parameter.'
+
+    def __getattr__(self, item):
+        ret = None
+        cur_ver = self.__dict__['_attr']['cur_version'].value
+        try:
+            if item == 'axes':
+                if cur_ver <= 11:
+                    ret = self.__dict__['_attr'][item].value
+                else:
+                    inputs = self.get_input_tensors()
+                    ret = np.array(inputs[1]).tolist()
+        except:
+            ret = None
+        if ret is None:
+            ret = super(UnsqueezeOp, self).__getattr__(item)
+        return ret
+
+    def __setattr__(self, item, value):
+        if item == 'axes':
+            try:
+                self.__dict__['_attr'][item].value = list(value)
+            except:
+                self.__dict__['_attr'][item] = Attribute(
+                    item, {'type': AttrType.INTS, 'value': list(value)})
+        else:
+            super(UnsqueezeOp, self).__setattr__(item, value)
+
+    def infer_shape(self):
+        super(UnsqueezeOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = np.expand_dims(np.array(inputs[0]), axis=self.axes)
+        out_symbol = self.cal_output_symbol()
+        self.set_out_tensor(out_tensor, shape_symbol=out_symbol)
+
+    def cal_output_symbol(self):
+        if self.ds_mode:
+            input_symbols = self.get_input_symbols()
+            out_ndim = len(self.axes) + len(input_symbols[0])
+
+            symbol_it = iter(input_symbols[0])
+            out_symbol = []
+            for axis in range(out_ndim):
+                if axis in self.axes:
+                    out_symbol.append(1)
+                else:
+                    out_symbol.append(next(symbol_it))
+
+            input_tensor_symbols = self.get_input_value_symbols()
+            out_symbol_value = None
+            if input_tensor_symbols[0] is None:
+                pass
+            else:
+                inp_symbol_value = input_tensor_symbols[0]
+                axes = None
+                if self.cur_version > 11:
+                    if input_tensor_symbols[1] is not None:
+                        axes = input_tensor_symbols[1]
+                else:
+                    axes = self.axes
+                if axes is not None:
+                    for axis in axes:
+                        out_symbol_value = [inp_symbol_value]
+                        inp_symbol_value = out_symbol_value
+            self.set_out_value_symbol(out_symbol_value)
+        else:
+            out_symbol = None
+        return out_symbol
+
+
+class WhereOp(MultidirectionalBroadcastOp, OpNeedBroadcast, OpHasOneOutPort, OnnxOp):
+    @classmethod
+    def attributes(cls):
+        return {9: {},
+                16: {},
+                }
+
+    def __init__(self, graph, attr_dict=None):
+        super(WhereOp, self).__init__(graph, attr_dict)
+        self.update_attributes(WhereOp, attr_dict)
+        assert self.check_required(), 'WhereOp is missing a required parameter.'
+
+    def infer_shape(self):
+        super(WhereOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        if len(inputs) == len(self.broad_casted):
+            inputs = self.broad_casted
+        out_tensor = np.where(*inputs)  # element-wise select like onnx Where
+        out_symbol = self.cal_output_symbol()
+        self.infer_symbol()
+        self.set_out_tensor(out_tensor, shape_symbol=out_symbol)
+
+    def infer_symbol(self):
+        if self.ds_mode:
+            input_tensor_symbols = self.get_input_value_symbols()
+            invalid = any([inp is None for inp in input_tensor_symbols])
+            if len(input_tensor_symbols) != 3:
+                invalid = True
+            if not invalid:
+                cond = input_tensor_symbols[0]
+                if len(cond) == 1:
+                    out_symbol_value = input_tensor_symbols[1] if cond[0] else input_tensor_symbols[2]
+                else:
+                    out_symbol_value = []
+                    for i, c in enumerate(cond):
+                        out_symbol_value.append(input_tensor_symbols[1][i] if c else input_tensor_symbols[2][i])
+            else:
+                out_symbol_value = None
+            self.set_out_value_symbol(out_symbol_value)

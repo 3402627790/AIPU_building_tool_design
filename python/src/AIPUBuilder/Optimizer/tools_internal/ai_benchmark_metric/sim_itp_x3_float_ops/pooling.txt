@@ -1,0 +1,475 @@
+import math
+import torch
+import numpy as np
+from ..engine import register_gt, register_gen_weight
+from AIPUBuilder.core import OpType
+from AIPUBuilder.logger import DEBUG, INFO
+
+from .gt_util.aiff import _aiff_compression_bias, _aiff_merge_shifts
+from .gt_util.layout_transfer import layout_convert, transfer_shape
+from .gt_util.aiff import _aiif_ahead_shift_biases, get_ops_options
+from .gt_util.aiff import _aiff_inner_activation, _aiff_final_output
+from .gt_util.aiff import clip_to_bit
+from .gt_util import check_in_datalayout, check_out_datalayout, clamp
+from .gt_util.quant_utils import linear_dequantize, to_fp24
+
+
+@register_gt(OpType.Pooling)
+def pooling(self, *args, **kwargs):
+    if self.inputs[0].dtype.is_float:
+        return fp_pool(self)
+    is_16b_scale = True if get_ops_options("AIPU_AVG_POOL_16BIT_SCALE") == '1' else False
+    o_type = str(self.outputs[0].dtype)
+    inp = self.inputs[0].betensor.long()
+    inp = check_in_datalayout(self, [inp], ['NHWC'])[0]
+
+    # avgpool1d
+    if inp.dim() == 3:
+        inp = inp[:, None, :, :]
+
+    count_include_pad = self.params.get('count_include_pad', default=True)
+    kernel_size = [self.params.get('kernel_y', default=1), self.params["kernel_x"]]
+    stride = [self.params.get("stride_y",  default=1), self.params["stride_x"]]
+    dilation = [self.params.get("dilation_y",  default=1), self.params["dilation_x"]]
+    padding = [self.params.get('pad_top',  default=0),
+               self.params.get('pad_bottom',  default=0),
+               self.params['pad_left'],
+               self.params['pad_right']]
+    kernel_size[0] = kernel_size[0] if isinstance(kernel_size[0], int) else 1
+    stride[0] = stride[0] if isinstance(stride[0], int) else 1
+    dilation[0] = dilation[0] if isinstance(dilation[0], int) else 1
+    padding[0] = padding[0] if isinstance(padding[0], int) else 0
+    padding[1] = padding[1] if isinstance(padding[1], int) else 0
+
+    ceil_mode = self.params.get('ceil_mode',  default=False)
+    inputs_type = str(self.inputs[0].dtype)
+    if self.params['method'] == 'MAX':
+        inp = layout_convert(inp, 'NHWC', 'NCHW')
+        pad_val = np.iinfo(inputs_type).min
+        padding_torch = padding[-2:] + padding[:-2]
+        inp = torch.nn.functional.pad(inp, padding_torch, value=pad_val)
+        y = torch.nn.functional.max_pool2d(inp.float(),
+                                           kernel_size=kernel_size,
+                                           stride=stride, padding=0,
+                                           dilation=dilation,
+                                           ceil_mode=ceil_mode)
+
+        # conner case under ceil_mode=True CTL-6524/CB-6234
+        out_shape = transfer_shape(self.outputs[0].shape, self.outputs[0].shape.layout.name, 'NHWC') \
+            if self.outputs[0].shape.layout.name not in ['Flat', 'NHWC'] else self.outputs[0].shape
+        out_shape = [out_shape[0]] + [1] + list(out_shape)[1:] if len(out_shape) == 3 else out_shape
+        _, out_h, out_w, out_c = out_shape
+        current_outh, current_outw = y.shape[2: 4]
+        if current_outh < out_h or current_outw < out_w:
+            DEBUG('Pooling: conner case under ceil_mode=True.')
+            auto_pad_h = out_h - current_outh
+            auto_pad_w = out_w - current_outw
+            padding = (0, auto_pad_w, 0, auto_pad_h)  # left, right, top, bottom
+            y = torch.nn.functional.pad(y, padding, value=pad_val)
+
+        y = clip_to_bit(y, 32, True, to_type=str(self.outputs[0].dtype))
+        y = layout_convert(y, 'NCHW', 'NHWC')
+        y = clip_to_bit(y, 32, True, o_type)
+
+        y = check_out_datalayout(self, [y], ['NHWC'])[0]
+
+        if self.outputs[0].betensor.dim() == 3:
+            y = torch.squeeze(y, dim=1)
+        self.outputs[0].betensor = y
+        return y
+
+    elif self.params['method'] == 'MIN':
+        inp = layout_convert(inp, 'NHWC', 'NCHW')
+        pad_val = np.iinfo(inputs_type).max
+        padding_torch = padding[-2:] + padding[:-2]
+        inp = torch.nn.functional.pad(inp, padding_torch, value=pad_val)
+        y = -torch.nn.functional.max_pool2d(-inp.float(),
+                                            kernel_size=kernel_size,
+                                            stride=stride, padding=0,
+                                            dilation=dilation,
+                                            ceil_mode=ceil_mode)
+
+        # conner case under ceil_mode=True CTL-6524/CB-6234
+        out_shape = transfer_shape(self.outputs[0].shape, self.outputs[0].shape.layout.name, 'NHWC') \
+            if self.outputs[0].shape.layout.name not in ['Flat', 'NHWC'] else self.outputs[0].shape
+        out_shape = [out_shape[0]] + [1] + list(out_shape)[1:] if len(out_shape) == 3 else out_shape
+        _, out_h, out_w, out_c = out_shape
+        current_outh, current_outw = y.shape[2: 4]
+        if current_outh < out_h or current_outw < out_w:
+            DEBUG('Pooling: conner case under ceil_mode=True.')
+            auto_pad_h = out_h - current_outh
+            auto_pad_w = out_w - current_outw
+            padding = (0, auto_pad_w, 0, auto_pad_h)  # left, right, top, bottom
+            y = torch.nn.functional.pad(y, padding, value=pad_val)
+
+        y = clip_to_bit(y, 32, True, to_type=str(self.outputs[0].dtype))
+        y = layout_convert(y, 'NCHW', 'NHWC')
+        y = clip_to_bit(y, 32, True, o_type)
+        y = check_out_datalayout(self, [y], ['NHWC'])[0]
+        self.outputs[0].betensor = y
+        return y
+
+    elif self.params['method'] == 'L1':
+        ceil_mode_pad_bottom = 0
+        ceil_mode_pad_right = 0
+        if ceil_mode:
+            o_h = math.ceil((inp.shape[1] - kernel_size[0] + self.params['pad_top'] +
+                            self.params['pad_bottom']) / stride[0]) + 1
+            o_w = math.ceil((inp.shape[2] - kernel_size[1] + self.params['pad_left'] +
+                            self.params['pad_right']) / stride[1]) + 1
+            ceil_mode_pad_bottom = (o_h - 1) * stride[0] + kernel_size[0] - (padding[0] + padding[1]) - inp.shape[1]
+            ceil_mode_pad_right = (o_w - 1) * stride[1] + kernel_size[1] - (padding[2] + padding[3]) - inp.shape[2]
+        pad_val = -self.inputs[0].quantization.offset
+        inp = torch.nn.functional.pad(inp, (0, 0, self.params['pad_left'],
+                                            self.params['pad_right']+ceil_mode_pad_right,
+                                            self.params['pad_top'], self.params['pad_bottom']+ceil_mode_pad_bottom, 0, 0), value=pad_val)
+        inp = inp + self.inputs[0].quantization.offset
+
+        kernel_x = kernel_size[1]
+        kernel_y = kernel_size[0]
+        stride_x = stride[1]
+        stride_y = stride[0]
+        out_height = math.floor((inp.shape[1] - (dilation[0]*(kernel_y-1)+1)) / stride_y) + 1
+        out_width = math.floor((inp.shape[2] - (dilation[1]*(kernel_x-1)+1)) / stride_x) + 1
+        scale = self.params['scale_value']
+        shift = self.params['shift_value']
+        output = torch.zeros((inp.shape[0], inp.shape[3], out_height, out_width))
+        input_trans = inp.permute(0, 3, 1, 2)
+        input_trans = torch.absolute(input_trans)
+
+        for hi in range(out_height):
+            h_start = hi * stride_y
+            h_end = min(h_start + kernel_y + (kernel_y-1)*(dilation[0]-1), np.shape(inp)[1])
+            for wi in range(out_width):
+                w_start = wi * stride_x
+                w_end = min(w_start + kernel_x + (kernel_x-1)*(dilation[1]-1), np.shape(inp)[2])
+                sum_kernel = torch.sum(input_trans[:, :, h_start:h_end:dilation[0],
+                                                   w_start:w_end:dilation[1]], dim=(2, 3))
+                sum_kernel2 = torch.round(sum_kernel.type(torch.double) * scale / (2 ** shift)).type(torch.int32)
+                output[:, :, hi, wi] = sum_kernel2
+        y = output.permute(0, 2, 3, 1)
+
+        y -= self.outputs[0].quantization.offset
+        y = clamp(y, self.outputs[0].dtype)
+        y = check_out_datalayout(self, [y.type(torch.int32)], ['NHWC'])[0]
+        self.outputs[0].betensor = y
+        return y
+
+    elif self.params['method'] == 'L2':
+        ceil_mode_pad_bottom = 0
+        ceil_mode_pad_right = 0
+        if ceil_mode:
+            o_h = math.ceil((inp.shape[1] - kernel_size[0] + self.params['pad_top'] +
+                            self.params['pad_bottom']) / stride[0]) + 1
+            o_w = math.ceil((inp.shape[2] - kernel_size[1] + self.params['pad_left'] +
+                            self.params['pad_right']) / stride[1]) + 1
+            ceil_mode_pad_bottom = (o_h - 1) * stride[0] + kernel_size[0] - (padding[0] + padding[1]) - inp.shape[1]
+            ceil_mode_pad_right = (o_w - 1) * stride[1] + kernel_size[1] - (padding[2] + padding[3]) - inp.shape[2]
+        pad_val = -self.inputs[0].quantization.offset
+        inp = torch.nn.functional.pad(inp, (0, 0, self.params['pad_left'],
+                                            self.params['pad_right']+ceil_mode_pad_right,
+                                            self.params['pad_top'], self.params['pad_bottom']+ceil_mode_pad_bottom, 0, 0), value=pad_val)
+        inp = inp + self.inputs[0].quantization.offset
+
+        lut = self.constants['sqrt_lut'].betensor.long()
+        if lut.numel() == 256:
+            lut = torch.nn.functional.pad(lut, (0, 1), mode='constant', value=lut[255])
+        kernel_x = kernel_size[1]
+        kernel_y = kernel_size[0]
+        stride_x = stride[1]
+        stride_y = stride[0]
+        out_height = math.floor((inp.shape[1] - (dilation[0]*(kernel_y-1)+1)) / stride_y) + 1
+        out_width = math.floor((inp.shape[2] - (dilation[1]*(kernel_x-1)+1)) / stride_x) + 1
+        scale = self.params['scale_value']
+        shift = self.params['shift_value']
+        output = torch.zeros((inp.shape[0], inp.shape[3], out_height, out_width))
+        input_trans = inp.permute(0, 3, 1, 2)
+        input_trans_square = torch.square(input_trans)
+
+        for hi in range(out_height):
+            h_start = hi * stride_y
+            h_end = min(h_start + kernel_y + (kernel_y-1)*(dilation[0]-1), inp.shape[1])
+            for wi in range(out_width):
+                w_start = wi * stride_x
+                w_end = min(w_start + kernel_x + (kernel_x-1)*(dilation[1]-1), inp.shape[2])
+                sum_kernel = torch.sum(input_trans_square[:, :, h_start:h_end:dilation[0], w_start:w_end:dilation[1]],
+                                       dim=(2, 3)).type(torch.float64)
+                sum_kernel2 = torch.round(sum_kernel.type(torch.double) * scale / (2 ** shift)).type(torch.int32)
+                sum_kernel2 = torch.clip(sum_kernel2, 0, 65535)
+                tmp_shape = sum_kernel2.shape
+                sum_kernel2 = sum_kernel2.flatten()
+                sum_kernel2_lut = []
+                # uint16 data, uint8 table
+                for d in sum_kernel2:
+                    lut_idx = (d >> 8) & 0xff
+                    lut_delta = d & 0xff
+                    dout = int(lut[lut_idx]) + ((int(lut[lut_idx + 1]) - int(lut[lut_idx])) * lut_delta >> 8)
+                    sum_kernel2_lut.append(dout)
+                sum_kernel2_lut = torch.asarray(sum_kernel2_lut, dtype=sum_kernel2.dtype)
+                sum_kernel2_lut = sum_kernel2_lut.reshape(tmp_shape)
+                output[:, :, hi, wi] = sum_kernel2_lut.type(torch.int32)
+        y = output.permute(0, 2, 3, 1)
+        y = clamp(y, self.outputs[0].dtype)
+        y = check_out_datalayout(self, [y.type(torch.int32)], ['NHWC'])[0]
+        self.outputs[0].betensor = y
+        return y
+
+    elif self.params['method'] == 'AVG':
+        i_b, i_h, i_w, i_c = inp.shape
+        out_shape = transfer_shape(self.outputs[0].shape, self.outputs[0].shape.layout.name, 'NHWC') \
+            if self.outputs[0].shape.layout.name not in ['Flat', 'NHWC'] else self.outputs[0].shape
+        out_shape = [out_shape[0]] + [1] + list(out_shape)[1:] if len(out_shape) == 3 else out_shape
+        _, o_h, o_w, _ = out_shape
+        ceil_mode_pad_bottom = 0
+        ceil_mode_pad_right = 0
+        if ceil_mode:
+            if kernel_size[0] == 1 and stride[0] == 2:
+                o_h = math.ceil((i_h + padding[0] + padding[1]-kernel_size[0])/stride[0])
+                ceil_mode_pad_bottom = 0
+            else:
+                # When ceil_mode=True, Sliding windows that would start in the right padded region are ignored.
+                # https://pytorch.org/docs/2.1/generated/torch.nn.AvgPool2d.html#torch.nn.AvgPool2d
+                # o_h = math.ceil(
+                #     (i_h + padding[0] + padding[1] - (1 + (kernel_size[0] - 1) * dilation[0])) / stride[0]) + 1
+                ceil_mode_pad_bottom = (o_h - 1) * stride[0] + kernel_size[0] - (padding[0] + padding[1]) - i_h
+            if kernel_size[1] == 1 and stride[1] == 2:
+                o_w = math.ceil((i_w + padding[2] + padding[3]-kernel_size[1])/stride[1])
+                ceil_mode_pad_right = 0
+            else:
+                # o_w = math.ceil(
+                #     (i_w + padding[2] + padding[3] - (1 + (kernel_size[1] - 1) * dilation[1])) / stride[1]) + 1
+                ceil_mode_pad_right = (o_w - 1) * stride[1] + kernel_size[1] - (padding[2] + padding[3]) - i_w
+
+        # total_pad = [padding[0], padding[1] + ceil_mode_pad_bottom, padding[2], padding[3] + ceil_mode_pad_right]
+        div_lut = torch.from_numpy(get_div_lut(kernel_size, 256).astype(np.float64))
+        if is_16b_scale:
+            # print("setting avg pool 16bit scale")
+            div_lut = torch.from_numpy(get_div_lut(kernel_size, 32768).astype(np.float64))  # int16_max
+        inp = inp.float()
+        y = avg_pool(self, inp, kernel_size, stride, padding, (ceil_mode_pad_bottom, ceil_mode_pad_right), div_lut)
+        # after finish calculate the avg value of whole feature map, the result need to clip to the range of the output type
+        y = clamp(y, self.outputs[0].dtype)
+        y = check_out_datalayout(self, [y], ['NHWC'])[0]
+        if self.outputs[0].betensor.dim() == 3:
+            y = torch.squeeze(y, dim=1)
+        self.outputs[0].betensor = y
+        return y
+
+
+def get_div_lut(kernel_size, max_scale):
+    div_lut = np.array([1, 0, 1, 0], dtype=np.uint8)
+    kernel_size = kernel_size[0] * kernel_size[1] + 1
+    range_high = np.log2(max_scale) + 1
+    for i in range(2, kernel_size):
+        scale = 1 / i
+        do_scale = 0
+        do_shift = 0
+        for j in reversed(range(0, int(range_high))):
+            do_scale = np.round(2 ** (np.log2(scale) - np.round(np.log2(scale)) + j)).astype(np.uint32)
+            do_shift = abs(np.round(np.log2(scale)) - j).astype(np.uint32)
+            if (do_scale < max_scale and do_scale % 2 != 0):
+                break
+        div_lut = np.concatenate((div_lut, [do_scale, do_shift])).astype(np.uint16)
+    return div_lut
+
+
+def avg_pool(self, inputs, kernel, stride, pad_value, ceil_mod_pad, DivLUT):
+    # inputs alread pad the pads and ceil mode addtion pads
+    i_b, i_h, i_w, i_c = inputs.shape
+    ky = kernel[0]
+    kx = kernel[1]
+    sy = stride[0]
+    sx = stride[1]
+    # use pad value in ir, more than 'SAME' and VALID"
+    pad_top, pad_bottom, pad_left, pad_right = pad_value
+    pad_bottom += ceil_mod_pad[0]
+    pad_right += ceil_mod_pad[1]
+    o_h = math.floor((i_h - ky + pad_top + pad_bottom) / sy) + 1
+    o_w = math.floor((i_w - kx + pad_left + pad_right) / sx) + 1
+
+    # torch sum for fp16 data precision>np,cause mismatch
+    if self.inputs[0].dtype.is_float:
+        output = np.zeros((i_b, o_h, o_w, i_c))
+        kernel_sum = np.zeros((i_b, o_h, o_w, i_c))
+    else:
+        output = torch.zeros((i_b, o_h, o_w, i_c), dtype=torch.float64)
+        kernel_sum = torch.zeros((i_b, o_h, o_w, i_c), dtype=torch.float64)
+    count_include_pad = self.params['count_include_pad'] if 'count_include_pad' in self.params else False
+    ceil_mode = self.params['ceil_mode'] if 'ceil_mode' in self.params else False
+    zerop = self.inputs[0].quantization.offset
+    ceil_mode_pad_bottom = 0
+    ceil_mode_pad_right = 0
+
+    # height
+    for ph in range(o_h):
+        h_start = ph * sy - pad_top
+        h_end = min(h_start + ky, i_h)
+        h_start = max(h_start, 0)
+        # width
+        for pw in range(o_w):
+            w_start = pw * sx - pad_left
+            w_end = min(w_start + kx, i_w)
+            w_start = max(w_start, 0)
+            if count_include_pad:
+                real_kernel_y = ky - ceil_mod_pad[0] if (ceil_mode and ph == o_h - 1) else ky
+                real_kernel_x = kx - ceil_mod_pad[1] if (ceil_mode and pw == o_w - 1) else kx
+                box_size = real_kernel_y * real_kernel_x
+                box_size_without_pad = (h_end - h_start) * (w_end - w_start)
+            else:
+                box_size = (h_end - h_start) * (w_end - w_start)
+                box_size_without_pad = box_size
+            if self.inputs[0].dtype.is_float:
+                kernel_sum[:, ph, pw, :] = np.sum(inputs.astype(
+                    np.float32)[:, h_start:h_end, w_start:w_end, :], axis=(1, 2))
+                output[:, ph, pw, :] = kernel_sum[:, ph, pw, :] / box_size
+            else:
+                scale = DivLUT[2 * box_size]
+                shift = DivLUT[2 * box_size + 1]
+                if 'scale_value' in self.params and 'shift_value' in self.params:
+                    scale = self.params['scale_value']
+                    shift = self.params['shift_value']
+                kernel_sum[:, ph, pw, :] = torch.sum(
+                    inputs[:, h_start:h_end, w_start:w_end, :].type(torch.int32), dim=(1, 2))
+                if count_include_pad:
+                    kernel_sum[:, ph, pw, :] -= (box_size - box_size_without_pad) * zerop
+                if 'sim_x3_itp' not in self.attrs:
+                    print(f"sim_x3_itp not in {self}")
+                sim_x3_itp = self.attrs.get('sim_x3_itp', '')
+                fp_bits = self.attrs.get('sim_x3_itp_fp_bits', 24)
+                if sim_x3_itp == 'qdqs':
+                    from .gt_util.quant_utils import dequantize_with_scale_approx_method, quantize_with_scale_approx_method
+                    inp_scale = torch.tensor(self.inputs[0].quantization.scales, device=output.device).half().float()
+                    out_scale = torch.tensor(self.outputs[0].quantization.scales, device=output.device).half().float()
+                    assert torch.allclose(inp_scale, out_scale), f"failed in avgpooling inp_scale != out_scale {self}"
+
+                    out_scale = to_fp24(out_scale, fp_bits)
+                    # sum_fp24 = to_fp24((kernel_sum[:, ph, pw, :]).float())
+                    sum_fp24 = (kernel_sum[:, ph, pw, :]).float()
+
+                    if ky > 13 or kx > 13:
+                        multiplier = to_fp24(inp_scale, fp_bits)
+                        dequantize_x = dequantize_with_scale_approx_method(sum_fp24, multiplier)
+                        dequantize_avg = to_fp24(dequantize_x / box_size, fp_bits)
+                    else:
+                        multiplier = to_fp24(inp_scale * box_size, fp_bits)
+                        dequantize_x = dequantize_with_scale_approx_method(sum_fp24, multiplier)
+                        dequantize_avg = to_fp24(dequantize_x, fp_bits)
+                    # dequantize_avg = to_fp24(dequantize_kernel_sum / box_size)
+                    q_avg = (dequantize_avg * out_scale).round()
+                    q_avg = (to_fp24(quantize_with_scale_approx_method(dequantize_avg, out_scale), fp_bits)).round()
+                    output[:, ph, pw, :] = clamp(q_avg, self.outputs[0].dtype)
+                elif sim_x3_itp == 'qdq':
+                    inp_scale = torch.tensor(self.inputs[0].quantization.scales, device=output.device)
+                    out_scale = torch.tensor(self.outputs[0].quantization.scales, device=output.device)
+                    assert torch.allclose(inp_scale, out_scale), f"failed in avgpooling inp_scale != out_scale {self}"
+
+                    out_scale = to_fp24(out_scale, fp_bits)
+                    sum_fp24 = to_fp24((kernel_sum[:, ph, pw, :]).float(), fp_bits)
+
+                    if ky > 13 or kx > 13:
+                        multiplier = to_fp24(1.0 / out_scale, fp_bits)
+                        dequantize_avg = to_fp24(to_fp24(sum_fp24 * multiplier, fp_bits) / box_size, fp_bits)
+                    else:
+                        multiplier = to_fp24(1.0 / (out_scale * box_size), fp_bits)
+                        dequantize_avg = to_fp24(sum_fp24 * multiplier, fp_bits)
+                    # dequantize_avg = to_fp24(dequantize_kernel_sum / box_size)
+                    q_avg = (dequantize_avg * out_scale).round()
+                    output[:, ph, pw, :] = clamp(q_avg, self.outputs[0].dtype)
+                elif sim_x3_itp == 'cast':
+                    sum_fp24 = to_fp24((kernel_sum[:, ph, pw, :]).float(), fp_bits)
+                    if ky > 13 or kx > 13:
+                        avg_fp24 = to_fp24(sum_fp24 / box_size, fp_bits)
+                    else:
+                        multiplier = to_fp24(1.0 / box_size, fp_bits)
+                        avg_fp24 = to_fp24(sum_fp24 * multiplier, fp_bits)
+                    output[:, ph, pw, :] = clamp(avg_fp24.round(), self.outputs[0].dtype)
+                else:
+                    output[:, ph, pw, :] = torch.round(kernel_sum[:, ph, pw, :].type(
+                                           torch.double) * scale * (0.5 ** shift)).type(torch.int32)
+    return output
+
+
+def fp_pool(self):
+    o_type = str(self.outputs[0].dtype)
+    inp = self.inputs[0].betensor
+    inp = check_in_datalayout(self, [inp], ['NHWC'])[0]
+
+    # avgpool1d
+    if inp.dim() == 3:
+        inp = inp[:, None, :, :]
+
+    count_include_pad = self.params.get('count_include_pad', default=True)
+    kernel_size = self.params.get('kernel_y', default=1), self.params["kernel_x"]
+    stride = self.params.get("stride_y",  default=1), self.params["stride_x"]
+    dilation = self.params.get("dilation_y",  default=1), self.params["dilation_x"]
+    padding = (self.params.get('pad_top',  default=0),
+               self.params.get('pad_bottom',  default=0),
+               self.params['pad_left'],
+               self.params['pad_right'])
+
+    ceil_mode = self.params.get('ceil_mode',  default=False)
+    inputs_type = str(self.inputs[0].dtype)
+    if self.params['method'] == 'MAX':
+        inp = layout_convert(inp, 'NHWC', 'NCHW')
+        pad_val = np.finfo(inputs_type).min
+        padding_torch = padding[-2:] + padding[:-2]
+        inp = torch.nn.functional.pad(inp, padding_torch, value=pad_val)
+        y = torch.nn.functional.max_pool2d(inp.float(),
+                                           kernel_size=kernel_size,
+                                           stride=stride, padding=0,
+                                           dilation=dilation,
+                                           ceil_mode=ceil_mode)
+
+        y = layout_convert(y, 'NCHW', 'NHWC')
+        y = y.to(torch.float16)
+
+        y = check_out_datalayout(self, [y], ['NHWC'])[0]
+        print(self.outputs[0].shape, y.shape)
+        self.outputs[0].betensor = y
+        return y
+
+    elif self.params['method'] == 'MIN':
+        inp = layout_convert(inp, 'NHWC', 'NCHW')
+        pad_val = np.finfo(inputs_type).max
+        padding_torch = padding[-2:] + padding[:-2]
+        inp = torch.nn.functional.pad(inp, padding_torch, value=pad_val)
+        y = -torch.nn.functional.max_pool2d(-inp.float(),
+                                            kernel_size=kernel_size,
+                                            stride=stride, padding=0,
+                                            dilation=dilation,
+                                            ceil_mode=ceil_mode)
+
+        y = layout_convert(y, 'NCHW', 'NHWC')
+        y = y.to(torch.float16)
+        y = check_out_datalayout(self, [y], ['NHWC'])[0]
+        self.outputs[0].betensor = y
+        return y
+
+    elif self.params['method'] == 'AVG':
+        i_b, i_h, i_w, i_c = inp.shape
+        ceil_mode_pad_bottom = 0
+        ceil_mode_pad_right = 0
+        if ceil_mode:
+            o_h = math.ceil((i_h - kernel_size[0] + padding[0] + padding[1]) / stride[0]) + 1
+            o_w = math.ceil((i_w - kernel_size[1] + padding[2] + padding[3]) / stride[1]) + 1
+            ceil_mode_pad_bottom = (o_h - 1) * stride[0] + kernel_size[0] - (padding[0] + padding[1]) - i_h
+            ceil_mode_pad_right = (o_w - 1) * stride[1] + kernel_size[1] - (padding[2] + padding[3]) - i_w
+
+        # total_pad = [padding[0], padding[1] + ceil_mode_pad_bottom, padding[2], padding[3] + ceil_mode_pad_right]
+        inp = inp.float().cpu().numpy()
+        y = avg_pool(self, inp, kernel_size, stride, padding, (ceil_mode_pad_bottom, ceil_mode_pad_right), None)
+        # after finish calculate the avg value of whole feature map, the result need to clip to the range of the output type
+        y = y.astype('float16')
+        y = check_out_datalayout(self, [y], ['NHWC'])[0]
+        if self.outputs[0].betensor.dim() == 3:
+            y = torch.squeeze(y, dim=1)
+        self.outputs[0].betensor = y
+        return y
+
+
+@register_gen_weight(OpType.Pooling)
+def gen_random_weight(self):
+    if 'sqrt_lut' in self.constants:  # for L2
+        sqrt_lut = np.random.randint(0, 255, 256, dtype=np.uint8)
+        sqrt_lut = np.sort(sqrt_lut)
+        self.constants['sqrt_lut'].betensor = sqrt_lut
