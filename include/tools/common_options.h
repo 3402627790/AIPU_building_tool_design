@@ -292,6 +292,7 @@ inline void get_common_argparser(ArgParser &args)
     args.add_hidden_argument("", "--show_soms_bottleneck", "show soms bottleneck", true, true);
     args.add_hidden_argument("", "--print_emitter_var", "print emitter variable", true, true);
     args.add_hidden_argument("", "--dump_constant_info", "dump constant information into constant_info.csv", true, true);
+    args.add_hidden_argument("", "--dump_lora_info", "dump LoRA weight info into temp.lora_info.json", true, true);
 }
 
 inline bool cmd_action(ArgParser &args, int &retcode)

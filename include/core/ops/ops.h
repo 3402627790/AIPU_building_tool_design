@@ -3514,7 +3514,6 @@ namespace ops
      * @param[in] box_num_per_class A "TensorPtr", specified number of boxes in each class and each batch with shape [batch_size, num_classes].
      * @param[in] class_num_per_batch A "TensorPtr", specified number of classes in each batch with shape [batch_size, 1].
      * @param[in] score A "TensorPtr", specified scores of boxes in each batch with shape [batch_size, num_boxes].
-     * @param[in] image_info An uint32 vector, specified input featuremap height/width information, due to coordinates is normalized value, so we need this to back it.
      * @param[in] nms_method A "NmsMethod" enumerate, it can be NmsMethod.Hard, NmsMethod.Gaussian. Default is Hard.
      * @param[in] max_output_size An uint32 scalar, specifying max output box number. Default is 5000.
      * @param[in] score_threshold A float/int scalar, boxes with scores lower than the threshold are filtered before sending to the NMS algorithm. Default is 0.6.
@@ -3522,6 +3521,9 @@ namespace ops
      * @param[in] sigma A float scalar, which will be ignored when method is not "Gaussian". Default is 0.
      * @param[in] center_point_box A bool scalar, "false" means coordinates format is [y1,x1,y2,x2]. "true" means coordinates format is [y_center,x_center,height,width].
      *                             Default is "false".
+     * @param[in] image_info An uint32 vector, specified input featuremap height/width information, due to *            coordinates is normalized value, so we need this to back it.
+     *            This parameter is valid only when 'center_point_box' is enabled.
+     *            It defaults to empty.
      * @return vector of "TensorPtr", first "TensorPtr" specified coordinates of selected boxes in each batch. Its shape is same with @p box_coor.
      *         Second "TensorPtr" specified number of selected boxes in each batch. Its shape is same with @p box_num_per_class.
      *         Third "TensorPtr" specified scores of boxes in each batch. Its shape is same with @p score.
@@ -3531,13 +3533,13 @@ namespace ops
                                TensorPtr box_num_per_class,
                                TensorPtr class_num_per_batch,
                                TensorPtr score,
-                               const std::vector<uint32_t> &image_info,
                                NmsMethod nms_method = NmsMethod::Hard,
                                uint32_t max_output_size = 5000,
                                NodeParamValue core_threshold = 0.6,
                                NodeParamValue iou_threshold = 0.5,
                                float sigma = 0.f,
-                               bool center_point_box = false);
+                               bool center_point_box = false,
+                               const std::vector<uint32_t> &image_info = {});
 
     /**
      * @brief Calculate the mean and variance of based on the sufficient statistics.
@@ -4183,7 +4185,7 @@ namespace ops
      * @return A "TensorPtr",with the same shape and type as the tensors in "input".
      */
     TensorPtr reverse_sequence(TensorPtr input,
-                               TensorPtr seq_lengths,
+                               TensorPtr seq_lengths = nullptr,
                                int32_t seq_axis = 1,
                                int32_t batch_axis = 0);
 

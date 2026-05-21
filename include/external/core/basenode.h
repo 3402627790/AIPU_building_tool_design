@@ -83,8 +83,8 @@ struct NodeParamValue
     union V {
         bool b;
         Tensor::Dtype t;
-        long int i;
-        unsigned long int ui;
+        long long i;
+        unsigned long long ui;
         double f; //use double for all float data
     };
 
@@ -123,10 +123,12 @@ struct NodeParamValue
     NodeParamValue(const char *s);
     NodeParamValue(int i);
     NodeParamValue(long int i);
+    NodeParamValue(long long i);
     NodeParamValue(bool b);
     NodeParamValue(Tensor::Dtype t);
     NodeParamValue(unsigned int i);
     NodeParamValue(unsigned long int i);
+    NodeParamValue(unsigned long long i);
     NodeParamValue(float f);
     NodeParamValue(double f);
     NodeParamValue(TensorShape f);
@@ -215,8 +217,10 @@ struct NodeParamValue
     operator bool() const;
     operator int() const;
     operator long int() const;
+    operator long long() const;
     operator unsigned int() const;
     operator unsigned long int() const;
+    operator unsigned long long() const;
     operator float() const;
     operator half() const;
     operator bfp16() const;

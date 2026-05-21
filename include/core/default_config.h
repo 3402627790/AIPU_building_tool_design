@@ -85,7 +85,7 @@ constexpr auto get_default_config_dict()
         std::make_pair(Constants::native_float_simulator, false),
         std::make_pair(Constants::dump_addr_cfg, false),
         std::make_pair(Constants::load_addr_cfg, ""),
-        std::make_pair(Constants::max_wt_size, 0),
+        std::make_pair(Constants::max_wt_size, 3500ul * 1024ul * 1024ul),
         std::make_pair(Constants::profile, false),
         std::make_pair(Constants::datalayout_schedule_debug, false),
         std::make_pair(Constants::check_tensor_data_size, true),
@@ -120,7 +120,8 @@ constexpr auto get_default_config_dict()
         std::make_pair(Constants::asid_perf, "123,0"),
         std::make_pair(Constants::show_ds_shape, false),
         std::make_pair(Constants::print_emitter_var, false),
-        std::make_pair(Constants::dump_constant_info, false));
+        std::make_pair(Constants::dump_constant_info, false),
+        std::make_pair(Constants::dump_lora_info, false));
     return default_config;
 }
 

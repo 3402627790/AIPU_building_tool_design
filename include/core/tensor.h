@@ -192,12 +192,56 @@ public:
     // get a int dtype by bits and sign, bits only support 8, 16, 32, 64, a void  type will return  if bits is invalid
     static Tensor::Dtype get_type(const int bits, const bool is_sign);
     static const std::string &dtype_to_string(Tensor::Dtype dt);
-    static size_t dtype_size(Tensor::Dtype dt);
-    static size_t dtype_bits(Tensor::Dtype dt);
+
+    static bool is_float(Tensor::Dtype dt)
+    {
+        return (dt >= Tensor::FP16 && dt <= Tensor::FP8E5M2) ||
+               (dt == Tensor::FP4E2M1FN || dt == Tensor::COMPACT_FP4E2M1FN);
+    }
+
+    static bool is_compact(Tensor::Dtype dt)
+    {
+        return dt >= Tensor::COMPACT_UINT4 && dt <= Tensor::COMPACT_FP4E2M1FN;
+    }
+
+    static size_t dtype_bits(Tensor::Dtype dt)
+    {
+        if (dt <= 1)
+        {
+            return 8;
+        }
+        if (is_float(dt))
+        {
+            switch (dt)
+            {
+            case BFP16:
+                return 16;
+            case FP8E4M3FN:
+            case FP8E5M2:
+            case FP4E2M1FN:
+                return 8;
+            case COMPACT_FP4E2M1FN:
+                return 4;
+            default:
+                return (1 << (dt - Tensor::FP16)) * 16;
+            }
+        }
+        if (is_compact(dt))
+        {
+            return (1 << ((dt & 0xe) >> 1)) * 8 - 4;
+        }
+        return 8 << (((dt & 0xe) >> 1) - 1);
+    }
+    static size_t dtype_size(Tensor::Dtype dt)
+    {
+        return dtype_bits(dt) / 8.0f + 0.5f;
+    }
+
     static Tensor::Dtype dtype_to_signed(Tensor::Dtype dt);
     static Tensor::Dtype dtype_to_unsigned(Tensor::Dtype dt);
-    static bool is_float(Tensor::Dtype dt);
     static bool is_signed(Tensor::Dtype dt);
+
+    static TensorPtr workspace(size_t size);
     /**
      * @brief check is the dtype is interger type, not including align and compact int type
      *
@@ -207,8 +251,6 @@ public:
      */
     static bool is_int(Tensor::Dtype dt);
     static bool is_aligned(Tensor::Dtype dt);
-    static bool is_compact(Tensor::Dtype dt);
-
     static bool fill_tensors_data(std::vector<TensorPtr> &tensors, std::vector<std::string> &files);
 
     friend std::ostream &operator<<(std::ostream &os, Tensor::Dtype dtype);
@@ -255,6 +297,18 @@ public:
     {
         return reinterpret_cast<int8_t *>(m_data + m_data_offset);
     }
+
+    template <typename T>
+    T *device_data()
+    {
+        return reinterpret_cast<T *>(m_device_data + m_data_offset);
+    }
+
+    int8_t *device_data()
+    {
+        return reinterpret_cast<int8_t *>(m_device_data + m_data_offset);
+    }
+
     /**
      * @brief get/set the tensor shape
      *
@@ -280,11 +334,18 @@ public:
     }
 
     /**
-     * @brief get the memory size needed by the tensor
+     * @brief get the memory size needed by the tensor where the strides of the tensor is not considered.
      *
      * @return size_t memory size
      */
     virtual size_t mem_size() const;
+
+    /**
+     * @brief get the buffer size occupyied by the tensor, which will count the strides of the tensor
+     * 
+     * @return size_t 
+     */
+    virtual size_t buffer_size() const;
 
     /**
      * @brief get the memory object of this tensor
@@ -313,6 +374,22 @@ public:
      * @param size size of data
      */
     virtual void set_data(void *d, uint32_t size);
+    /**
+     * @brief Set the device data to the tensor, then the  data's memory ownership is indicated by owner parameter
+     *
+     * @param d the data
+     * @param size size of data
+     * @param owner the owner of device_data: if true, owned by this Tensor, otherwise, owned by others
+     */
+    virtual void set_device_data(void *d, uint32_t size, const bool owner = true);
+    bool is_owns_host_data() const
+    {
+        return owns_m_data;
+    }
+    bool is_owns_device_data() const
+    {
+        return owns_m_device_data;
+    }
     // free old data and share a new data of t
     /**
      * @brief share data from other tensor
@@ -521,6 +598,9 @@ public:
     int get_ref_count();
 
 protected:
+    void _set_host_device_data(void *d, const uint32_t &size, const bool owner, const bool is_host);
+
+protected:
     template <Tensor::Dtype dtype>
     void compact_impl();
     template <Tensor::Dtype dtype>
@@ -530,6 +610,7 @@ protected:
 
     std::string m_name;
     char *m_data = nullptr;
+    char *m_device_data = nullptr;
     uint32_t m_data_offset = 0;
     // check m_data ref
     std::atomic<int> *ref_count = nullptr;
@@ -540,6 +621,19 @@ protected:
     NodeRef m_node;
     std::vector<NodeRef> m_consumers;
     bool m_io = false;
+    union
+    {
+        // Bit0: m_data ownership (1=owned by Tensor, 0=owned by others)
+        // Bit1: m_device_data ownership (1=owned by Tensor, 0=owned by others)
+        uint8_t m_owner = 0b11;
+
+        struct
+        {
+            uint8_t owns_m_data : 1;        // 1: m_data(or host_data) owned by this Tensor, 0: owned by others
+            uint8_t owns_m_device_data : 1; // 1: m_device_data owned by this Tensor, 0: owned by others
+            uint8_t reserved : 6;
+        };
+    };
     friend Node;
     friend ComputeTensor;
 };
@@ -617,4 +711,4 @@ struct is_supported_tensor_type
 _TENSOR_TYPE_MAP(DECLARE_SUPPORTED_TENSOR_TYPE)
 
 } // namespace aipubt
-#endif //! CORE_TENSOR_H
+#endif //! CORE_TENSOR_

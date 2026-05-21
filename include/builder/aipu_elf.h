@@ -936,6 +936,9 @@ public:
     ConstantHashTable get_constant_hash_table() const;
     void set_constant_hash_table(ConstantHashTable &table);
 
+    std::string get_lora_info() const;
+    void set_lora_info(const std::string &info);
+
     ELFIO::section *get_elf_section(const std::string &section_name) const;
     std::string get_text() const;
     uint32_t get_text_size() const;
@@ -947,6 +950,8 @@ public:
     const std::map<std::string, uint64_t> &get_symtab() const;
 
     void set_comment(const std::string &comment);
+    void set_cps_bin_note(BinSection &ro, const std::string &note_name);
+    void get_cps_section_note(const aipubt::ELFIO::section *s, std::string kernel_name, uint32_t info_type, char *&buf, uint32_t &size);
 
 protected:
     BinSection get_bin_note(const std::string &note_name) const;

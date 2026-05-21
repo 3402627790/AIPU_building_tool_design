@@ -23,12 +23,14 @@
 #ifndef GCOMPILER_API_H
 #define GCOMPILER_API_H
 
+#include "builder/gop_plugin.h"
 #include "builder/linker/elfreader.h"
 #include "builder/plugin.h"
 #include "builder/profiler.h"
 #include "builder/readonly_param.h"
 #include "builder/target.h"
 #include "core/config.h"
+#include "core/const_tensor.h"
 #include "core/graph.h"
 #include "core/graph_matcher.h"
 #include "core/logger.h"

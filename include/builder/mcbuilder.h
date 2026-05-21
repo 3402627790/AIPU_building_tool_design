@@ -20,8 +20,8 @@
  * @Last Modified by: Neo Wang
  * @Last Modified time: 2022-04-29 16:28:29
  */
-#ifndef BUILDER_BUILDER2_H
-#define BUILDER_BUILDER2_H
+#ifndef BUILDER_MCBUILDER_H
+#define BUILDER_MCBUILDER_H
 #include "builder.h"
 #include <builder/bldtypes.h>
 #include <builder/linker/linker_v2.h>
@@ -98,7 +98,5 @@ protected:
     std::string m_asm;
     std::string m_mainobj;
 };
-
-void generate_pp_updater(std::stringstream &m_stream, bool prefetch = true);
 } // namespace aipubt
-#endif //!BUILDER_BUILDER2_H
+#endif //!BUILDER_MCBUILDER_H

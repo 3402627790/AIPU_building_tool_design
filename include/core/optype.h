@@ -263,6 +263,9 @@ enum OpType
     OpType_FlashAttention = 224,
     OpType_Switch = 225,
     OpType_Empty = 226,
+    OpType_FlashDecoding = 227,
+    OpType_ScaledDotProductAttention = 228,
+    OpType_Trilu = 229,
 
     OpType_BatchToDepth = 1000,
     OpType_DepthToBatch = 1001,

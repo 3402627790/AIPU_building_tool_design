@@ -39,6 +39,8 @@ namespace Constants
     constexpr const char *AIPUOLD = "AIPUOLD";
     constexpr const char *AIPUOCC = "AIPUOCC";
 
+    constexpr const char *CPSLD = "CPSLD";
+
     // switch keys/global config
     constexpr const char *random_init = "random-init";
     constexpr const char *enable_sparse_opt = "enable_sparse_opt";
@@ -135,9 +137,11 @@ namespace Constants
     constexpr const char *show_ds_shape = "show_ds_shape";
     constexpr const char *print_emitter_var = "print_emitter_var";
     constexpr const char *dump_constant_info = "dump_constant_info";
+    constexpr const char *dump_lora_info = "dump_lora_info";
 
     constexpr const char *load_addr_cfg = "load_addr_cfg";
     constexpr const char *dump_addr_cfg = "dump_addr_cfg";
+    constexpr const char *load_wt_update_cfg = "load_wt_update_cfg";
     constexpr const char *multi_core = "multi_core";
     constexpr const char *multi_tec = "multi_tec";
     constexpr const char *target_name = "target_name";
@@ -213,6 +217,7 @@ namespace Constants
     constexpr const char *pre_config_layouts = "pre_config_layouts";
     constexpr const char *use_in_tensor = "use_in_tensor";
     constexpr const char *use_out_tensor = "use_out_tensor";
+    constexpr const char *is_workspace_tensor = "is_workspace_tensor";
 
     constexpr const char *printf_fifo = "printf_fifo";
     constexpr const char *printf_fifo_size = "printf_fifo_size";
@@ -252,6 +257,12 @@ namespace Constants
     constexpr const char *output_shape_offset = ".output_shape_offset";
     constexpr const char *output_shape_size = ".output_shape_size";
     constexpr const char *output_symbol_shape = ".output_symbol_shape";
+    constexpr const char *virtual_multi_core = "virtual_multi_core";
+    constexpr const char *virtual_core_num = "virtual_core_num";
+    constexpr const char *virtual_core_idx = "virtual_core_idx";
+    constexpr const char *virtual_core_node = "virtual_core_node";
+    constexpr const char *lora_node = "lora_node";
+    constexpr const char *lora_info = "lora_info";
 
     constexpr const char *build_error_log = "build_error_log";
     constexpr const char *build_warn_log = "build_warn_log";
@@ -260,6 +271,7 @@ namespace Constants
     constexpr const char *dot_address = ".dot_address";
     constexpr const char *dot_for_profiler = ".dot_for_profiler";
     constexpr const char *plugin_attrs_name = "_plugin";
+    constexpr const char *plugin_impl = "plugin_impl";
     constexpr const char *node_perf = "node_perf";
     constexpr const char *operator_id = "operator_id";
     constexpr const char *opid_counter = "opid_counter";

@@ -23,7 +23,7 @@
 #ifndef BUILDER_TOOLS_H
 #define BUILDER_TOOLS_H
 #include <builder/builder.h>
-#include <builder/builder2.h>
+#include <builder/mcbuilder.h>
 #include <builder/profiler.h>
 #include <builder/target.h>
 #include <core/any.h>

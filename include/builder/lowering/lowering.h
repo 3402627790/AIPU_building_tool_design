@@ -112,6 +112,7 @@ void show_all_passes_name();
 void lower_before_all(GraphPtr g);
 void lower_before_tiling(GraphPtr g);
 void lower_before_optimize(GraphPtr g);
+void lower_run_tiling(GraphPtr g);
 void lower_after_unfold(GraphPtr g);
 void lower_before_plugin(GraphPtr g);
 void lower_after_optimize(GraphPtr g);
@@ -268,10 +269,13 @@ DYNAMIC_PASS_FUNCTION(hwa_softmax_c_adaptor);
 DYNAMIC_PASS_FUNCTION(eliminate_broadcast_matmul);
 PASS_FUNCTION(merge_switch_dummy);
 PASS_FUNCTION(remove_switch);
+PASS_FUNCTION(virtual_core_adaptor);
 
 PASS_FUNCTION2(apply_plugins);
 PASS_FUNCTION2(apply_internal_plugins);
 PASS_FUNCTION2(fuse_transpose_reshape_matmul);
+
+PASS_FUNCTION2(apply_gopplugins);
 
 PASS_FUNCTION(decompose_layernorm);
 PASS_FUNCTION(decompose_instancenorm);

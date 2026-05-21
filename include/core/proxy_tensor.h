@@ -91,6 +91,8 @@ public:
      */
     size_t mem_size() const override;
 
+    size_t buffer_size() const override;
+
     /**
      * @brief get the memory object of this tensor
      *

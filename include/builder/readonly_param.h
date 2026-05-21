@@ -23,8 +23,10 @@
 #ifndef BUILDER_READ_ONLY_PARAM_H
 #define BUILDER_READ_ONLY_PARAM_H
 #include "builder/bldtypes.h"
+#include <core/const_tensor.h>
 #include <core/fp16.h>
 #include <core/placeholder.h>
+#include <core/surface.h>
 #include <cstdint>
 #include <string>
 #include <tongue/symbolic.h>
@@ -60,6 +62,10 @@ struct ReadOnlyParam
     TensorPtr tensor = 0;
 
     Expr expr;
+
+    ConstTensorPtr const_tensor = 0;
+
+    SurfacePtr surface = 0;
 
     /**
      * @brief Construct a new Read Only Param object
@@ -127,30 +133,56 @@ struct ReadOnlyParam
     /**
      * @brief Construct a new Read Only Param object
      * 
-     * @param o use a TensorPtr to construct the paramter as a memory paramter.
+     * @param t use a TensorPtr to construct the paramter as a memory paramter.
      */
-    ReadOnlyParam(TensorPtr o) : tensor(o) {}
+    ReadOnlyParam(TensorPtr t) : tensor(t)
+    {
+        if (!t)
+        {
+            ERROR() << "A null pointer cannot be an argument!";
+        }
+    }
+    ReadOnlyParam(ConstTensorPtr t) : const_tensor(t)
+    {
+        if (!t)
+        {
+            ERROR() << "A null pointer cannot be an argument!";
+        }
+    }
+    ReadOnlyParam(SurfacePtr s) : surface(s)
+    {
+        if (!s)
+        {
+            ERROR() << "A null pointer cannot be an argument!";
+        }
+    }
 
     /**
      * @brief Construct a new Read Only Param object
      * 
-     * @param o use a PlaceholderPtr to construct the paramter as a memory paramter.
+     * @param t use a PlaceholderPtr to construct the paramter as a memory paramter.
      */
-    ReadOnlyParam(PlaceholderPtr o) : tensor(o) {}
+    ReadOnlyParam(PlaceholderPtr t) : tensor(t)
+    {
+        if (!t)
+        {
+            ERROR() << "A null pointer cannot be an argument!";
+        }
+    }
 
     /**
      * @brief Construct a new Read Only Param object
      * 
-     * @param o use a TensorPtr to construct the paramter as a memory paramter.
+     * @param t use a TensorPtr to construct the paramter as a memory paramter.
      */
-    ReadOnlyParam(ComputeTensor o);
+    ReadOnlyParam(ComputeTensor t);
 
     /**
      * @brief Construct a new Read Only Param object
      * 
      * @param o use a Expr to construct the paramter.
      */
-    ReadOnlyParam(Expr o) : expr(o){}
+    ReadOnlyParam(Expr o) : expr(o) {}
 
     /**
      * @brief Construct a new Read Only Param object
@@ -189,6 +221,15 @@ struct ReadOnlyParam
         return tensor;
     }
 
+    operator ConstTensorPtr()
+    {
+        return const_tensor;
+    }
+
+    operator SurfacePtr()
+    {
+        return surface;
+    }
     /**
      * @brief implicitly convertion to PlaceholderPtr
      * 
@@ -248,5 +289,5 @@ std::ostream &operator<<(std::ostream &os, const ReadOnlyParam &p);
 std::string complete_text_code_name(const std::string &base_name);
 BuilderText get_text_content_by_filename(const std::string &filename);
 void cache_text_content(const std::string &filename, BuilderText text);
-};     // namespace aipubt
+} // namespace aipubt
 #endif //!BUILDER_READ_ONLY_PARAM_H

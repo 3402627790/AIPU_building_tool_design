@@ -38,6 +38,7 @@ enum ISAType
     // ISA_ZYv5 = 3,
     ISA_ZYv5 = 4,
     ISA_ZYv6 = 5,
+    ISA_ZYv7 = 6,
 };
 struct ISAInfo
 {
@@ -85,7 +86,7 @@ public:
     {
         return m_detail.m_tec_num;
     }
-     uint32_t gsram_size() const
+    uint32_t gsram_size() const
     {
         return m_detail.m_gsram_size;
     }

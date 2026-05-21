@@ -67,6 +67,8 @@ public:
     ~GraphMatcher();
     std::vector<std::vector<NodePtr>> match(GraphPtr g);
 
+    std::vector<NodePtr> match_nodes(NodePtr root);
+
     // default is relaxed mode.
     // if relaxed mode: the ref's children can be < smaller than graph's node's children
     // if not: ref's children must strictly equal to the matched one.

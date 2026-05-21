@@ -73,6 +73,8 @@ class CheckerOpPlugin;
 REGISTER_PLUGININFO(CheckerOpPlugin)
 class DtypeOpPlugin;
 REGISTER_PLUGININFO(DtypeOpPlugin)
+class GopPlugin;
+REGISTER_PLUGININFO(GopPlugin)
 void _buildtool_register_cppplugin(CPluginInfo p);
 class PluginLoader
 {

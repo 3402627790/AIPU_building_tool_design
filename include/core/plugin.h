@@ -15,8 +15,8 @@
 //
 //--------------------------------------------------------------------------------
 /*
- * @Author: Neo Wang 
- * @Date: 2020-02-05 11:51:27 
+ * @Author: Neo Wang
+ * @Date: 2020-02-05 11:51:27
  * @Last Modified by: Neo Wang
  * @Last Modified time: 2020-04-02 11:14:29
  */
@@ -36,12 +36,13 @@
 #define PLUGIN_EXPORT
 #endif
 #define MAX_PLUGIN_NUMBERS 64
+#define STRINGIFY(x) #x
 
 /**
  * @brief PluginType use 32bit for type id
  *        The low 16bit is used to distigurich which catergary of  plugin
  *        The high 16bit is used to store the plugin feateure.
- * 
+ *
  */
 enum PlugInType
 {
@@ -62,7 +63,7 @@ struct PluginInfo;
 namespace aipubt
 {
 void _buildtool_register_plugin(PluginInfo *p);
-}; //namespace aipubt
+}; // namespace aipubt
 class _PluginRegisterHelper
 {
 public:
@@ -83,23 +84,22 @@ public:
     };
 #define REGISTER_PLUGININFO(class_type) REGISTER_PLUGININFO_WITH_NAME(class_type, class_type##Info)
 #define REGISTER_PLUGIN(class_type, plugin_version, plugin_type) \
-    extern "C"                                                   \
+                                                                 \
+    static void *get_plugin##class_type()                        \
     {                                                            \
-        PLUGIN_EXPORT void *get_plugin##class_type()             \
-        {                                                        \
-            static class_type singleton;                         \
-            return &singleton;                                   \
-        }                                                        \
-        PLUGIN_EXPORT PluginInfo plugin_infos##class_type = {    \
-            API_VERSION,                                         \
-            plugin_version,                                      \
-            plugin_type,                                         \
-            #class_type,                                         \
-            #class_type,                                         \
-            get_plugin##class_type,                              \
-        };                                                       \
+        static class_type singleton;                             \
+        return &singleton;                                       \
     }                                                            \
+    static PluginInfo plugin_infos##class_type = {               \
+        API_VERSION,                                             \
+        plugin_version,                                          \
+        plugin_type,                                             \
+        #class_type,                                             \
+        #class_type,                                             \
+        get_plugin##class_type,                                  \
+    };                                                           \
+                                                                 \
     static _PluginRegisterHelper _plugin_register_##class_type((PluginInfo *)&plugin_infos##class_type);
 
 REGISTER_PLUGININFO_WITH_NAME(void, PluginInfo);
-#endif //!CORE_PLUGIN_H
+#endif //! CORE_PLUGIN_H

@@ -466,6 +466,9 @@ inline bool operator>=(const Symbol &a, const Symbol &b)
     return a.id() >= b.id();
 }
 
+std::ostream &operator<<(std::ostream &os, const Symbol &sym);
+std::ostream &operator<<(std::ostream &os, Expr expr);
+
 // relaxed mode: only focus on structural equal
 bool compare(ExprPtr a, const std::vector<Symbol> &arga,
              ExprPtr b, const std::vector<Symbol> &argb,

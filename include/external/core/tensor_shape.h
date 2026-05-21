@@ -232,7 +232,7 @@ public:
 
 private:
     ShapeDim m_idx = {0, 1, 2, 3, -1}; // default dim is -1, -1 means that has no D axis
-    DataLayout m_layout = DataLayout_Flat;
+    mutable DataLayout m_layout = DataLayout_Flat;
     std::vector<tongue::Expr> m_shape;
     friend class TensorShape;
 };
@@ -500,7 +500,7 @@ public:
      *
      * @return std::vector<uint32_t>
      */
-    std::vector<uint32_t> strides();
+    std::vector<uint32_t> strides() const;
 
     /**
      * @brief reset the strides based on current shape
@@ -521,7 +521,7 @@ public:
      *
      * @return std::vector<uint32_t>
      */
-    bool check_strides(const std::vector<uint32_t> &strides);
+    bool check_strides(const std::vector<uint32_t> &strides) const;
 
     /**
      * @brief check if the shape stride is continuos
@@ -569,7 +569,7 @@ public:
     }
 
 private:
-    bool check_layout(bool is_correct = false);
+    bool check_layout(bool is_correct = false) const;
     void push_back(int d);
     template <typename... IList>
     void push_back(int di, IList... new_shape)
@@ -579,8 +579,8 @@ private:
     }
 
     std::vector<int> m_shape;
-    std::vector<uint32_t> m_strides;
-    bool m_shape_change = false;
+    mutable std::vector<uint32_t> m_strides;
+    mutable bool m_shape_change = false;
     SymbolShape m_symbol;
 };
 
