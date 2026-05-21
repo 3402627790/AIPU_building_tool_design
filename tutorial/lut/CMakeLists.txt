@@ -1,8 +1,8 @@
-
+cmake_minimum_required (VERSION 2.8)
 project(AIPUBuildPluginLUTExample)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  ${C_CXX_FLAGS}  -g -std=c11 -Wall -Werror")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}   ${C_CXX_FLAGS} -g  -std=c++17 -Wall -Werror  -fno-exceptions -fPIC -Wsign-promo  -Wno-null-dereference -fvisibility-inlines-hidden -Werror=int-to-pointer-cast -Werror=pointer-to-int-cast -Werror=return-type   -Wno-enum-compare  -Wno-expansion-to-defined  -Wno-multichar -fno-strict-aliasing")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}   ${C_CXX_FLAGS} -g  -std=c++14 -Wall -Werror  -fno-exceptions -fPIC -Wsign-promo  -Wno-null-dereference -fvisibility-inlines-hidden -Werror=int-to-pointer-cast -Werror=pointer-to-int-cast -Werror=return-type   -Wno-enum-compare  -Wno-expansion-to-defined  -Wno-multichar -fno-strict-aliasing")
 
 set(AIPUBUILDERROOT "/project/ai/scratch01/AIPUBuilder/")
 set(PLUGIN_DIR "${PROJECT_SOURCE_DIR}/plugin")

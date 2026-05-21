@@ -1,0 +1,120 @@
+#!/bin/env bash
+
+show_help() { 
+    echo "Usage: $0 case_dir [-h] [--help]"
+    echo "  -h,--help:"
+    echo "          show this help message."
+    echo "  case_dir:" 
+    echo "           run a case in emulator."
+}
+RUN_CMD="~/run_X1.sh"
+while [ True ]; do
+if [ "$1" = "--help" -o "$1" = "-h" ]; then
+    show_help
+    exit 0;
+else
+    break
+fi
+done
+
+HOST="sh-paladin01"
+CASE=`realpath $1`
+CASE_NAME="$(basename $CASE)"
+PERF_PATH="/data/home/neowan01/perf"
+REMOTE_PATH="${PERF_PATH}/${CASE_NAME}"
+CFG_PATH=${CASE}/temp.cfg
+if [ "$HOSTNAME" != "szc-login04" ]; then
+    ssh szc-login04 "~/.local/bin/run_emulator $CASE"
+    # wait 
+    exit 0
+fi
+echo "case name is $CASE_NAME"
+# OPTIONS=""
+OPTIONS="--ddr_rd_delay 75 --ddr_wr_delay 12"
+PXP_OPTIONS="--ddr_rd_delay_rd 75 --ddr_wr_delay 12"
+# ls $CASE
+PJ="x1"
+TCFG="sc_411"
+if [ $# -eq 1 ]
+then 
+    CFG=`grep -E "CONFIG=(.+)" ${CFG_PATH}`
+    CFG=${CFG#*=}
+    echo "run for config $CFG"
+    #configuration 1:X2_1204 2:X2_1204_MP3 3:Z5_0901 4:Z5_0901_MP2
+    RUN_CMD="~/run_zy.sh"
+    case $CFG in  
+    "X3_1304")
+        PJ="x3"
+        TCFG="sc_010b" 
+        RUN_CMD="~/run_x3.sh"
+        ;;
+    "X3_1304MP2")
+        PJ="x3"
+        TCFG="sc_010" 
+        RUN_CMD="~/run_x3.sh"
+        ;;
+    "2")  
+        PJ="x2"
+        TCFG="sc_000" 
+        RUN_CMD="~/run_x2.sh"
+        ;; 
+    "X2_1204MP3")  
+        PJ="x2"
+        TCFG="sc_000" 
+        RUN_CMD="~/run_x2.sh"
+        ;; 
+    "1")  
+        PJ="x2"
+        TCFG="sc_605" 
+        RUN_CMD="~/run_x2.sh"
+        ;; 
+    "X2_1204")  
+        PJ="x2"
+        TCFG="sc_605" 
+        RUN_CMD="~/run_x2.sh"
+        ;; 
+    "X1-1204")  
+        PJ="x1"
+        TCFG="sc_411" 
+        RUN_CMD="~/run_x1.sh"
+        ;;  
+    "Z3-0901")  
+        PJ="z3"
+        TCFG="sc_110" 
+        ;;  
+    "Z3-1204")  
+        PJ="z3"
+        TCFG="sc_410" 
+        ;; 
+    "Z1-0904")  
+        PJ="z1"
+        TCFG="sc_000" 
+        ;;  
+    "Z1-1002")  
+        PJ="z1"
+        TCFG="sc_002" 
+        ;;  
+    "Z2-1104")  
+        PJ="z2"
+        TCFG="sc_000" 
+        ;;  
+    "Z2-0901")  
+        PJ="z2"
+        TCFG="sc_300" 
+        ;;  
+    esac
+
+    echo "run command on remote"
+    echo "mkdir -p ${REMOTE_PATH}; echo $CASE > ${REMOTE_PATH}/path"
+    ssh $HOST "mkdir -p ${REMOTE_PATH}; echo $CASE > ${REMOTE_PATH}/path"
+    scp $CASE/temp.* $HOST:${REMOTE_PATH}
+    scp $CASE/error_code.bin $HOST:${REMOTE_PATH}
+    scp $CASE/op_counter.bin $HOST:${REMOTE_PATH}
+    echo "scp $CASE/*output_cpp.bin* $HOST:${REMOTE_PATH}"
+    scp $CASE/*output_cpp.bin* $HOST:${REMOTE_PATH}
+fi
+echo "run command on remote"
+echo "cd ${PERF_PATH};setenv PJ ${PJ}; setenv CFG ${TCFG};setenv OPTIONS \"${OPTIONS}\";${RUN_CMD} ${CASE_NAME}"
+
+ssh $HOST "cd ${PERF_PATH}; setenv PJ ${PJ}; setenv CFG ${TCFG}; setenv OPTIONS \"${OPTIONS}\";  setenv PXP_OPTIONS \"${PXP_OPTIONS}\";${RUN_CMD}  ${CASE_NAME}"
+# wait
