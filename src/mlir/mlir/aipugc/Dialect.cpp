@@ -145,14 +145,25 @@ void AIPUDialect::printType(mlir::Type type,
     llvm_unreachable("Unhandled quantized type");
 }
 
-/// Parse a type registered to this dialect.
+/// Parse a type registered to this dialect and convert to mlir::Type.
 /// Formats:
 ///   !aipugc.quant<i8:f32, 1.000000>
 ///   !aipugc.quant<i8:f32, 1.000000:5>
 ///   !aipugc.quant_per_axis<i8:f32:1, {1.000000:0,2.000000:0}>
+// !aipugc.quant< i8 : f32 , scale [:zeroPoint] >
+//              ^ ^^   ^^^   ^^^^^  ^^^^^^^^^^ ^
+//              | |  ^ |  ^  |      |          |
+//              | |  | |  |  |      |          parseGreater()
+//              | |  | |  |  |      parseOptionalColon() + parseInteger(zeroPoint)
+//              | |  | |  |  parseFloat(scale)
+//              | |  | |  parseComma()
+//              | |  | parseType(expressedType)
+//              | |  parseColon()
+//              | parseSingleStorageType()
+//              parseLess()
 mlir::Type AIPUDialect::parseType(mlir::DialectAsmParser &parser) const {
   StringRef mnemonic;
-  if (parser.parseKeyword(&mnemonic))
+  if (failed(parser.parseKeyword(&mnemonic)))
     return {};
 
   auto parseSingleStorageType = [&](bool &isSigned, unsigned &width)
@@ -176,7 +187,7 @@ mlir::Type AIPUDialect::parseType(mlir::DialectAsmParser &parser) const {
 
   if (mnemonic == "quant") {
     // !aipugc.quant<i8:f32, scale[:zeroPoint]>
-    if (parser.parseLess())
+    if (failed(parser.parseLess()))
       return {};
 
     bool isSigned = true;
@@ -184,27 +195,27 @@ mlir::Type AIPUDialect::parseType(mlir::DialectAsmParser &parser) const {
     if (failed(parseSingleStorageType(isSigned, width)))
       return {};
 
-    if (parser.parseColon())
+    if (failed(parser.parseColon()))
       return {};
 
     Type expressedType;
-    if (parser.parseType(expressedType))
+    if (failed(parser.parseType(expressedType)))
       return {};
 
-    if (parser.parseComma())
+    if (failed(parser.parseComma()))
       return {};
 
     double scale = 0.0;
-    if (parser.parseFloat(scale))
+    if (failed(parser.parseFloat(scale)))
       return {};
 
     int64_t zeroPoint = 0;
     if (succeeded(parser.parseOptionalColon())) {
-      if (parser.parseInteger(zeroPoint))
+      if (failed(parser.parseInteger(zeroPoint)))
         return {};
     }
 
-    if (parser.parseGreater())
+    if (failed(parser.parseGreater()))
       return {};
 
     unsigned flags = isSigned ? QuantizationFlags::Signed : 0;
@@ -219,7 +230,7 @@ mlir::Type AIPUDialect::parseType(mlir::DialectAsmParser &parser) const {
 
   if (mnemonic == "quant_per_axis") {
     // !aipugc.quant_per_axis<i8:f32:dim, {s0:z0,s1:z1,...}>
-    if (parser.parseLess())
+    if (failed(parser.parseLess()))
       return {};
 
     bool isSigned = true;
@@ -227,36 +238,36 @@ mlir::Type AIPUDialect::parseType(mlir::DialectAsmParser &parser) const {
     if (failed(parseSingleStorageType(isSigned, width)))
       return {};
 
-    if (parser.parseColon())
+    if (failed(parser.parseColon()))
       return {};
 
     Type expressedType;
-    if (parser.parseType(expressedType))
+    if (failed(parser.parseType(expressedType)))
       return {};
 
-    if (parser.parseColon())
+    if (failed(parser.parseColon()))
       return {};
 
     int32_t quantizedDimension = 0;
-    if (parser.parseInteger(quantizedDimension))
+    if (failed(parser.parseInteger(quantizedDimension)))
       return {};
 
-    if (parser.parseComma())
+    if (failed(parser.parseComma()))
       return {};
 
     SmallVector<double> scales;
     SmallVector<int64_t> zeroPoints;
 
-    if (parser.parseLBrace())
+    if (failed(parser.parseLBrace()))
       return {};
 
     auto parseOneParam = [&]() -> ParseResult {
       double s = 0.0;
-      if (parser.parseFloat(s))
+      if (failed(parser.parseFloat(s)))
         return failure();
       int64_t z = 0;
       if (succeeded(parser.parseOptionalColon())) {
-        if (parser.parseInteger(z))
+        if (failed(parser.parseInteger(z)))
           return failure();
       }
       scales.push_back(s);
@@ -264,10 +275,10 @@ mlir::Type AIPUDialect::parseType(mlir::DialectAsmParser &parser) const {
       return success();
     };
 
-    if (parser.parseCommaSeparatedList(parseOneParam))
+    if (failed(parser.parseCommaSeparatedList(parseOneParam)))
       return {};
 
-    if (parser.parseRBrace() || parser.parseGreater())
+    if (failed(parser.parseRBrace()) || failed(parser.parseGreater()))
       return {};
 
     unsigned flags = isSigned ? QuantizationFlags::Signed : 0;
@@ -2183,11 +2194,8 @@ void ReciprocalOp::inferShapes() {
 // WhereOp
 //===----------------------------------------------------------------------===//
 void WhereOp::build(OpBuilder &builder, OperationState &state, Type outputType,
-                    Value condition, Value x, Value y,
-                    DictionaryAttr dictAttr) {
+                    Value condition, DictionaryAttr dictAttr) {
   state.addOperands(condition);
-  state.addOperands(x);
-  state.addOperands(y);
   if (dictAttr) {
     state.attributes.append(dictAttr.getValue().begin(),
                             dictAttr.getValue().end());
@@ -2198,16 +2206,12 @@ void WhereOp::build(OpBuilder &builder, OperationState &state, Type outputType,
 LogicalResult WhereOp::verify() {
   if (!mlir::isa<RankedTensorType>(getCondition().getType()))
     return emitOpError("expected ranked tensor type for condition");
-  if (!mlir::isa<RankedTensorType>(getX().getType()))
-    return emitOpError("expected ranked tensor type for x");
-  if (!mlir::isa<RankedTensorType>(getY().getType()))
-    return emitOpError("expected ranked tensor type for y");
   return success();
 }
 
 void WhereOp::inferShapes() {
-  auto xType = mlir::cast<RankedTensorType>(getX().getType());
-  getResult().setType(xType);
+  auto condType = mlir::cast<RankedTensorType>(getCondition().getType());
+  getResult().setType(condType);
 }
 //===----------------------------------------------------------------------===//
 // ResizeOp

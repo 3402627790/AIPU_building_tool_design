@@ -13,8 +13,6 @@ public:
   mlirGen(mlir::OpBuilder &builder, aipubt::NodePtr node,
           std::map<std::string, mlir::Value> &symbolTable) override {
     auto ts_condition = node->inputs()[0];
-    auto ts_x = node->inputs()[1];
-    auto ts_y = node->inputs()[2];
     auto ts_output = node->outputs()[0];
 
     auto outType = utils::getType(builder, ts_output);
@@ -27,21 +25,9 @@ public:
       return {};
     }
 
-    mlir::Value x = getsymbol(symbolTable, ts_x->name());
-    if (!x) {
-      llvm::errs() << "The x input " << ts_x->name() << " is nullptr\n";
-      return {};
-    }
-
-    mlir::Value y = getsymbol(symbolTable, ts_y->name());
-    if (!y) {
-      llvm::errs() << "The y input " << ts_y->name() << " is nullptr\n";
-      return {};
-    }
-
     DictionaryAttr opAttrs = ParamsToMlirAttr(builder, node);
 
-    auto output = builder.create<WhereOp>(location, outType, condition, x, y,
+    auto output = builder.create<WhereOp>(location, outType, condition,
                                           opAttrs);
     return {output};
   }

@@ -2386,19 +2386,16 @@ def ReciprocalOp : AIPUOp<"Reciprocal",
 //===----------------------------------------------------------------------===//
 def WhereOp : AIPUOp<"Where",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Element-wise conditional selection between two tensors";
+  let summary = "Element-wise conditional selection or non-zero index extraction";
 
   let description = [{
-    Selects elements from `x` or `y` depending on `condition`:
-      output[i] = condition[i] ? x[i] : y[i]
-    Shapes of condition, x, y must be broadcastable.
-    Used in masking, Clip decomposition, and conditional logic.
+    Returns the indices of non-zero elements in the input tensor.
+    Output shape: [num_nonzero_elements, input_rank].
+    Output dtype is UINT8 if input_size <= 255, UINT16 if <= 65535.
   }];
 
   let arguments = (ins
     AIPUGCAnyTensor:$condition,
-    AIPUGCAnyTensor:$x,
-    AIPUGCAnyTensor:$y,
     OptionalAttr<DictionaryAttr>:$dictAttr
   );
 
@@ -2410,8 +2407,6 @@ def WhereOp : AIPUOp<"Where",
     OpBuilder<(ins
       "::mlir::Type":$outputType,
       "::mlir::Value":$condition,
-      "::mlir::Value":$x,
-      "::mlir::Value":$y,
       "::mlir::DictionaryAttr":$dictAttr
     )>
   ];
