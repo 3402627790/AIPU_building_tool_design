@@ -2,7 +2,7 @@
 .vscode/
 .idea
 __pycache__
-.ipynb_checkpoints
+.ipynb_checkpoints 
 
 
 python/GBuilder/test/
