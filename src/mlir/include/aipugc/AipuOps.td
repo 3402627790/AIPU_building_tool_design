@@ -254,11 +254,11 @@ def NegativeOp : AIPUOp<"Negative",
 }
 
 //===----------------------------------------------------------------------===//
-// Operator: Square
+// SquareOp
 //===----------------------------------------------------------------------===//
 def SquareOp : AIPUOp<"Square",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Computes the square of a tensor element-wise";
+  let summary = "Compute the square of a tensor element-wise.";
 
   let description = [{
     Given an input tensor, this operation returns a tensor containing the 
@@ -266,7 +266,7 @@ def SquareOp : AIPUOp<"Square",
     applied element-wise and preserves the input tensor's shape.
 
     Example:
-      Input: [-1.0, 2.0, -3.5]
+      Input:  [-1.0, 2.0, -3.5]
       Output: [1.0, 4.0, 12.25]
   }];
 
@@ -301,39 +301,6 @@ def AddOp : AIPUOp<"add", [
   let summary = "addition operation";
   let description = [{
     The "add" operation performs addition between two tensors.
-    The shapes of the tensor operands are expected to match or be broadcastable.
-  }];
-
-  let arguments = (ins
-    AIPUGCAnyTensor:$lhs,
-    AIPUGCAnyTensor:$rhs,
-    OptionalAttr<DictionaryAttr>:$dictAttr
-  );
-
-  let results = (outs AIPUGCAnyTensor:$output);
-  let hasVerifier = 1;
-  let builders = [
-    OpBuilder<(ins
-      "::mlir::Type":$outputType,
-      "::mlir::Value":$lhs,
-      "::mlir::Value":$rhs,
-      "::mlir::DictionaryAttr":$dictAttr
-    )>
-  ];
-}
-
-//===----------------------------------------------------------------------===//
-// DivOp
-//===----------------------------------------------------------------------===//
-
-def DivOp : AIPUOp<"div", [
-    Pure,
-    DeclareOpInterfaceMethods<ShapeInferenceOpInterface>
-]> {
-  let summary = "division operation";
-  let description = [{
-    The "div" operation performs division between two tensors.
-    The shapes of the tensor operands are expected to match or be broadcastable.
   }];
 
   let arguments = (ins
@@ -365,7 +332,6 @@ def SubOp : AIPUOp<"sub", [
   let summary = "subtraction operation";
   let description = [{
     The "sub" operation performs subtraction between two tensors.
-    The shapes of the tensor operands are expected to match or be broadcastable.
   }];
 
   let arguments = (ins
@@ -397,7 +363,6 @@ def MulOp : AIPUOp<"mul", [
   let summary = "multiplication operation";
   let description = [{
     The "mul" operation performs multiplication between two tensors.
-    The shapes of the tensor operands are expected to match or be broadcastable.
   }];
 
   let arguments = (ins
@@ -416,6 +381,40 @@ def MulOp : AIPUOp<"mul", [
       "::mlir::DictionaryAttr":$dictAttr
     )>
   ];
+}
+
+//===----------------------------------------------------------------------===//
+// DivOp
+//===----------------------------------------------------------------------===//
+def DivOp : AIPUOp<"div", [
+  Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>
+]> {
+  let summary = "division operation";
+
+  let description =[{
+    The "div" operation performs division between two tensors.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$lhs,
+    AIPUGCAnyTensor:$rhs,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$lhs,
+      "::mlir::Value":$rhs,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
 }
 
 
@@ -699,8 +698,8 @@ def RMSNormOp : AIPUOp<"RMSNorm",
 
   let description = [{
     Applies RMS (Root Mean Square) normalization over the input tensor along the
-    specified axes. The scale weight operand is optional. When absent, the core
-    uses method WITHOUT_GAMMA_BETA. Unlike LayerNorm, RMSNorm normalizes
+    specified axes. Gamma and beta are optional (pass 0 or 2 operands). When both
+    are absent, method is WITHOUT_GAMMA_BETA. Unlike LayerNorm, RMSNorm normalizes
     by the root mean square of activations without subtracting the mean. Input
     rank must be in [2, 4]. Axis values are normalized to [0, rank). Optional
     parameters (e.g. quantization info) are carried in the generic dictionary
@@ -732,7 +731,6 @@ def RMSNormOp : AIPUOp<"RMSNorm",
 
   let hasVerifier = 1;
 }
-
 
 //===----------------------------------------------------------------------===//
 // FuncOp
@@ -775,7 +773,7 @@ def FuncOp : AIPUOp<"func", [
     // FunctionOpInterface Methods
     //===------------------------------------------------------------------===//
 
-    /// Returns the argument types of this function.
+    /// Returns the arguments types of this function.
     ArrayRef<Type> getArgumentTypes() { return getFunctionType().getInputs(); }
 
     /// Returns the result types of this function.
@@ -836,7 +834,6 @@ def GenericCallOp : AIPUOp<"generic_call",
 //===----------------------------------------------------------------------===//
 // PrintOp
 //===----------------------------------------------------------------------===//
-
 def PrintOp : AIPUOp<"print"> {
   let summary = "print operation";
   let description = [{
@@ -856,15 +853,15 @@ def PrintOp : AIPUOp<"print"> {
 //===----------------------------------------------------------------------===//
 def TileOp : AIPUOp<"Tile",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Repeats a tensor along each dimension according to repeats";
+  let summary = "Repeats a tensor along each dimension according to repeats.";
 
   let description = [{
-    Constructs a tensor by tiling the input tensor. The `repeats` attribute
-    specifies the number of repetitions along each dimension.
+    Constructs a tensor by tiling the input tensor. The 'repeats' attribute
+    specifies the number of repetitions along ecah dimension.
 
     Example:
       Input shape: [2, 6, 16, 32], repeats = [2, 2, 5, 4]
-      Output shape: [4, 12, 80, 128]
+      Output shape:[4, 12, 80, 128]
   }];
 
   let arguments = (ins
@@ -892,7 +889,6 @@ def TileOp : AIPUOp<"Tile",
 //===----------------------------------------------------------------------===//
 // ReshapeOp
 //===----------------------------------------------------------------------===//
-
 def ReshapeOp : AIPUOp<"reshape", [Pure]> {
   let summary = "tensor reshape operation";
   let description = [{
@@ -1657,46 +1653,6 @@ def PadOp : AIPUOp<"Pad",
   let hasVerifier = 1;
 }
 //===----------------------------------------------------------------------===//
-// Operator: Clip
-//===----------------------------------------------------------------------===//
-def ClipOp : AIPUOp<"Clip",
-    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Clips tensor values element-wise to a specified [min, max] range";
-
-  let description = [{
-    Limits the values in the input tensor to the range [min_val, max_val].
-    Equivalent to: output = max(min_val, min(max_val, input)).
-    Widely used for activation clamping (e.g. RELU6 = Clip(0, 6)).
-
-    Example:
-      input = [-2.0, 0.5, 3.0, 7.0], min_val = 0.0, max_val = 6.0
-      output = [0.0, 0.5, 3.0, 6.0]
-  }];
-
-  let arguments = (ins
-    AIPUGCAnyTensor:$input,
-    F32Attr:$min_val,
-    F32Attr:$max_val,
-    OptionalAttr<DictionaryAttr>:$dictAttr
-  );
-
-  let results = (outs
-    AIPUGCAnyTensor:$output
-  );
-
-  let builders = [
-    OpBuilder<(ins
-      "::mlir::Type":$outputType,
-      "::mlir::Value":$input,
-      "::mlir::FloatAttr":$min_val,
-      "::mlir::FloatAttr":$max_val,
-      "::mlir::DictionaryAttr":$dictAttr
-    )>
-  ];
-
-  let hasVerifier = 1;
-}
-//===----------------------------------------------------------------------===//
 // Operator: Resize
 //===----------------------------------------------------------------------===//
 def ResizeOp : AIPUOp<"Resize",
@@ -1760,12 +1716,12 @@ def ResizeOp : AIPUOp<"Resize",
 //===----------------------------------------------------------------------===//
 def GridSampleOp : AIPUOp<"GridSample",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Samples input tensor using a normalized grid of coordinates";
+  let summary = "Sample input tensor using a normalized grid of coordinates";
 
   let description = [{
-    Performs grid-based sampling of an input tensor using a normalized
-    coordinate grid (similar to PyTorch's grid_sample). Supports different
-    interpolation and padding modes and an align_corners option.
+    Performs grid-based sampling of an input tensor using a normalized coordinate
+    grid. Supports different interpolation and padding modes and an align_corner
+    option.
   }];
 
   let arguments = (ins
@@ -1783,16 +1739,19 @@ def GridSampleOp : AIPUOp<"GridSample",
 
   let builders = [
     OpBuilder<(ins
-      "::mlir::Type":$outputType,
-      "::mlir::Value":$input,
-      "::mlir::Value":$grid,
-      "::mlir::StringAttr":$mode,
-      "::mlir::StringAttr":$padding_mode,
-      "::mlir::BoolAttr":$align_corners,
-      "::mlir::DictionaryAttr":$dictAttr
+    "::mlir::Type":$outputType,
+    "::mlir::Value":$input,
+    "::mlir::Value":$grid,
+    "::mlir::StringAttr":$mode,
+    "::mlir::StringAttr":$padding_mode,
+    "::mlir::BoolAttr":$align_corner,
+    "::mlir::DictionaryAttr":$dictAttr
     )>
   ];
+
+  let hasVerifier = 1;
 }
+
 //===----------------------------------------------------------------------===//
 // Operator: ReverseSequence
 //===----------------------------------------------------------------------===//
@@ -1890,8 +1849,9 @@ def SqrtOp : AIPUOp<"Sqrt",
       "::mlir::DictionaryAttr":$dictAttr
     )>
   ];
-}
 
+  let hasVerifier = 1;
+}
 //===----------------------------------------------------------------------===//
 // Operator: Rsqrt
 //===----------------------------------------------------------------------===//
@@ -1921,13 +1881,12 @@ def RsqrtOp : AIPUOp<"Rsqrt",
     )>
   ];
 }
-
 //===----------------------------------------------------------------------===//
 // Operator: Cosine
 //===----------------------------------------------------------------------===//
 def CosineOp : AIPUOp<"Cosine",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Computes element-wise cosine of the input tensor";
+  let summary = "Compute element-wise cosine of the input tensor.";
 
   let description = [{
     Calculates the cosine for each element in the input tensor.
@@ -1958,9 +1917,9 @@ def ExpOp : AIPUOp<"Exp",
   let summary = "Computes element-wise exponential of the input tensor";
 
   let description = [{
-    Calculates the exponential for each element in the input tensor:
-      output = exp(x).
-    Supports optional lookup table (LUT) parameters for int8 quantization,
+    Calcuates the exponential for each element in the input tensor:
+      Output = exp(x).
+    Support optional lookup table(LUT) parameters for int8 quantization,
     where lut_type, lut_offset, lut_size, lut_shape can be passed via dictAttr.
   }];
 
@@ -1981,23 +1940,18 @@ def ExpOp : AIPUOp<"Exp",
     )>
   ];
 }
-
 //===----------------------------------------------------------------------===//
 // Operator: Log
 //===----------------------------------------------------------------------===//
 def LogOp : AIPUOp<"Log",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
-  let summary = "Computes element-wise natural logarithm of the input tensor";
+  let summary = "Computes element-wise exponential of the input tensor";
 
   let description = [{
-    Calculates the natural logarithm for each element in the input tensor:
-      output = log(x).
-    Supports optional lookup table (LUT) parameters for int8 quantization,
+    Calcuates the exponential for each element in the input tensor:
+      Output = log(x).
+    Support optional lookup table(LUT) parameters for int8 quantization,
     where lut_type, lut_offset, lut_size, lut_shape can be passed via dictAttr.
-
-    Note: Mathematically log(x) requires x > 0. The compiler cannot verify
-    operand values at compile time (only types/shapes are available), so
-    ensuring valid input range is the caller's responsibility.
   }];
 
   let arguments = (ins
@@ -2017,7 +1971,6 @@ def LogOp : AIPUOp<"Log",
     )>
   ];
 }
-
 //===----------------------------------------------------------------------===//
 // Operator: Pow
 //===----------------------------------------------------------------------===//
@@ -2028,8 +1981,8 @@ def PowOp : AIPUOp<"Pow",
   let description = [{
     Calculates element-wise power for each pair of elements:
       output = base^exponent.
-    The shapes of base and exponent are expected to match or be broadcastable.
-    Supports optional dictionary attributes for quantization (e.g. LUT).
+    The Shapes of base and exponent are expected to match or be broadcastable.
+    Support optional dictionary attributes for quantization (e.g. LUT).
   }];
 
   let arguments = (ins
@@ -2042,7 +1995,6 @@ def PowOp : AIPUOp<"Pow",
     AIPUGCAnyTensor:$output
   );
 
-  let hasVerifier = 1;
   let builders = [
     OpBuilder<(ins
       "::mlir::Type":$outputType,
@@ -2051,8 +2003,9 @@ def PowOp : AIPUOp<"Pow",
       "::mlir::DictionaryAttr":$dictAttr
     )>
   ];
-}
 
+  let hasVerifier = 1;
+}
 //===----------------------------------------------------------------------===//
 // Operator: Quantize
 //===----------------------------------------------------------------------===//
@@ -2283,7 +2236,46 @@ def NmsOp : AIPUOp<"NMS",
 
   let hasVerifier = 1;
 }
+//===----------------------------------------------------------------------===//
+// Operator: Clip
+//===----------------------------------------------------------------------===//
+def ClipOp : AIPUOp<"Clip",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Clips tensor values element-wise to a specified [min, max] range";
 
+  let description = [{
+    Limits the values in the input tensor to the range [min_val, max_val].
+    Equivalent to: output = max(min_val, min(max_val, input)).
+    Widely used for activation clamping (e.g. RELU6 = Clip(0, 6)).
+
+    Example:
+      input = [-2.0, 0.5, 3.0, 7.0], min_val = 0.0, max_val = 6.0
+      output = [0.0, 0.5, 3.0, 6.0]
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    F32Attr:$min_val,
+    F32Attr:$max_val,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::FloatAttr":$min_val,
+      "::mlir::FloatAttr":$max_val,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
 //===----------------------------------------------------------------------===//
 // Operator: Floor
 //===----------------------------------------------------------------------===//
@@ -2413,6 +2405,10 @@ def WhereOp : AIPUOp<"Where",
 
   let hasVerifier = 1;
 }
+
+
+//===----------------------------------------------------------------------
+
 
 //===----------------------------------------------------------------------===//
 #endif // AIPUGC_OPS

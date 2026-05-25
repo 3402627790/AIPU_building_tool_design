@@ -1,3 +1,4 @@
+import os
 import ctypes
 import unittest
 from mlir.ir import Context, Module
@@ -5,7 +6,8 @@ from mlir.passmanager import PassManager
 
 BUILD_DIR = "/project/ai/scratch01/qidson01/code/AIPU_building_tool_design/src/mlir/build"
 DIALECT_SO = f"{BUILD_DIR}/libAIPUMLIR.so"
-PLUGIN_SO  = f"{BUILD_DIR}/tool/aipugc/Plugin/libexternalPass.so"
+PLUGIN_SO  = f"{BUILD_DIR}/externalPass/libexternalPass.so"
+
 
 _dialect_lib = ctypes.CDLL(DIALECT_SO, mode=ctypes.RTLD_GLOBAL)
 _dialect_lib.aipugcRegisterDialects.argtypes = [ctypes.c_void_p]

@@ -16,13 +16,14 @@
 namespace mlir {
 namespace aipugc {
 
-static const std::set<std::string> paramsKeys = {
-    "with_activation", "group",           "num_output",  "scale_type",
+static const std::set<std::string> optionalParamsKeys = {
+    "with_activation", "num_output",  "scale_type",
     "scale_value",     "shift_type",      "shift_value", "is_perf_mode",
     "clip_mode",       "ignore_scale_zp", "constant_value",
     "interp_shift_type", "interp_shift_value",
     "quantize_scale", "quantize_zp", "round_mode", "unquantifiable", /* QuantizeOp */
     "activation_quantization_axis", "layer_top_range",
+    // "stash_type", "out_mean_invstddev" /* LayerNorm optional params */
 };
 static const std::set<std::string> quantConstantKeys = {
     "scale",    "shift",   "lut",     "diff_shifts",   "sqrt_lut",   "log2_lut",

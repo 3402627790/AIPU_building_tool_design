@@ -12,7 +12,6 @@ endif()
 
 option(USE_OMP "using openmp" On)
 option(WITH_TEST "build with test" OFF)
-option(WITH_MLIR "build MLIR module" OFF)
 
 if(STATIC_STDLIB)
 set(C_CXX_FLAGS " -static-libgcc -static-libstdc++  ${C_CXX_FLAGS}" )
@@ -46,7 +45,7 @@ execute_process(COMMAND git rev-parse HEAD OUTPUT_VARIABLE GIT_COMMIT_ID)
 
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  ${C_CXX_FLAGS}  -std=c11 -Wall -Werror")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}   ${C_CXX_FLAGS}  -std=c++17  -Wall -Werror  -fno-exceptions -fPIC -Wsign-promo  -Wno-null-dereference -fvisibility-inlines-hidden -Werror=int-to-pointer-cast -Werror=return-type   -Wno-enum-compare  -Wno-expansion-to-defined  -Wno-multichar -fno-strict-aliasing")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}   ${C_CXX_FLAGS} -gdwarf-4 -std=c++17  -Wall -Werror  -fno-exceptions -fPIC -Wsign-promo  -Wno-null-dereference -fvisibility-inlines-hidden -Werror=int-to-pointer-cast -Werror=return-type   -Wno-enum-compare  -Wno-expansion-to-defined  -Wno-multichar -fno-strict-aliasing")
 
 set(ROOT_DIR ${PROJECT_SOURCE_DIR})
 
@@ -63,6 +62,7 @@ set(CMAKE_PREFIX_PATH  "${PROJECT_SOURCE_DIR}/cmake/")
 list(APPEND CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/cmake/pybind11")
 set(LLVM_TOOLCHAIN_PATH ${LLVM_PATH}/bin CACHE STRING "set the LLVM_TOOLCHAIN_PATH for llvm compiler")
 
+set(PYTHON_DES "${ROOT_DIR}/python/src/AIPUBuilder/_C")
 
 # set(pybind11_DIR pybind11)
 

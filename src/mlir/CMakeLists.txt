@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project("AIPUMLIR")
+
+
 set(AIPUBuildPath /project/ai/scratch01/AIPUBuilder)
 
 message(${CMAKE_CURRENT_BINARY_DIR})
@@ -35,8 +37,6 @@ include_directories(${AIPUBuildPath}/include/)
 add_definitions(${LLVM_DEFINITIONS})
 set(BUILD_SHARED_LIBS ${LLVM_ENABLE_SHARED_LIBS} CACHE BOOL "" FORCE)
 message(STATUS "BUILD_SHARED_LIBS       : " ${BUILD_SHARED_LIBS})
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${AIPUBuildPath}/lib")
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-rpath,${AIPUBuildPath}/lib")
 set(LLVM_LINK_COMPONENTS
   Support
   )
@@ -66,6 +66,7 @@ add_llvm_library(libAIPUMLIR MODULE
     MLIRMemRefTransforms
     MLIRSPIRVTransforms
     MLIRVectorTransforms
+    MLIRDialect
     ${AIPUBT_LIB}
   )
 

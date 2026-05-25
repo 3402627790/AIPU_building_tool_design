@@ -17,9 +17,6 @@ struct EliminateRedundantTransposePass
                          OperationPass<aipugc::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(EliminateRedundantTransposePass)
 
-  StringRef getArgument() const final { return "eliminate-redundant-transpose"; }
-  StringRef getDescription() const final { return "Eliminate redundant transpose operations"; }
-
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<SimplifyRedundantTranspose>(&getContext());
@@ -67,7 +64,5 @@ private:
   };
 };
 } // namespace
-
-static mlir::PassRegistration<EliminateRedundantTransposePass> passRegElimTranspose;
 
 REGISTER_PASS_PLUGIN(EliminateRedundantTransposePass)

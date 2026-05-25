@@ -111,7 +111,7 @@ def Aipu_Int32TensorUpto4D : AnyTypeOf<[
 //===----------------------------------------------------------------------===//
 class DenseArrayMaxCtx<int n> : AttrConstraint<
     CPred<"::llvm::cast<::mlir::DenseArrayAttr>($_self).size() <= " # n>,
-    "with at most " # n # " elements">;
+    "with at least " # n # " elements">;
 
 def Aipu_Fp32ArrayAttr2 : ConfinedAttr<DenseF32ArrayAttr, [DenseArrayCount<2>]>;
 def Aipu_Fp32ArrayAttr3 : ConfinedAttr<DenseF32ArrayAttr, [DenseArrayCount<3>]>;

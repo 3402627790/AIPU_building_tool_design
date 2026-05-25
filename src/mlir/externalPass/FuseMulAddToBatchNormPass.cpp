@@ -45,10 +45,8 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
     }
     if (!mulOp)
       return failure();
-
-    // If mul result is directly returned, keep mul as-is and skip fusion.
-    // This guard is added so that in non-return cases, mul can become dead
-    // after fusion and then be removed by the downstream DCE pass.
+    // If mul result is directly returned, keep mul and skip fusion.
+    // to avoid DCE pass to eliminate MUL op.
     for (Operation *user : mulOp->getUsers()) {
       if (isa<aipugc::ReturnOp>(user))
         return failure();
@@ -65,14 +63,14 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
     auto mulLhsType = llvm::dyn_cast<RankedTensorType>(mulLhs.getType());
     auto mulRhsType = llvm::dyn_cast<RankedTensorType>(mulRhs.getType());
     if (!mulLhsType || !mulRhsType)
-      return llvm::failure();
+      return failure();
 
     Value input, weight;
     bool mulLhsIsConst = static_cast<bool>(mulLhs.getDefiningOp<aipugc::ConstantOp>());
     bool mulRhsIsConst = static_cast<bool>(mulRhs.getDefiningOp<aipugc::ConstantOp>());
     if (mulLhsIsConst == mulRhsIsConst) {
       // Expect exactly one constant operand in mul.
-      return mlir::failure();
+      return failure();
     } else if (mulLhsIsConst){
       input = mulRhs;
       weight = mulLhs;
@@ -104,14 +102,19 @@ struct FuseMulAddToBatchNorm : public OpRewritePattern<aipugc::AddOp> {
                                "add(mul(input, weight), bias), axis="
                             << axis << "\n");
 
-    auto axisAttr =
-        rewriter.getIntegerAttr(rewriter.getIntegerType(32), axis);
-    auto epsilonAttr =
-        rewriter.getFloatAttr(rewriter.getF32Type(), /*epsilon=*/0.0);
+    auto axisAttr = rewriter.getIntegerAttr(rewriter.getIntegerType(32), axis);
+    auto epsilonAttr = rewriter.getFloatAttr(rewriter.getF32Type(), /*epsilon=*/0.00001);
 
     auto bnOp = rewriter.create<aipugc::BatchNormOp>(
-        addOp.getLoc(), addOp.getType(), input, weight, bias, axisAttr,
-        epsilonAttr, /*dictAttr=*/nullptr);
+      addOp.getLoc(),
+      addOp.getType(),
+      input,
+      weight,
+      bias,
+      axisAttr,
+      epsilonAttr,
+      nullptr // dictAttr
+    );
 
     rewriter.replaceOp(addOp, bnOp.getResult());
     return success();

@@ -7,6 +7,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wdeprecated-declarations  -fno-st
 include_directories("${ROOT_DIR}/src")
 include_directories("${ROOT_DIR}/include")
 include_directories("${ROOT_DIR}/3rdparty")
+include_directories("${ROOT_DIR}/modules/btrt/include")
 
 set(AIPUBuildLIB ${AIPUBuildLIB} m dl Threads::Threads)
 
@@ -97,7 +98,7 @@ embedfiles(${PROJECT_SOURCE_DIR}/statistic/cost_model_x3p.txt)
 embedfiles(${PROJECT_SOURCE_DIR}/statistic/cost_model_x3p.cbin)
 # add_library(aipubuildtool_static STATIC $<TARGET_OBJECTS:M_ALLOBJECTS>)
 # SET_TARGET_PROPERTIES(aipubuildtool_static PROPERTIES OUTPUT_NAME "aipubuildtool")
-add_library(aipubuildtool        SHARED $<TARGET_OBJECTS:M_ALLOBJECTS> ${EmbedObjs} )
+add_library(aipubuildtool        SHARED $<TARGET_OBJECTS:M_ALLOBJECTS> ${EmbedObjs}  )
 add_dependencies(aipubuildtool PREPROCESS)
     
 
@@ -123,7 +124,7 @@ add_custom_command(
 endif()
 
 add_link_options($<$<CONFIG:RELEASE>:-s>)
-target_link_libraries(aipubuildtool ${AIPUBuildLIB})
+target_link_libraries(aipubuildtool ${AIPUBuildLIB} aipubtrt)
 
 install(TARGETS aipubuildtool
         RUNTIME DESTINATION bin

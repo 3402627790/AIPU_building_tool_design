@@ -109,9 +109,10 @@ DictionaryAttr MLIRGenBase::ParamsToMlirAttr(mlir::OpBuilder &builder,
   SmallVector<NamedAttribute> named_attrs;
   // parameter
   for (auto &param : node->params()) {
-    if ((!paramsKeys.count(param.first)) && (!uniqueKeys.count(param.first)))
+    if ((!optionalParamsKeys.count(param.first)) && (!uniqueKeys.count(param.first)))
       continue;
 
+    // if param in optionalParamsKey, add it.
     auto attr = ParamsToAttribute(builder, param.second);
     if (attr) {
       named_attrs.push_back(builder.getNamedAttr(param.first, attr));
