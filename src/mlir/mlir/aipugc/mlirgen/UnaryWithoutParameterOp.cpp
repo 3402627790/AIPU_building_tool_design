@@ -60,6 +60,12 @@ public:
   ~MLIRGenCosine() {}
 };
 
+class MLIRGenSine : public MLIRGenUnary<SineOp> {
+public:
+  using MLIRGenUnary::MLIRGenUnary;
+  ~MLIRGenSine() {}
+};
+
 class MLIRGenExp : public MLIRGenUnary<ExpOp> {
 public:
   using MLIRGenUnary::MLIRGenUnary;
@@ -102,12 +108,25 @@ public:
   ~MLIRGenReciprocal() {}
 };
 
+class MLIRGenTrunc : public MLIRGenUnary<TruncOp> {
+public:
+  using MLIRGenUnary::MLIRGenUnary;
+  ~MLIRGenTrunc() {}
+};
+
+class MLIRGenRound : public MLIRGenUnary<RoundOp> {
+public:
+  using MLIRGenUnary::MLIRGenUnary;
+  ~MLIRGenRound() {}
+};
+
 // REGISTER_MLIRGEN(Reshape);
 REGISTER_MLIRGEN(Abs);
 REGISTER_MLIRGEN(Negative);
 REGISTER_MLIRGEN(Sqrt);
 REGISTER_MLIRGEN(Rsqrt);
 REGISTER_MLIRGEN(Cosine);
+REGISTER_MLIRGEN(Sine);
 REGISTER_MLIRGEN(Exp);
 REGISTER_MLIRGEN(Log);
 REGISTER_MLIRGEN(Square);
@@ -115,6 +134,8 @@ REGISTER_MLIRGEN(Quantize);
 REGISTER_MLIRGEN(Floor);
 REGISTER_MLIRGEN(Ceil);
 REGISTER_MLIRGEN(Reciprocal);
+REGISTER_MLIRGEN(Trunc);
+REGISTER_MLIRGEN(Round);
 
 } // namespace aipugc
 } // namespace mlir

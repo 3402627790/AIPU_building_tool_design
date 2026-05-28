@@ -2256,8 +2256,67 @@ void CosineOp::build(OpBuilder &builder, OperationState &state, Type outputType,
 }
 void CosineOp::inferShapes() { return; }
 //===----------------------------------------------------------------------===//
-// ExpOp
+// SineOp
 //===----------------------------------------------------------------------===//
+void SineOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                   Value input, DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+void SineOp::inferShapes() { return; }
+//===----------------------------------------------------------------------===//
+// TruncOp
+//===----------------------------------------------------------------------===//
+void TruncOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                    Value input, DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+LogicalResult TruncOp::verify() {
+  auto inputType = getInput().getType();
+  if (!mlir::isa<RankedTensorType>(inputType)) {
+    return emitOpError("expected ranked tensor type for input");
+  }
+  return success();
+}
+void TruncOp::inferShapes() {
+  auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
+  getResult().setType(inputType);
+}
+//===----------------------------------------------------------------------===//
+// RoundOp
+//===----------------------------------------------------------------------===//
+void RoundOp::build(OpBuilder &builder, OperationState &state, Type outputType,
+                    Value input, DictionaryAttr dictAttr) {
+  state.addOperands(input);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+LogicalResult RoundOp::verify() {
+  auto inputType = getInput().getType();
+  if (!mlir::isa<RankedTensorType>(inputType)) {
+    return emitOpError("expected ranked tensor type for input");
+  }
+  return success();
+}
+void RoundOp::inferShapes() {
+  auto inputType = mlir::cast<RankedTensorType>(getInput().getType());
+  getResult().setType(inputType);
+}
+//===----------------------------------------------------------------------===//
+// ExpOp
+//===----------------------------------------------------------------------====//
 void ExpOp::build(OpBuilder &builder, OperationState &state, Type outputType,
                      Value input, DictionaryAttr dictAttr) {
   state.addOperands(input);

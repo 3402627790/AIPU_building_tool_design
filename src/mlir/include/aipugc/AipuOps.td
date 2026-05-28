@@ -1910,8 +1910,38 @@ def CosineOp : AIPUOp<"Cosine",
   ];
 }
 //===----------------------------------------------------------------------===//
-// Operator: Exp
+// Operator: Sine
 //===----------------------------------------------------------------------===//
+def SineOp : AIPUOp<"Sine",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Compute element-wise sine of the input tensor.";
+
+  let description = [{
+    Calculates the sine for each element in the input tensor.
+    Support optional lookup table(LUT) parameters for int8 quantization,
+    where lut_type, lut_offset, lut_size, lut_shape can be passed via dictAttr.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+}
+//===----------------------------------------------------------------------===//
+// Operator: Exp
+//===----------------------------------------------------------------------====//
 def ExpOp : AIPUOp<"Exp",
     [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
   let summary = "Computes element-wise exponential of the input tensor";
@@ -2318,6 +2348,70 @@ def CeilOp : AIPUOp<"Ceil",
   let description = [{
     Returns a tensor with element-wise ceil applied: output[i] = ceil(input[i]).
     Used in quantization and shape computation pipelines.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Operator: Trunc
+//===----------------------------------------------------------------------===//
+def TruncOp : AIPUOp<"Trunc",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Computes element-wise truncation of the input tensor";
+
+  let description = [{
+    Returns a tensor with element-wise truncation applied: output[i] = trunc(input[i]).
+    Rounds each element toward zero to the nearest integer.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$input,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$input,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Operator: Round
+//===----------------------------------------------------------------------===//
+def RoundOp : AIPUOp<"Round",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Computes element-wise rounding of the input tensor";
+
+  let description = [{
+    Returns a tensor with element-wise rounding applied: output[i] = round(input[i]).
+    Rounds each element to the nearest integer, with ties rounding to the nearest even integer.
   }];
 
   let arguments = (ins

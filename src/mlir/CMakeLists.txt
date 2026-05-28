@@ -76,6 +76,7 @@ add_subdirectory(tool/aipugc)
 add_custom_target(libexternalPassLink ALL)
 add_custom_command(
   TARGET   libexternalPassLink
+  COMMAND  mkdir -p ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
   COMMAND  ln -sf ${AIPUGC_ROOT_BIN_DIR}/externalPass/libexternalPass.so ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
   COMMAND  ln -sf ${AIPUGC_ROOT_BIN_DIR}/libAIPUMLIR.so ${AIPUGC_ROOT_BIN_DIR}/../../../python/src/AIPUBuilder/_C/
 )
