@@ -8,6 +8,7 @@ add_llvm_library(libexternalPass MODULE
   EliminateRedundantTransposePass.cpp
   FuseMulAddToBatchNormPass.cpp
   FuseFcBnPass.cpp
+  CacheHintAnalysisPass.cpp
 
   LINK_LIBS PUBLIC
   MLIRTransforms
