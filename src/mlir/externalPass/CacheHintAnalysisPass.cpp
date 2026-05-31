@@ -64,7 +64,14 @@ struct CacheHintAnalysisPass
     // ---- Step 1: assign a topological index to every operation ----------
     llvm::DenseMap<Operation *, int32_t> topoIndex;
     int32_t idx = 0;
-    func.walk([&](Operation *op) { topoIndex[op] = idx++; });
+    func.walk([&](Operation *op) {
+      topoIndex[op] = idx;
+      llvm::errs() << "[CacheHintAnalysis] Indexed op: "
+                   << op->getName().getStringRef()
+                   << " [" << getOpName(op) << "]"
+                   << " -> topo#" << idx << "\n";
+      ++idx;
+    });
 
     int32_t maxIndex = idx; // for normalization
     llvm::errs() << "[CacheHintAnalysis] Total ops indexed: " << maxIndex
