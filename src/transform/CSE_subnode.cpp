@@ -20,136 +20,161 @@
  * @Last Modified by: Neo Wang
  * @Last Modified time: 2022-03-24 17:09:16
  */
- #include "core/config.h"
- #include "core/core.h"
- #include "core/ops/ops.h"
- #include "passes.h"
- #include <algorithm>
- #include <set>
- 
- namespace aipubt
- {
- 
- static bool is_expand_node(const NodePtr &n)
- {
-     std::vector<std::string> passes;
-     if (n->loc() != nullptr)
-         passes = n->loc()->all();
- 
-     if (contains(passes, "pre_tile"))
-     {
-         return true;
-     }
-     return false;
-    }
-    
-    static uint32_t hash_node(bool clean = false)
+#include "core/config.h"
+#include "core/core.h"
+#include "core/ops/ops.h"
+#include "passes.h"
+#include <algorithm>
+#include <set>
+
+namespace aipubt
+{
+
+static bool is_expand_node(const NodePtr &n)
+{
+    std::vector<std::string> passes;
+    if (n->loc() != nullptr)
+        passes = n->loc()->all();
+
+    if (contains(passes, "pre_tile"))
     {
-        static uint32_t i = 1;
-        if (clean)
-        {
-            i = 1;
-        }
-        return i++;
+        return true;
     }
-    // suppose hash_map has all nodes
-    static bool hash_equal(std::map<NodePtr, uint32_t> &hash_map, NodePtr node1, NodePtr node2)
+    return false;
+}
+
+static int32_t check_real_equal(uint32_t i, std::vector<uint32_t> &vec, const std::vector<NodePtr> &nodes)
+{
+    auto node1 = nodes.at(i);
+    for (auto j : vec)
     {
-        auto id0 = hash_map.at(node1);
-        auto id1 = hash_map.at(node2);
-        if (id0 == id1)
-        {
-            return true;
-        }
+        auto node2 = nodes.at(j);
         if (node1->equal(node2))
         {
-            //use small id as ref
-            if (id0 < id1)
+            return j;
+        }
+    }
+    return -1;
+}
+
+inline void hash_combine(std::size_t &seed, const std::string &val)
+{
+    std::hash<std::string> hasher;
+    seed = seed * 31 + hasher(val);
+}
+
+inline void hash_combine(std::size_t &seed, size_t val)
+{
+    std::hash<size_t> hasher;
+    seed = seed * 31 + hasher(val);
+}
+static uint32_t get_hash(NodePtr node, std::map<NodePtr, uint32_t> &hash_map)
+{
+    if (hash_map.find(node) != hash_map.end())
+    {
+        return hash_map[node];
+    }
+
+    std::size_t seed = 0;
+    hash_combine(seed, node->type());
+    for (const auto &input : node->inputs())
+    {
+        hash_combine(seed, input->name());
+    }
+    if (node->constants().count("weights"))
+    {
+        std::vector<std::string> wt;
+        TensorPtr weight = node->constants()["weights"];
+        for (auto c : node->constants())
+        {
+            wt.push_back(c.second->name());
+        }
+        std::stable_sort(wt.begin(), wt.end());
+        for (auto w : wt)
+        {
+            hash_combine(seed, w);
+        }
+    }
+    for (auto o : node->outputs())
+    {
+        for (auto s : o->shape())
+        {
+            hash_combine(seed, s);
+        }
+    }
+
+    hash_map[node] = seed;
+
+    return seed;
+}
+
+static std::vector<NodePtrList> criteria(NodePtr n, std::map<NodePtr, uint32_t> &hash_map)
+{
+    std::vector<NodePtrList> ret;
+    std::set<uint32_t> already_merged;
+    bool enable_cse_tile_node = BuilderConfig::get<bool>(Constants::enable_cse_tile_node);
+    std::map<uint32_t, std::vector<uint32_t>> hash_index_map;
+    for (uint32_t i = 0; i < n->children().size(); ++i)
+    {
+        if (already_merged.count(i) || is_expand_node(n->children()[i]))
+        {
+            continue;
+        }
+        auto child_i = n->children()[i];
+        std::string tsg_name_i = child_i->get_attr(Constants::tsg_name);
+        if (child_i->type() == OpType_Reshape && child_i->outputs()[0]->is_io_tensor())
+        {
+            continue;
+        }
+        uint32_t hash = get_hash(child_i, hash_map);
+        bool is_equal = hash_index_map.find(hash) != hash_index_map.end();
+
+        if (is_equal)
+        {
+            auto vec = hash_index_map[hash];
+            auto index = check_real_equal(i, vec, n->children());
+            if (index == (int)i)
             {
-                hash_map[node1] = id1;
+                ERROR() << "same index";
+            }
+            if (index < 0)
+            {
+                hash_index_map[hash].push_back(i);
             }
             else
             {
-                hash_map[node2] = id0;
-            }
-            return true;
-        }
-        return false;
-    }
-    
-    static std::vector<NodePtrList> criteria(NodePtr n, std::map<NodePtr, uint32_t> &hash_map)
-    {
-        std::vector<NodePtrList> ret;
-        std::set<uint32_t> already_merged;
-        bool enable_cse_tile_node = BuilderConfig::get<bool>(Constants::enable_cse_tile_node);
-        if (n->children().size() > 1)
-        {
-            for (uint32_t i = 0; i < n->children().size(); ++i)
-            {
-                if (already_merged.count(i) || is_expand_node(n->children()[i]))
-                {
-                    continue;
-                }
-                auto child_i = n->children()[i];
-                std::string tsg_name_i = child_i->get_attr(Constants::tsg_name);
-                for (uint32_t j = i + 1; j < n->children().size(); ++j)
-                {
-                    if (already_merged.count(j))
-                    {
-                        continue;
-                    }
-                    auto child_j = n->children()[j];
-                // avoid dead loop when full simplify is enabled and working with fuse_reshape
-                if (child_j->type() == OpType_Reshape && child_j->outputs()[0]->is_io_tensor())
-                {
-                    continue;
-                }
-                std::string tsg_name_j = child_j->get_attr(Constants::tsg_name);
-                bool is_equal = hash_equal(hash_map, n->children()[i], n->children()[j]);
-
-                // default: don't merge nodes between tile slices
-                // enable: merge it (e.g. multi crop)
+                auto child_j = n->children()[index];
+                bool not_equal = false;
                 if (!enable_cse_tile_node)
                 {
-                    is_equal = is_equal && (tsg_name_i == tsg_name_j);
-                }
-
-                if (is_equal)
-                {
-                    for (uint32_t k = 0; k < n->children()[i]->inputs().size(); ++k)
+                    std::string tsg_name_j = child_j->get_attr(Constants::tsg_name);
+                    if (tsg_name_i != tsg_name_j)
                     {
-
-                        if (n->children()[j]->inputs()[k] != n->children()[i]->inputs()[k])
-                        {
-                            is_equal = false;
-                            break;
-                        }
+                        not_equal = true;
                     }
                 }
-                if (is_equal)
+
+                if (!not_equal)
                 {
-                    ret.push_back({n->children()[i], n->children()[j]});
-                    already_merged.insert(j);
+                    ret.push_back({child_j, child_i});
+                    already_merged.insert(index);
                     already_merged.insert(i);
-                    break;
                 }
             }
+        }
+        else
+        {
+            hash_index_map[hash].push_back(i);
         }
     }
     return ret;
 }
+
 // common subexpression elimination for eliminating common subnode
 bool CSE_subnode(GraphPtr g)
 {
     bool is_changed = false;
     std::map<NodePtr, uint32_t> hash_map;
-
-    //init hash_map
-    hash_node(true);
-    for (auto node : g->nodes())
-    {
-        hash_map[node] = hash_node();
-    }
     while (true)
     {
         bool is_merged = false;
@@ -181,7 +206,6 @@ bool CSE_subnode(GraphPtr g)
                         reshape_node->add_output(o);
 
                         g->add_node(reshape_node);
-                        hash_map[reshape_node] = hash_node();
                         ADD_LOCATION_BY_NODE(reshape_node, n1);
                     }
                     else
@@ -191,14 +215,11 @@ bool CSE_subnode(GraphPtr g)
                             for (auto c : o->consumers())
                             {
                                 c->add_input(n0->outputs()[i], c->remove_input(o));
-                                hash_map[c] = hash_node(); // Update hash_map for the modified consumer nodes
                             }
                         }
                     }
                 }
-
                 g->remove_node(n1);
-                hash_map.erase(n1); // Remove the old node from hash_map
                 removed_node.insert(n1);
                 is_changed = true;
                 is_merged = true;
