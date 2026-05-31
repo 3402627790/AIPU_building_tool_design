@@ -1,6 +1,28 @@
+//-------------------------------------------------------------------------------
+// This file is CONFIDENTIAL and any use by you is subject to the terms of the
+// agreement between you and Arm China or the terms of the agreement between you
+// and the party authorised by Arm China to disclose this file to you.
+// The confidential and proprietary information contained in this file may only
+// be used by a person authorised under and to the extent permitted by a
+// subsisting licensing agreement from Arm China.
+//
+//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//                    All rights reserved.
+//
+// This entire notice must be reproduced on all copies of this file and copies of
+// this file may only be made by a person if such person is permitted to do so
+// under the terms of a subsisting license agreement from Arm China.
+//
+//--------------------------------------------------------------------------------
+/*
+ * @Author: Lang Hu
+ * @Date: 2023-03-03 15:30:23
+ * @Last Modified by: Neo Wang
+ * @Last Modified time: 2024-08-26 15:16:35
+ */
 #include "perf_estimator.h"
-#include "_BIN_RESOURCE_cost_model_x2.cbin__.h"
-#include "_BIN_RESOURCE_cost_model_x2.txt__.h"
+#include "_BIN_RESOURCE_cost_model_x3p.cbin__.h"
+#include "_BIN_RESOURCE_cost_model_x3p.txt__.h"
 #include "builder/ops/ops.h"
 #include "core/compute_tensor.h"
 #include "core/config.h"
@@ -76,62 +98,67 @@ static bool fill_key(const std::string &key, std::vector<float> &res, int &pos)
         {"Mul", 2},
         {"Sub", 3},
         {"BatchToSpace", 4},
-        {"Cast", 5},
-        {"Concat", 6},
-        {"Convolution", 7},
-        {"Crop", 8},
-        {"DepthToSpace", 9},
-        {"Eltwise", 10},
-        {"FullyConnected", 11},
-        {"Gather", 12},
-        {"MatMul", 13},
-        {"Pad", 14},
-        {"Pooling", 15},
-        {"Resize", 16},
-        {"ReverseSequence", 17},
-        {"Rsqrt", 18},
-        {"SquaredDifference", 19},
-        {"Softmax", 20},
-        {"SpaceToDepth", 21},
-        {"Split", 22},
-        {"Tile", 23},
-        {"Transpose", 24},
-        {"LayoutConvertor", 25},
-        {"Normalization", 26},
-        {"BatchNorm", 27},
-        {"GroupNorm", 28},
-        {"InstanceNorm", 39},
-        {"LayerNorm", 30},
-        {"GridSample", 31},
-        {"Slice", 32},
-        {"Reduce", 33},
-        {"ConvTranspose", 34},
-        {"BasicLSTM", 35},
-        {"ChannelShuffle", 36},
-        {"Sine", 37},
-        {"Cosine", 38},
-        {"Quantize", 39},
-        {"DeQuantize", 40},
-        {"RMSNorm", 41},
+        {"SpaceToBatch", 5},
+        {"Cast", 6},
+        {"Concat", 7},
+        {"Convolution", 8},
+        {"Crop", 9},
+        {"DepthToSpace", 10},
+        {"Eltwise", 11},
+        {"FullyConnected", 12},
+        {"Gather", 13},
+        {"MatMul", 14},
+        {"Pad", 15},
+        {"Pooling", 16},
+        {"Resize", 17},
+        {"ReverseSequence", 18},
+        {"Rsqrt", 19},
+        {"SquaredDifference", 20},
+        {"Softmax", 21},
+        {"SpaceToDepth", 22},
+        {"Split", 23},
+        {"Tile", 24},
+        {"Transpose", 25},
+        {"LayoutConvertor", 26},
+        {"Normalization", 27},
+        {"BatchNorm", 28},
+        {"GroupNorm", 29},
+        {"InstanceNorm", 30},
+        {"LayerNorm", 31},
+        {"GridSample", 32},
+        {"Slice", 33},
+        {"Reduce", 34},
+        {"ConvTranspose", 35},
+        {"BasicLSTM", 36},
+        {"ChannelShuffle", 37},
+        {"Sine", 38},
+        {"Cosine", 39},
+        {"Quantize", 40},
+        {"DeQuantize", 41},
+        {"RMSNorm", 42},
     };
     static std::map<std::string, int> m_method_keys = {
         {"LEAKYRELU", 0},
         {"PRELU", 1},
-        {"SIGMOID", 2},
-        {"SILU", 3},
-        {"TANH", 4},
-        {"HARDSWISH", 5},
-        {"MAX", 6},
-        {"AVG", 7},
-        {"ADD", 8},
-        {"SUB", 9},
-        {"MUL", 10},
-        {"MIN", 11},
-        {"BILINEAR", 12},
-        {"NEAREST", 13},
-        {"L1", 14},
-        {"L2", 15},
-        {"MEAN", 16},
+        {"RELU", 2},
+        {"SIGMOID", 3},
+        {"SILU", 4},
+        {"TANH", 5},
+        {"CLIP", 6},
+        {"HARDSWISH", 7},
+        {"MAX", 8},
+        {"AVG", 9},
+        {"ADD", 10},
+        {"SUB", 11},
+        {"MUL", 12},
+        {"MIN", 13},
+        {"BILINEAR", 14},
+        {"NEAREST", 15},
+        {"L1", 16},
+        {"L2", 17},
+        {"MEAN", 18},
+        {"SUM", 19},
+        {"GELU", 20},
     };
     static std::map<std::string, int> m_dtype_keys = {
         {"int8", 0},
@@ -147,7 +174,14 @@ static bool fill_key(const std::string &key, std::vector<float> &res, int &pos)
         {"NHWC", 0},
         {"NCHW", 1},
         {"NCHWC16", 2},
-        {"NCHWC32", 3},
+        {"NCHWC16T1", 3},
+        {"NCHWC16T8", 4},
+        {"NCHWC32", 5},
+        {"NCHWC32T1", 6},
+        {"NCHWC32T8", 7},
+        {"NDHWC", 8},
+        {"NDCHWC16", 9},
+        {"NDCHWC32", 10},
     };
     int val = INT32_MAX;
     for (auto &keys : {&m_optype_keys, &m_method_keys, &m_dtype_keys, &m_layout_keys})
@@ -250,13 +284,15 @@ static void preprocess(std::vector<std::pair<NodePtr, std::vector<bool>>> &perf_
                     "SIGMOID",
                     "LEAKYRELU",
                     "PRELU",
+                    "RELU",
                     "TANH",
+                    "CLIP",
                     "SILU",
                     "HARDSWISH",
                 };
                 std::string method = node->params()["method"];
                 if (!methods.count(method))
-                {
+                {                    
                     method = "SIGMOID";
                 }
                 ret &= fill_key(op_type, buff, pos);
@@ -286,6 +322,15 @@ static void preprocess(std::vector<std::pair<NodePtr, std::vector<bool>>> &perf_
                 ret &= fill_param<int>(node, "block_size_y", buff, pos);
                 ret &= fill_list(in_shape, buff, pos);
                 break;
+            }
+            case OpType_SpaceToBatch:
+            {
+                std::vector<int> in_shape = node->inputs()[0]->shape();
+                ret &= convert_shape(in_shape);
+                ret &= fill_key(op_type, buff, pos);
+                ret &= fill_param<int>(node, "block_size_x", buff, pos);
+                ret &= fill_param<int>(node, "block_size_y", buff, pos);
+                ret &= fill_list(in_shape, buff, pos);
             }
             case OpType_Cast:
             {
@@ -709,6 +754,22 @@ static void preprocess(std::vector<std::pair<NodePtr, std::vector<bool>>> &perf_
                 ret &= fill_list(in_shape, buff, pos);
                 break;
             }
+            case OpType_RMSNorm:
+            {
+                auto in_shape = get_shape(node->inputs()[0]);
+                std::vector<int> axis = node->params()["axis"];
+                for (uint32_t i = 0; i < axis.size(); ++i)
+                {
+                    if (axis[i] < 0)
+                    {
+                        axis[i] += in_shape.size();
+                    }
+                }
+                ret &= fill_key(op_type, buff, pos);
+                ret &= fill_list(axis, buff, pos);
+                ret &= fill_list(in_shape, buff, pos);
+                break;
+            }
             case OpType_GridSample:
             {
                 std::string method = node->params()["method"];
@@ -900,6 +961,7 @@ static void postprocess(std::vector<float> &pred,
         OpType_InternalConstant,
         OpType_SubGraphInput,
         OpType_Dummy,
+        OpType_Empty,
     };
     uint32_t batch_index = 0;
     outputs.clear();
@@ -1051,10 +1113,10 @@ static GraphPtr load_cost_model(const std::string &graph_path, const std::string
         }
         else
         {
-            auto txt_start = (const char *)&_binary_cost_model_x2_txt_start;
-            auto bin_start = (const char *)&_binary_cost_model_x2_cbin_start;
-            auto txt_data_len = (size_t)&_binary_cost_model_x2_txt_end - (size_t)&_binary_cost_model_x2_txt_start;
-            auto bin_data_len = (size_t)&_binary_cost_model_x2_cbin_end - (size_t)&_binary_cost_model_x2_cbin_start;
+            auto txt_start = (const char *)&_binary_cost_model_x3p_txt_start;
+            auto bin_start = (const char *)&_binary_cost_model_x3p_cbin_start;
+            auto txt_data_len = (size_t)&_binary_cost_model_x3p_txt_end - (size_t)&_binary_cost_model_x3p_txt_start;
+            auto bin_data_len = (size_t)&_binary_cost_model_x3p_cbin_end - (size_t)&_binary_cost_model_x3p_cbin_start;
             std::stringstream txt, weight;
             txt.write(txt_start, txt_data_len);
             cost_model = Graph::parse(txt);
@@ -1371,7 +1433,14 @@ static void match_profile_data(std::vector<std::pair<NodePtr, std::vector<bool>>
 
 std::string PerfEstimator::summary()
 {
-    return std::string();
+    std::ostringstream oss;
+    int64_t total_cycles = 0;
+    for (auto &p : m_res)
+    {
+        total_cycles += p.second.count_cycles;
+    }
+    oss << "Total cycles estimated by cost model is: " << total_cycles;
+    return oss.str();
 }
 
 bool PerfEstimator::operator()(GraphPtr g) const
