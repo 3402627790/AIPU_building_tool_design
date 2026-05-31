@@ -423,50 +423,72 @@ std::vector<MemoryObjectPtr> AMATAllocator::slots()
         return p1.second > p2.second ||
                (p1.second == p2.second && p1.first->foot_print > p2.first->foot_print) ||
                (p1.second == p2.second && p1.first->foot_print == p2.first->foot_print && p1.first->align < p2.first->align);
-                allocated.push_back({ptr, {size, gap, liveness.first, liveness.second}});
-            }
-            else
-            {
-                auto a = get_right_most(snapshot); //get right-most memory
-                if (size + a.offset + a.size > max_size)
-                {
-                    // INFO() << "xxxxxxxx";
-                    //TODO not allocate this tensor
-                }
-                else
-                {
-                    allocated.push_back({ptr, {size, get_align(a.offset + a.size, ptr->align), liveness.first, liveness.second}});
-                }
-            }
-        }
-    }
+    });
+    // DEBUG() << "AMAT TENSOR size:" << sorted.size();
+    auto allocated = allocate_ptrs(sorted);
+    m_slots.clear();
+    std::stable_sort(allocated.begin(), allocated.end(), [](const std::pair<MemoryObjectPtr, AllocationObj> &a, const std::pair<MemoryObjectPtr, AllocationObj> &b) {
+        return a.second.offset < b.second.offset || (a.second.offset == b.second.offset && a.second.size < b.second.size);
+    });
 
-    return allocated;
-}
+    std::map<MemoryObjectPtr, uint64_t> slot_relative_offset; // for merge slot, we need know slots relative offset
 
-std::vector<MemoryObjectPtr> AMATAllocator::slots()
-{
-    // sort by size
-    if (!m_refresh)
+    auto slot = std::make_shared<MemoryObject>(0);
+    slot->foot_print = 0;
+    uint64_t current_offset = 0;
+    slot_relative_offset[slot] = 0;
+
+    for (size_t i = 0; i < allocated.size(); ++i)
     {
-        return m_slots;
-    }
-    m_in_tcm.clear();
-    apply_dtcm_opt();
-    std::vector<std::pair<MemoryObjectPtr, uint32_t>> sorted;
-    for (auto kv : m_tensors)
-    {
-        if (m_in_tcm.count(kv.first))
+        slot->size = allocated[i].second.size;
+        slot->align = allocated[i].first->align;
+        current_offset = allocated[i].second.offset;
+        slot_relative_offset[slot] = current_offset;
+
+        for (size_t j = i; j < allocated.size(); ++j)
         {
-            continue;
+
+            auto a = allocated[j].second;
+            if (a.offset >= current_offset + slot->size)
+            {
+                i = j - 1;
+                m_slots.push_back(slot);
+                slot = std::make_shared<MemoryObject>(0);
+                slot->foot_print = 0;
+                break;
+            }
+            if (a.offset + a.size > current_offset + slot->size) // enlarge slot.size
+            {
+                slot->size = a.offset + a.size - current_offset;
+            }
+
+            uint64_t relative_offset = a.offset - current_offset;
+            allocated[j].first->set_base_offset(slot);
+            allocated[j].first->relative_offset = relative_offset;
+            slot->foot_print += allocated[j].first->foot_print;
+            slot->align = MAX(slot->align, allocated[j].first->align);
+
+            if (j == allocated.size() - 1)
+            {
+                m_slots.push_back(slot);
+                i = j;
+                slot = std::make_shared<MemoryObject>(0);
+                slot->foot_print = 0;
+            }
         }
-        sorted.push_back(kv);
     }
-    // sorted by size
-    std::stable_sort(sorted.begin(), sorted.end(), [](const std::pair<MemoryObjectPtr, uint32_t> &p1, const std::pair<MemoryObjectPtr, uint32_t> &p2) -> bool {
-        return p1.second > p2.second ||
-               (p1.second == p2.second && p1.first->foot_print > p2.first->foot_print) ||
-               (p1.second == p2.second && p1.first->foot_print == p2.first->foot_print && p1.first->align < p2.first->align);
+    if (slot->size)
+    {
+        m_slots.push_back(slot);
+    }
+    // merge slots if some slot alignment require does not meet:
+    auto check_slot_align = [&]() {
+        std::vector<MemoryObjectPtr> need_merge;
+        for (size_t i = 0; i < allocated.size(); ++i)
+        {
+            auto ptr = allocated[i].first;
+            // check relative offset is aligned?
+            if ((ptr->offset() - ptr->get_base_memory()) % ptr->align != 0 && !contains(need_merge, ptr->get_base_object()))
             {
                 need_merge.push_back(ptr->get_base_object());
             }

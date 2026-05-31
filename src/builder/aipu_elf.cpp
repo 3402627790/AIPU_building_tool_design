@@ -310,6 +310,38 @@ BinSection AIPUELF::get_bin_note(const std::string &note_name) const
     return ro;
 }
 
+void AIPUELF::get_cps_section_note(const aipubt::ELFIO::section *s, std::string kernel_name, uint32_t info_type, char *&buf, uint32_t &size)
+{
+    aipubt::ELFIO::const_note_section_accessor nsa(m_elf, s);
+
+    std::string name;
+    void *desc = nullptr;
+    aipubt::ELFIO::Elf_Word type = 0;
+    aipubt::ELFIO::Elf_Word descSize = 0;
+    auto num = nsa.get_notes_num();
+    for (int i = 0; i < (int)num; ++i)
+    {
+        nsa.get_note(i, type, name, desc, descSize);
+
+        if (name == kernel_name && type == info_type)
+        {
+            size = descSize;
+            if (descSize > 0)
+            {
+                buf = new char[descSize]; // 分配新内存
+                std::memcpy(buf, desc, descSize);
+            }
+            else
+            {
+                buf = nullptr;
+            }
+            INFO() << "get note name: " << name;
+            return;
+        }
+    }
+    ERROR() << "cannot find " << kernel_name;
+}
+
 void AIPUELF::set_comment(const std::string &comment)
 {
     section *cmt_sec = get_elf_section(".comment");
@@ -319,6 +351,14 @@ void AIPUELF::set_comment(const std::string &comment)
     }
     cmt_sec->append_data(comment);
     return;
+}
+
+void AIPUELF::set_cps_bin_note(BinSection &ro, const std::string &note_name)
+{
+    add_aipu_note();
+    remove_note(note_name);
+    note_section_accessor note_writer(m_elf, m_note);
+    note_writer.add_note(0x01, note_name, ro.bin, ro.bin_size);
 }
 
 void AIPUELF::set_bin_note(BinSection &ro, const std::string &note_name)
@@ -649,6 +689,18 @@ void AIPUELF::set_constant_hash_table(ConstantHashTable &table)
     std::ostringstream ss;
     table.write(ss);
     set_note(ss.str(), "constanthashtable");
+}
+
+std::string AIPUELF::get_lora_info() const
+{
+    auto raw_bin = get_bin_note("lorainfo");
+    MemBuf buf(raw_bin.bin, raw_bin.bin_size);
+    std::istream stream(&buf);
+    return std::string(std::istreambuf_iterator<char>(stream), {});
+}
+void AIPUELF::set_lora_info(const std::string &info)
+{
+    set_note(info, "lorainfo");
 }
 
 void AIPUELF::add_aipu_note()
