@@ -26,7 +26,13 @@
 namespace aipubt
 {
 
-ReadOnlyParam::ReadOnlyParam(ComputeTensor o) : tensor(o) {}
+ReadOnlyParam::ReadOnlyParam(ComputeTensor t) : tensor(t)
+{
+    if (!t)
+    {
+        ERROR() << "A null pointer cannot be an argument!";
+    }
+}
 
 ReadOnlyParam::ReadOnlyParam(NodeParamValue o)
 {
@@ -92,4 +98,4 @@ std::ostream &operator<<(std::ostream &os, const ReadOnlyParam &p)
     }
     return os << p.value;
 }
-}; // namespace aipubt
+} // namespace aipubt

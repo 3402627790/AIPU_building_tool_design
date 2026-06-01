@@ -94,7 +94,7 @@ static std::vector<MemoryObjectPtr> allocate_constant_data(size_t weight_offset,
 {
     auto get_mem_size = [](TensorPtr t) -> uint32_t {
         auto ptr = t->memory_offset()->get_base_object();
-        auto size = std::max(ptr->size, t->mem_size());
+        auto size = std::max((uint64_t)ptr->size, (uint64_t)t->mem_size());
         if (Target::get_the_target()->isainfo().type == ISA_ZYv6)
         {
             size = aligned(size, 64);
@@ -1465,7 +1465,8 @@ static void reduce_constant(const std::vector<std::vector<NodePtr>> &levels)
                 if (kv.second->attrs().count(Constants::hash))
                 {
                     std::string hex = kv.second->get_attr(Constants::hash);
-                    if (constant_hash.count(hex))
+                    if (constant_hash.count(hex) &&
+                        !kv.second->attrs().count(Constants::lora_node))
                     {
                         // DEBUG()<<"reduce constant:"<<kv.first;
                         reduce_size += kv.second->mem_size();
@@ -1996,10 +1997,12 @@ bool GraphBuilder::build_aipu(const std::vector<TensorPtr> &inputs_,
             break_descriptor_chain = true;
         }
     });
+    bool dump_rt_tensor = BuilderConfig::get<bool>(Constants::dump_rt_output_tensors) || BuilderConfig::get<bool>(Constants::dump_rt_input_tensors) || (BuilderConfig::get<int>(Constants::dump_rt_tensor_id) != -1);
     if (BuilderConfig::get<bool>("DEBUG") ||
         BuilderConfig::get<bool>(Constants::enable_debug_info) ||
         AIPUBuilder::get_profiler()->enable_profile() ||
         BuilderConfig::get<bool>(Constants::enable_ds) ||
+        dump_rt_tensor ||
         break_descriptor_chain)
     {
         BuilderConfig::set(Constants::break_descriptor_chain, true);
@@ -2852,12 +2855,12 @@ bool GraphBuilder::build_aipu(const std::vector<TensorPtr> &inputs_,
 
     header.arch = get_target()->gen_arch_number();
 
-    unsigned int bss_size = 0;
-    for (unsigned int i = 0; i < m_aipubin->bss.num_buffer_descriptor; i++)
-    {
-        // INFO() << "size " << i << " = 0x" << std::hex << m_aipubin->bss.buffer_descriptor[i].size;
-        bss_size += m_aipubin->bss.buffer_descriptor[i].size;
-    }
+    // unsigned int bss_size = 0;
+    // for (unsigned int i = 0; i < m_aipubin->bss.num_buffer_descriptor; i++)
+    // {
+    // INFO() << "size " << i << " = 0x" << std::hex << m_aipubin->bss.buffer_descriptor[i].size;
+    // bss_size += m_aipubin->bss.buffer_descriptor[i].size;
+    // }
     uint32_t file_offset = sizeof(m_aipubin->header);
     m_aipubin->header.text_offset = file_offset;
     m_aipubin->header.text_size = m_aipubin->text.bin_size;

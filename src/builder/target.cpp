@@ -65,6 +65,7 @@ static std::map<std::string, TargetDef> TARGET_DETAILS = {
     {"X3P_1202", {{2, 128 * 1024, 32 * 1024, 1 << 12, 512, 1}, 1, ISA_ZYv6}},
     {"X3P_1204", {{4, 128 * 1024, 32 * 1024, 1 << 12, 512, 1}, 1, ISA_ZYv6}},
     {"X3S_1304", {{4, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 2, ISA_ZYv6}},
+    {"X3U", {{4, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 2, ISA_ZYv7}}, //fot test
 };
 
 std::ostream &operator<<(std::ostream &os, ISAType dtype)
@@ -80,73 +81,39 @@ std::ostream &operator<<(std::ostream &os, ISAType dtype)
     return (os << ISANAME[dtype]);
 }
 
-const std::vector<std::string> &Target::get_support_targets()
-{
-    static std::vector<std::string> supported;
-    if (supported.size())
-    {
-        return supported;
-    }
-    for (auto kv : TARGET_DETAILS)
-    {
-        supported.push_back(kv.first);
-    }
-    return supported;
-}
+    {"Z2_1002", {{2, 256 * 1024, 32 * 1024, 1 << 10, 256, 1}, 0, ISA_ZYv2}},
+    {"Z2_1004", {{4, 256 * 1024, 32 * 1024, 1 << 10, 256, 1}, 0, ISA_ZYv2}},
+    {"Z3_1204", {{4, 512 * 1024, 32 * 1024, 1 << 12, 256, 1}, 0, ISA_ZYv3}},
+    {"X1_1204", {{4, 512 * 1024, 32 * 1024, 1 << 12, 256, 1}, 0, ISA_ZYv3}},
+    {"Z3_1104", {{4, 256 * 1024, 32 * 1024, 1 << 11, 256, 1}, 0, ISA_ZYv3}},
+    {"Z3_1002", {{2, 256 * 1024, 32 * 1024, 1 << 10, 128, 1}, 0, ISA_ZYv3}},
+    {"Z3_0901", {{1, 128 * 1024, 32 * 1024, 1 << 9, 128, 1}, 0, ISA_ZYv3}},
+    // TODO Z5 target detail info are wrong!!
+    {"X2_1204", {{4, 256 * 1024 - 32, 32 * 1024 - 32, 1 << 12, 256, 1}, 0, ISA_ZYv5}},
+    {"Z5_0901", {{1, 128 * 1024, 32 * 1024, 1 << 9, 256, 1}, 0, ISA_ZYv5}},
+    // {"X3_1304", {{4, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 0, ISA_ZYv6}},
+    // {"X3_1302", {{2, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 0, ISA_ZYv6}},
+    // {"X3_1202", {{2, 128 * 1024, 32 * 1024, 1 << 12, 512, 1}, 0, ISA_ZYv6}},
+    // {"X3_1204", {{4, 128 * 1024, 32 * 1024, 1 << 12, 512, 1}, 0, ISA_ZYv6}},
+    {"X3P_1304", {{4, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 1, ISA_ZYv6}},
+    {"X3P_1302", {{2, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 1, ISA_ZYv6}},
+    {"X3P_1202", {{2, 128 * 1024, 32 * 1024, 1 << 12, 512, 1}, 1, ISA_ZYv6}},
+    {"X3P_1204", {{4, 128 * 1024, 32 * 1024, 1 << 12, 512, 1}, 1, ISA_ZYv6}},
+    {"X3S_1304", {{4, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 2, ISA_ZYv6}},
+    {"X3U", {{4, 128 * 1024, 32 * 1024, 1 << 13, 512, 2}, 2, ISA_ZYv7}}, //fot test
+};
 
-Target::Target(const std::string &name, ISAInfo isainfo, ChipInfo chipinfo)
+std::ostream &operator<<(std::ostream &os, ISAType dtype)
 {
-    m_name = name;
-    m_info = isainfo;
-    m_chip = chipinfo;
-    m_detail = TARGET_DETAILS[name].detail;
-    m_chip.revision = TARGET_DETAILS[name].revision;
-}
+    std::map<ISAType, std::string> ISANAME = {
+        {ISAType::ISA_ZY, "ISA_ZYv1"},
+        {ISAType::ISA_ZYv2, "ISA_ZYv2"},
+        {ISAType::ISA_ZYv3, "ISA_ZYv3"},
+        {ISAType::ISA_ZYv5, "ISA_ZYv5"},
+        {ISAType::ISA_ZYv6, "ISA_ZYv6"},
 
-Target *Target::get_the_target()
-{
-    static std::mutex mtx;
-    static Target the_target("X2_1204", {ISA_ZYv5}, {1204});
-    std::lock_guard<std::mutex> lock(mtx);
-    return &the_target;
-}
-void set_target(const std::string &target_code)
-{
-    Target::set_target(target_code);
-}
-void Target::set_target(const std::string &target_code)
-{
-    auto tcode = target_code;
-    int core = 1;
-    // this is a multi-core
-    size_t pos = 0;
-    if ((pos = target_code.find("MP", pos)) != std::string::npos)
-    {
-        auto mp = target_code.substr(pos + 2, target_code.size() - pos - 2);
-        core = std::stoi(mp);
-        if (core == 0)
-        {
-            core = 1;
-        }
-        if (pos > 0 && target_code[pos - 1] == '_')
-        {
-            pos = pos - 1;
-        }
-        tcode = target_code.substr(0, pos);
-    }
-    auto code = utils::split_string(tcode, '_');
-    if (TARGET_DETAILS.count(tcode))
-    {
-        if (!code.empty())
-        {
-            uint32_t chip = std::stoi(code[1]);
-            *get_the_target() = Target(tcode, {TARGET_DETAILS[tcode].isa}, {chip, TARGET_DETAILS[tcode].revision});
-            get_the_target()->m_core_num = core;
-        }
-        BuilderConfig::target_changed();
-        return;
-    }
-    ERROR() << "Unkown Target code:" << target_code << ", support: " << utils::join_string(",", get_support_targets());
+    };
+    return (os << ISANAME[dtype]);
 }
 
 std::string Target::get_name_from_arch_number(const uint32_t arch_number)

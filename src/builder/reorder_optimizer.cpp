@@ -177,22 +177,22 @@ void ReorderOptimizer::node_reorder(int strategy)
     else if (strategy == 2)
     {
         std::vector<std::vector<NodePtr>> new_orders;
-        int cnt = 0;
+        // int cnt = 0;
         for (auto &level : m_levels)
         {
             level_branch_optimize(level);
-            cnt++;
+            // cnt++;
         }
     }
     else if (strategy == 3)
     {
         std::vector<std::vector<NodePtr>> new_orders;
-        int cnt = 0;
+        // int cnt = 0;
         for (auto &level : m_levels)
         {
 
             level_stage_optimize(level);
-            cnt++;
+            // cnt++;
         }
     }
 

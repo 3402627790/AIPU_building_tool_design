@@ -61,6 +61,11 @@ BuilderOpPlugin *BuilderOptimizer::get_single_op_plugin(OpType t, uint32_t flag)
     return best;
 }
 
+void BuilderOptimizer::optimize_mq(GraphPtr graph)
+{
+    apply_gopplugins(graph);
+}
+
 void BuilderOptimizer::optimize(GraphPtr graph)
 {
     auto output_tensors = graph->get_output_tensors();
@@ -81,7 +86,7 @@ void BuilderOptimizer::optimize(GraphPtr graph)
     {
         graph->to_svg("graph_raw.svg");
     }
-
+    lower_run_tiling(graph);
     if (enable_ds)
     {
         divide_graph(graph);
@@ -101,6 +106,7 @@ void BuilderOptimizer::optimize(GraphPtr graph)
             all_graphs.erase(it);
         }
     }
+
     for (auto g : all_graphs)
     {
         lower_before_optimize(g);

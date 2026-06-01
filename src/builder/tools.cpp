@@ -22,10 +22,11 @@
  */
 #include <algorithm>
 #include <builder/builder.h>
-#include <builder/builder2.h>
 #include <builder/dumper/dumper_x.h>
 #include <builder/dumper/dumper_x1.h>
 #include <builder/lowering/lowering.h>
+#include <builder/mcbuilder.h>
+#include <builder/mqbuilder.h>
 #include <builder/profiler.h>
 #include <builder/target.h>
 #include <core/any.h>
@@ -38,6 +39,7 @@
 #include <fstream>
 #include <gcompiler_api.h>
 #include <iostream>
+#include <launcher.h>
 #include <regex>
 #include <set>
 #include <statistic/allocator_fp_estimation.h>
@@ -513,6 +515,7 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
         Constants::split_wt_act,
         Constants::print_emitter_var,
         Constants::dump_constant_info,
+        Constants::dump_lora_info,
     };
     for (auto key : global_switches)
     {
@@ -570,7 +573,10 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
     {
         aipubt::BuilderConfig::set(Constants::show_info, info_types);
     }
-
+    if (arg_map.count("load_wt_update_cfg"))
+    {
+        aipubt::BuilderConfig::set(Constants::load_wt_update_cfg, cast_any<std::string>(arg_map["load_wt_update_cfg"]));
+    }
     if (arg_map.count("load_addr_cfg"))
     {
         aipubt::BuilderConfig::set(Constants::load_addr_cfg, cast_any<std::string>(arg_map["load_addr_cfg"]));
@@ -606,7 +612,6 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
 
     // reset dynamic options
     aipubt::BuilderConfig::set(Constants::enable_ds, false);
-    aipubt::BuilderConfig::set(Constants::enable_cl_opt, false);
     aipubt::BuilderConfig::erase(Constants::input_shape);
     aipubt::BuilderConfig::erase(Constants::max_input_shape);
     aipubt::BuilderConfig::erase(Constants::default_input_shape);
@@ -617,17 +622,6 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
     {
         bool status = aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5;
         aipubt::BuilderConfig::set(Constants::enable_ds, status);
-    }
-    if (arg_map.count("enable_cl_opt"))
-    {
-        if (aipubt::BuilderConfig::get<bool>(Constants::enable_ds))
-        {
-            aipubt::BuilderConfig::set(Constants::enable_cl_opt, true);
-        }
-        else
-        {
-            WARN() << "Option --enable_cl_opt is ignored because option --enable_ds is not enabled.";
-        }
     }
     for (auto &opt : {"input_shape", "max_input_shape", "default_input_shape"})
     {
@@ -1141,8 +1135,7 @@ static void insert_node_shape_params(GraphPtr graph,
         if (exprs.size())
         {
             n->params()["ds_top_shape"] = exprs;
-        }
-    });
+        } });
 }
 
 static bool infer_real_shape(GraphPtr graph,
@@ -1250,8 +1243,7 @@ static bool infer_real_shape(GraphPtr graph,
             {
                 n->params()[new_param_name] = values;
             }
-        }
-    });
+        } });
 
     insert_node_shape_params(graph, shapes);
 
@@ -1271,8 +1263,7 @@ static bool is_empty_graph(GraphPtr g)
             n->get_attr<uint32_t>(Constants::ro_size))
         {
             num_real_nodes++;
-        }
-    });
+        } });
     return num_real_nodes == 0;
 }
 
@@ -1410,6 +1401,19 @@ void actions_after_build(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map
             WARN() << "failed to generate graph.json for profiler";
         }
     }
+
+    if (BuilderConfig::get<bool>(Constants::dump_lora_info) &&
+        g->attrs().count(Constants::lora_info))
+    {
+        std::string lora_info = g->get_attr(Constants::lora_info);
+        std::ofstream ofs("temp.lora_info.json");
+        if (ofs.is_open())
+        {
+            ofs << lora_info << std::endl;
+            ofs.close();
+        }
+    }
+
     if ((!arg_map.count("dot")) && g)
     {
         utils::remove_file(temp_dot);
@@ -1564,6 +1568,31 @@ static void update_simulator_cfg(const std::string &dump_prefix,
     auto cfg_str = utils::join_string("\n", cfg_lines);
     ofs.write(cfg_str.c_str(), cfg_str.size());
     ofs.close();
+}
+
+bool cpsdumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map)
+{
+    aipubt::rt::Launcher launcher;
+    launcher.load_from_file(cast_any<std::string>(arg_map["aipubin"]));
+
+    auto inputs = launcher.get_inputs();
+    for (size_t i = 0; i < inputs.size(); ++i)
+    {
+        auto &input = inputs[i];
+        input.data = input_tensors[i]->data<char>();
+        input.length = input_tensors[i]->mem_size();
+        input.name = input_tensors[i]->name();
+        input.shape = input_tensors[i]->shape();
+    }
+    INFO() << "fun with btrt:";
+    uint64_t t0, t1;
+    t0 = utils::get_time_in_us();
+    launcher.run(inputs);
+    t1 = utils::get_time_in_us();
+    INFO() << "simulator done! total time: " << (t1 - t0) / 1000 / 1000. << " s";
+    launcher.dump_outputs();
+
+    return true;
 }
 
 bool elfdumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map, GraphELFBuilder *builder)
@@ -1862,198 +1891,289 @@ GraphPtr aipurun(GraphPtr g,
     {
         return nullptr;
     }
-
-    // build
-    auto builder = run_gb(g, input_tensors, arg_map);
-    auto optimized_g = builder->graph();
-    if (GCompilerLogger::get_error_count() > error_cnt)
+    GraphPtr optimized_g;
+    if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv7)
     {
-        INFO() << "There are some errors in compiling time, Simulator would not run.";
-        return nullptr;
-    }
+        IBuilder *builder = new MqBuilder(g);
 
-    // dump
-    std::string global_cwd = BuilderConfig::get<std::string>(Constants::global_cwd);
-    std::string dump_prefix = global_cwd + "/temp_" + utils::get_uuid();
+        builder->build();
+        optimized_g = builder->get_graph();
 
-    Dumper *dumper;
-    if (arg_map.count("dump"))
-    {
-        dump_prefix = "temp";
-    }
-    dump_prefix = utils::get_abspath(dump_prefix);
-    if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5)
-    {
-        std::string aipubin = dump_prefix + ".aipuelf";
-        builder->write(aipubin);
-        dumper = new DumperX(BuilderConfig::get_instance(), ((GraphELFBuilder *)builder)->get_aipuelf(), Target::get_the_target(), builder->graph(), builder->get_ro());
-        optimized_g->attrs()["_elf"] = ((GraphELFBuilder *)builder)->get_aipuelf(); // attach elf into graph for later use
+        auto elf = builder->get_elf();
+        std::stringstream ss;
+        elf->save(ss);
+
+        aipubt::rt::Launcher launcher;
+        launcher.load_from_mem(ss.str().data(), ss.str().size());
+
+        auto slot_addr = launcher.get_slot_addresses();
+        optimized_g->set_attr("addr_vec_list", slot_addr);
+
+        actions_after_build(optimized_g, arg_map);
+
+        auto inputs = launcher.get_inputs();
+        for (size_t i = 0; i < inputs.size(); ++i)
+        {
+            auto &input = inputs[i];
+            input.data = input_tensors[i]->data<char>();
+            input.length = input_tensors[i]->mem_size();
+            input.name = input_tensors[i]->name();
+            input.shape = input_tensors[i]->shape();
+        }
+        INFO() << "fun with btrt:";
+        uint64_t t0, t1;
+        t0 = utils::get_time_in_us();
+        launcher.run(inputs);
+        t1 = utils::get_time_in_us();
+        INFO() << "simulator done! total time: " << (t1 - t0) / 1000 / 1000. << " s";
+
+        launcher.dump_outputs(cast_any<std::string>(arg_map["output"]));
+        if (arg_map.count("dump"))
+        {
+            launcher.dump_temp(".");
+        }
+        if (BuilderConfig::get<bool>("dump_all_tensors"))
+        {
+            std::set<TensorPtr> dump_tensors;
+            std::map<TensorPtr, int> layer_id_map;
+            auto tensor_index_map = ((MqBuilder *)builder)->get_tensor_index_map();
+            for (auto s : optimized_g->nodes())
+            {
+                auto sgn = SubGraphNode::from_node(s);
+                if (sgn)
+                {
+                    auto sg = sgn->subgraph();
+                    for (auto n : sg->nodes())
+                    {
+                        if (n->type() == OpType_Input || n->type() == OpType_SubGraphInput)
+                        {
+                            continue;
+                        }
+                        for (auto out : n->outputs())
+                        {
+                            auto tensor_p = std::dynamic_pointer_cast<ProxyTensor>(out);
+                            if (tensor_p)
+                            {
+                                out = tensor_p->proxied_tensor(true);
+                            }
+                            dump_tensors.insert(out);
+                            layer_id_map[out] = n->get_attr("layer_id");
+                        }
+                    }
+                }
+            }
+            std::map<int, std::pair<std::string, int>> dump_map;
+            for (auto t : dump_tensors)
+            {
+                if (!tensor_index_map.count(t))
+                {
+                    ERROR();
+                }
+                auto index = tensor_index_map[t];
+                auto id = layer_id_map[t];
+                auto name = "dumptensor_" + to_string(id) + "_" + utils::verify_name(t->name()) + ".bin";
+                auto size = t->mem_size();
+                dump_map[index] = make_pair(name, size);
+            }
+            launcher.dump_tensors(dump_map);
+        }
+
+        delete builder;
     }
     else
     {
-        dumper = new DumperX1(BuilderConfig::get_instance(), builder->get_aipubin(), builder->get_marked_tensors());
-    }
-
-    std::vector<std::vector<int>> input_shapes;
-    if (BuilderConfig::exist(Constants::input_shape))
-    {
-        input_shapes = parse_input_shape(optimized_g, Constants::input_shape);
-        for (uint32_t i = 0; i < input_tensors.size(); ++i)
+        // build
+        auto builder = run_gb(g, input_tensors, arg_map);
+        optimized_g = builder->graph();
+        if (GCompilerLogger::get_error_count() > error_cnt)
         {
-            auto tensor = std::make_shared<Tensor>(*input_tensors[i]);
-            auto shape = get_base_shape(tensor->shape());
-            tensor->shape() = TensorShape(input_shapes[i], shape.layout());
-            input_tensors[i] = tensor;
+            INFO() << "There are some errors in compiling time, Simulator would not run.";
+            return nullptr;
         }
-    }
 
-    auto output_file = cast_any<std::string>(arg_map["output"]);
-    if (BuilderConfig::exist(Constants::multi_batch))
-    {
-        auto batch = BuilderConfig::get<uint32_t>(Constants::multi_batch);
-        for (auto &input_t : input_tensors)
+        // dump
+        std::string global_cwd = BuilderConfig::get<std::string>(Constants::global_cwd);
+        std::string dump_prefix = global_cwd + "/temp_" + utils::get_uuid();
+
+        Dumper *dumper;
+        if (arg_map.count("dump"))
         {
-            auto input_shape = input_t->shape();
-            input_shape[0] = input_shape[0] * batch;
-            input_t->shape() = TensorShape(input_shape, input_t->shape().layout());
+            dump_prefix = "temp";
         }
-    }
-    auto ret_dump = dumper->gen_dumper_files(input_tensors, dump_prefix, output_file);
-
-    // after_build
-    actions_after_build(optimized_g, arg_map);
-
-    if (GCompilerLogger::get_error_count())
-    {
-        INFO() << "There are some errors in dumper, Simulator would not run.";
-        return optimized_g;
-    }
-
-    std::vector<int> dump_shape_dims;
-
-    // simulator
-    if (ret_dump && !arg_map.count("skip_simulator"))
-    {
-        if (!run_simulator(dump_prefix + ".cfg", arg_map))
+        dump_prefix = utils::get_abspath(dump_prefix);
+        if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5)
         {
-            ERROR() << "run simulator failed!";
+            std::string aipubin = dump_prefix + ".aipuelf";
+            builder->write(aipubin);
+            dumper = new DumperX(BuilderConfig::get_instance(), ((GraphELFBuilder *)builder)->get_aipuelf(), Target::get_the_target(), builder->graph(), builder->get_ro());
+            optimized_g->attrs()["_elf"] = ((GraphELFBuilder *)builder)->get_aipuelf(); // attach elf into graph for later use
         }
         else
         {
-            bool enable_ds = BuilderConfig::get<bool>(Constants::enable_ds);
-            if (enable_ds)
+            dumper = new DumperX1(BuilderConfig::get_instance(), builder->get_aipubin(), builder->get_marked_tensors());
+        }
+
+        std::vector<std::vector<int>> input_shapes;
+        if (BuilderConfig::exist(Constants::input_shape))
+        {
+            input_shapes = parse_input_shape(optimized_g, Constants::input_shape);
+            for (uint32_t i = 0; i < input_tensors.size(); ++i)
             {
-                if (is_empty_graph(optimized_g))
-                {
-                    eval_output_shape(optimized_g, input_shapes, dump_shape_dims);
-                }
-                else
-                {
-                    auto ts_base = optimized_g->global_tensors()[Constants::tensor_shape_base];
-                    uint32_t num_dims = ts_base->mem_size() / sizeof(uint32_t);
-                    std::ifstream ifs;
-                    ifs.open("output_shape.bin", std::ios::in | std::ios::binary);
-                    for (uint32_t i = 0; i < num_dims; ++i)
-                    {
-                        uint32_t dim = 0;
-                        ifs.read((char *)(&dim), sizeof(uint32_t));
-                        dump_shape_dims.push_back(dim);
-                    }
-                    ifs.close();
-                }
+                auto tensor = std::make_shared<Tensor>(*input_tensors[i]);
+                auto shape = get_base_shape(tensor->shape());
+                tensor->shape() = TensorShape(input_shapes[i], shape.layout());
+                input_tensors[i] = tensor;
             }
+        }
 
-            bool update_cfg = false;
-            std::vector<uint32_t> bin_sizes;
-            uint32_t index = 0;
-            auto out_tensors = builder->graph()->get_output_tensors();
-            for (uint32_t i = 0; i < out_tensors.size(); ++i)
+        auto output_file = cast_any<std::string>(arg_map["output"]);
+        if (BuilderConfig::exist(Constants::multi_batch))
+        {
+            auto batch = BuilderConfig::get<uint32_t>(Constants::multi_batch);
+            for (auto &input_t : input_tensors)
             {
-                auto ofile = output_file;
-                if (i != 0)
-                {
-                    ofile += std::to_string(i);
-                }
-                auto out = out_tensors[i];
-                out->set_data(new char[out->mem_size()], out->mem_size());
-                std::ifstream ifs;
-                ifs.open(ofile, std::ios::in | std::ios::binary);
-                ifs.read(out->data<char>(), out->mem_size());
-                ifs.close();
+                auto input_shape = input_t->shape();
+                input_shape[0] = input_shape[0] * batch;
+                input_t->shape() = TensorShape(input_shape, input_t->shape().layout());
+            }
+        }
+        auto ret_dump = dumper->gen_dumper_files(input_tensors, dump_prefix, output_file);
 
+        // after_build
+        actions_after_build(optimized_g, arg_map);
+
+        if (GCompilerLogger::get_error_count())
+        {
+            INFO() << "There are some errors in dumper, Simulator would not run.";
+            return optimized_g;
+        }
+
+        std::vector<int> dump_shape_dims;
+
+        // simulator
+        if (ret_dump && !arg_map.count("skip_simulator"))
+        {
+            if (!run_simulator(dump_prefix + ".cfg", arg_map))
+            {
+                ERROR() << "run simulator failed!";
+            }
+            else
+            {
+                bool enable_ds = BuilderConfig::get<bool>(Constants::enable_ds);
                 if (enable_ds)
                 {
-                    uint32_t shape_size = 1;
-                    for (int j = 0; j < out->shape().dim(); ++j)
+                    if (is_empty_graph(optimized_g))
                     {
-                        shape_size *= dump_shape_dims[index++];
+                        eval_output_shape(optimized_g, input_shapes, dump_shape_dims);
                     }
-                    auto bin_size = shape_size * Tensor::dtype_size(out->type());
-                    if (bin_size < out->mem_size())
+                    else
                     {
-                        utils::remove_file(ofile);
-                        std::ofstream ofs;
-                        ofs.open(ofile, std::ios::out | std::ios::binary);
-                        ofs.write(out->data<char>(), bin_size);
-                        ofs.close();
-                        update_cfg = true;
+                        auto ts_base = optimized_g->global_tensors()[Constants::tensor_shape_base];
+                        uint32_t num_dims = ts_base->mem_size() / sizeof(uint32_t);
+                        std::ifstream ifs;
+                        ifs.open("output_shape.bin", std::ios::in | std::ios::binary);
+                        for (uint32_t i = 0; i < num_dims; ++i)
+                        {
+                            uint32_t dim = 0;
+                            ifs.read((char *)(&dim), sizeof(uint32_t));
+                            dump_shape_dims.push_back(dim);
+                        }
+                        ifs.close();
                     }
-                    bin_sizes.push_back(bin_size);
+                }
+
+                bool update_cfg = false;
+                std::vector<uint32_t> bin_sizes;
+                uint32_t index = 0;
+                auto out_tensors = builder->graph()->get_output_tensors();
+                for (uint32_t i = 0; i < out_tensors.size(); ++i)
+                {
+                    auto ofile = output_file;
+                    if (i != 0)
+                    {
+                        ofile += std::to_string(i);
+                    }
+                    auto out = out_tensors[i];
+                    out->set_data(new char[out->mem_size()], out->mem_size());
+                    std::ifstream ifs;
+                    ifs.open(ofile, std::ios::in | std::ios::binary);
+                    ifs.read(out->data<char>(), out->mem_size());
+                    ifs.close();
+
+                    if (enable_ds)
+                    {
+                        uint32_t shape_size = 1;
+                        for (int j = 0; j < out->shape().dim(); ++j)
+                        {
+                            shape_size *= dump_shape_dims[index++];
+                        }
+                        auto bin_size = shape_size * Tensor::dtype_size(out->type());
+                        if (bin_size < out->mem_size())
+                        {
+                            utils::remove_file(ofile);
+                            std::ofstream ofs;
+                            ofs.open(ofile, std::ios::out | std::ios::binary);
+                            ofs.write(out->data<char>(), bin_size);
+                            ofs.close();
+                            update_cfg = true;
+                        }
+                        bin_sizes.push_back(bin_size);
+                    }
+                }
+                if (update_cfg && arg_map.count("dump"))
+                {
+                    update_simulator_cfg(dump_prefix, output_file, bin_sizes);
                 }
             }
-            if (update_cfg && arg_map.count("dump"))
+        }
+
+        if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5)
+        {
+            if (arg_map.count("multi_batch"))
             {
-                update_simulator_cfg(dump_prefix, output_file, bin_sizes);
+                auto output_tensors = builder->graph()->get_output_tensors();
+                handle_multi_batch(output_tensors, cast_any<uint32_t>(arg_map["multi_batch"]), output_file);
             }
         }
-    }
-
-    if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5)
-    {
-        if (arg_map.count("multi_batch"))
+        else
         {
-            auto output_tensors = builder->graph()->get_output_tensors();
-            handle_multi_batch(output_tensors, cast_any<uint32_t>(arg_map["multi_batch"]), output_file);
+            if (arg_map.count("DEBUG"))
+            {
+                handle_op_counter("op_counter.bin");
+            }
+            handle_error_code("error_code.bin");
         }
-    }
-    else
-    {
-        if (arg_map.count("DEBUG"))
-        {
-            handle_op_counter("op_counter.bin");
-        }
-        handle_error_code("error_code.bin");
-    }
 
-    // serialize real shape if input shape specified
-    if (!arg_map.count("skip_simulator") && arg_map.count("dumpIR") && input_shapes.size())
-    {
-        if (!infer_real_shape(optimized_g, dump_shape_dims, input_shapes))
+        // serialize real shape if input shape specified
+        if (!arg_map.count("skip_simulator") && arg_map.count("dumpIR") && input_shapes.size())
         {
-            ERROR() << "Infer real shapes of optimized graph failed!";
-        }
-        serialize_graph(optimized_g, arg_map);
+            if (!infer_real_shape(optimized_g, dump_shape_dims, input_shapes))
+            {
+                ERROR() << "Infer real shapes of optimized graph failed!";
+            }
+            serialize_graph(optimized_g, arg_map);
 
-        std::set<std::string> dims;
-        if (BuilderConfig::exist(Constants::dynamic_input_dim))
+            std::set<std::string> dims;
+            if (BuilderConfig::exist(Constants::dynamic_input_dim))
+            {
+                dims = BuilderConfig::get<std::set<std::string>>(Constants::dynamic_input_dim);
+            }
+            auto new_g = infershape(g, dims, input_shapes, dump_shape_dims, true);
+            std::string prefix = arg_map["dumpIR"];
+            arg_map["dumpIR"] = prefix + "_raw";
+            serialize_graph(new_g, arg_map);
+            arg_map["dumpIR"] = prefix;
+        }
+
+        // clean temp files
+        if (!arg_map.count("dump"))
         {
-            dims = BuilderConfig::get<std::set<std::string>>(Constants::dynamic_input_dim);
+            INFO() << "remove global cwd: " << global_cwd;
+            utils::remove_dir(global_cwd);
         }
-        auto new_g = infershape(g, dims, input_shapes, dump_shape_dims, true);
-        std::string prefix = arg_map["dumpIR"];
-        arg_map["dumpIR"] = prefix + "_raw";
-        serialize_graph(new_g, arg_map);
-        arg_map["dumpIR"] = prefix;
+        delete builder;
+        delete dumper;
     }
-
-    // clean temp files
-    if (!arg_map.count("dump"))
-    {
-        INFO() << "remove global cwd: " << global_cwd;
-        utils::remove_dir(global_cwd);
-    }
-    delete builder;
-    delete dumper;
 
     return optimized_g;
 }
@@ -2069,38 +2189,58 @@ GraphPtr aipugb(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map)
         return nullptr;
     }
 
-    // build
-    std::vector<TensorPtr> dummy_inputs = std::vector<TensorPtr>();
-    auto builder = run_gb(g, dummy_inputs, arg_map);
-
-    auto optimized_g = builder->graph();
-    if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5)
+    GraphPtr optimized_g;
+    if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv7)
     {
-        optimized_g->attrs()["_elf"] = ((GraphELFBuilder *)builder)->get_aipuelf(); // attach elf into graph for later use
+
+        IBuilder *builder = new MqBuilder(g);
+
+        builder->build();
+        optimized_g = builder->get_graph();
+
+        actions_after_build(optimized_g, arg_map);
+
+        auto elf = builder->get_elf();
+        elf->save(cast_any<std::string>(arg_map["output"]));
+
+        delete builder;
     }
-    // after_build
-    actions_after_build(optimized_g, arg_map);
-
-    if (GCompilerLogger::get_error_count() > error_cnt)
+    else
     {
-        if (arg_map.count("dump"))
+        // build
+        std::vector<TensorPtr> dummy_inputs = std::vector<TensorPtr>();
+        auto builder = run_gb(g, dummy_inputs, arg_map);
+
+        optimized_g = builder->graph();
+        if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5)
         {
-            builder->write(cast_any<std::string>(arg_map["output"]));
+            optimized_g->attrs()["_elf"] = ((GraphELFBuilder *)builder)->get_aipuelf(); // attach elf into graph for later use
         }
-        INFO() << "There are some errors in compiling time.";
-        return nullptr;
-    }
 
-    builder->write(cast_any<std::string>(arg_map["output"]));
-    // clean temp files
-    if (!arg_map.count("dump"))
-    {
-        std::string global_cwd = BuilderConfig::get<std::string>(Constants::global_cwd);
-        INFO() << "remove global cwd: " << global_cwd;
-        utils::remove_dir(global_cwd);
-    }
+        // after_build
+        actions_after_build(optimized_g, arg_map);
 
-    delete builder;
+        if (GCompilerLogger::get_error_count() > error_cnt)
+        {
+            if (arg_map.count("dump"))
+            {
+                builder->write(cast_any<std::string>(arg_map["output"]));
+            }
+            INFO() << "There are some errors in compiling time.";
+            return nullptr;
+        }
+
+        builder->write(cast_any<std::string>(arg_map["output"]));
+        // clean temp files
+        if (!arg_map.count("dump"))
+        {
+            std::string global_cwd = BuilderConfig::get<std::string>(Constants::global_cwd);
+            INFO() << "remove global cwd: " << global_cwd;
+            utils::remove_dir(global_cwd);
+        }
+
+        delete builder;
+    }
     return optimized_g;
 }
 

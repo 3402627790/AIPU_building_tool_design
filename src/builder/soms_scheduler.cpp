@@ -21,6 +21,7 @@
  * @Last Modified time: 2024-08-15 10:57:30
  */
 #include "soms_scheduler.h"
+#include "builder/lowering/hash_constant.h"
 #include "builder/target.h"
 #include "core/config.h"
 #include "sram_optimize.h"
@@ -101,6 +102,82 @@ inline size_t aligned(size_t s, size_t align = 256)
 //     }
 //     return ret;
 // }
+
+std::vector<MemoryObjectPtr> SOMSScheduler::const_allocate(const std::set<ConstTensorPtr> &const_tensor)
+{
+    auto get_mem_size = [](ConstTensorPtr t) -> uint32_t {
+        auto ptr = t->memory_offset()->get_base_object();
+        auto size = std::max((uint64_t)ptr->size, (uint64_t)t->mem_size());
+        return size;
+    };
+
+    //reduce_constant
+    std::map<std::string, ConstTensorPtr> constant_hash;
+    uint32_t reduce_size = 0;
+    for (auto constant : const_tensor)
+    {
+        std::string hash = utils::sha256_hex(constant->data<void>(), constant->mem_size());
+        if (constant_hash.count(hash))
+        {
+            auto same_const = constant_hash[hash];
+            reduce_size += constant->mem_size();
+            same_const->memory_offset()->foot_print += constant->memory_offset()->foot_print;
+            constant->memory_offset()->foot_print = same_const->memory_offset()->foot_print;
+            // constant->share_data_from(*constant_hash[hex]);
+            constant->memory_offset()->set_base_offset(same_const->memory_offset()->get_base_object());
+        }
+        else
+        {
+            constant_hash[hash] = constant;
+        }
+    }
+    if (reduce_size > 0)
+    {
+        INFO() << "Reduce constants memory size: " << utils::get_human_readable_size(reduce_size);
+    }
+
+    //allocate_constant
+    std::vector<MemoryObjectPtr> constant_slots;
+    uint32_t buf_id = 0;
+    std::map<const void *, MemoryObjectPtr> constant_data;
+    for (auto constant : const_tensor)
+    {
+        auto root_const = constant->memory_offset()->get_base_object();
+        if (root_const->m_base)
+        {
+            continue; //allocate root blob once for shared blobs
+        }
+        auto data = constant->data<void>();
+        auto size = get_mem_size(constant);
+        if (constant_data.count(data))
+        {
+            auto memobject = constant_data[data];
+            if (memobject->size >= size)
+            {
+                // allocated
+                root_const->relative_offset = 0;
+                root_const->set_base_offset(memobject);
+                continue;
+            }
+        }
+
+        MemoryObjectPtr s = std::make_shared<MemoryObject>(0);
+        s->m_base = 0;
+        s->size = get_mem_size(constant);
+        s->align = root_const->align;
+
+        root_const->set_base_offset(s);
+        root_const->relative_offset = 0;
+        s->set_buf_type(MemoryObject::type::constant);
+        s->buffer_id = buf_id;
+        constant_data[data] = s;
+        buf_id++;
+        constant_slots.push_back(s);
+        // INFO() << constant->name() << " root const: " << root_const << " size: 0x" << std::hex << root_const->size << " buf: " << std::dec << s->buffer_id;
+    }
+
+    return constant_slots;
+}
 
 std::vector<MemoryObjectPtr> SOMSScheduler::mem_allocate(const std::set<TensorPtr> &not_reuse_tensor, const std::set<TensorPtr> &inputs, const std::set<TensorPtr> &keeps_tensors, const std::set<TensorPtr> &skip_tensors)
 {
@@ -627,10 +704,7 @@ static void print_child(NodePtr n, const std::map<uint32_t, MemoryObjectPtr> &me
         {
             reason = m_conflict_reason.at(make_pair(mem, c_mem));
         }
-        std::string reason_str = reason == 0 ? "no reason" : reason == 1 ? "data parallel"
-                                                         : reason == 2   ? "multi core parallel"
-                                                         : reason == 3   ? "same core overlap"
-                                                                         : "";
+        std::string reason_str = reason == 0 ? "no reason" : reason == 1 ? "data parallel" : reason == 2 ? "multi core parallel" : reason == 3 ? "same core overlap" : "";
         INFO() << t->name() << "(0x" << std::hex << mem_size.at(mem) << ") offset 0x" << mem_offset << " child: " << c_t->name() << "(0x" << mem_size.at(c_mem) << ") offset: 0x" << c_offset << " conflict reason: " << reason_str;
         print_child(c, mem_map, offset_map, m_tensor_map, mem_size, m_conflict_reason);
     }

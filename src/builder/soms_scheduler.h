@@ -23,6 +23,7 @@
 #ifndef BUILDER_SOMS_SCHEDULER_H
 #define BUILDER_SOMS_SCHEDULER_H
 
+#include "core/const_tensor.h"
 #include "scheduler.h"
 #include <set>
 namespace aipubt
@@ -38,6 +39,7 @@ public:
                                                       const std::set<TensorPtr> &skip_tensors = {}) override;
 
     void disable_sm();
+    std::vector<MemoryObjectPtr> const_allocate(const std::set<ConstTensorPtr> &const_tensor);
 
 private:
     bool m_enable_sm = true;

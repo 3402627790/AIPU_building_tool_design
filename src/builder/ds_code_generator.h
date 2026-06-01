@@ -34,7 +34,6 @@
 
 namespace aipubt
 {
-
 struct DSFuncItem
 {
     bool operator==(const DSFuncItem &o)
@@ -133,7 +132,9 @@ struct DSCodePkg
 
     void reset()
     {
-        ds = std::vector<std::string>(3);
+        data_aware = false;
+        ds = std::vector<std::string>(4);
+        fixed_loop_count = false;
         mb = std::vector<std::string>(3);
     }
 
@@ -157,16 +158,16 @@ struct DSCodePkg
     }
 
     // dynamic shape
+    bool data_aware = false;
     std::vector<std::string> ds;
     // max-batch
+    bool fixed_loop_count = false;
     std::vector<std::string> mb;
 };
 
 class DSCodeGenerator
 {
 public:
-    static constexpr const char *restore_update_pp_fn = "_restore_update_pp";
-    static constexpr const char *restore_update_pp_da_fn = "_restore_update_pp_da";
     static constexpr const char *set_global_param_fn = "_set_global_param";
     static constexpr const char *record_output_shape_fn = "_record_output_shape";
 
@@ -176,6 +177,8 @@ public:
                   const std::vector<ReadOnlyParam> &ro,
                   const std::vector<ReadOnlyParam> &desc,
                   std::map<int, DSCodePkg> &code_map);
+
+    void generate_global_functions(std::stringstream &m_stream);
 
 private:
     std::string gen_backup_plugin_param_asm(std::stringstream &m_stream,
@@ -229,7 +232,7 @@ private:
                                     uint32_t desc_act_index,
                                     uint32_t batch_offset_index);
 
-    void gen_restore_update_pp_asm(std::stringstream &m_stream, bool data_aware);
+    std::string gen_restore_pp_asm(bool data_aware);
     void gen_set_global_param_asm(std::stringstream &m_stream);
     void gen_record_output_shape_asm(std::stringstream &m_stream);
 
@@ -237,7 +240,6 @@ private:
     TensorPtr m_tp_base;
     TensorPtr m_ro_base;
     TensorPtr m_desc_base;
-    std::vector<NodePtr> m_plugin_nodes;
     std::vector<Expr> m_total_exprs;
     std::vector<std::string> m_total_funcs;
     std::vector<std::vector<Symbol>> m_total_args;
@@ -246,6 +248,9 @@ private:
     std::vector<DSFuncDesc> m_func_descs;
 };
 
-std::ostringstream &get_ds_cl_code();
-
+int get_data_aware_param_index(NodePtr node,
+                               const std::vector<ReadOnlyParam> &ro);
+std::string gen_copy_output_shape_code(NodePtr node, int param_index);
+std::string gen_restore_pp_code(bool data_aware);
+std::string gen_movi_code(uint32_t imm, const std::string &reg);
 } // namespace aipubt
