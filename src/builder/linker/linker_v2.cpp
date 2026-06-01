@@ -23,16 +23,16 @@
 #include "builder/linker/linker_v2.h"
 #include "../text_generator.h"
 #include "ZY.h"
-#include "builder/ds_code_generator.h"
+#include "builder/ds_code_generator_cx.h"
 #include "builder/linker/toolchain.h"
 #include "builder/profiler.h"
 #include "builder/target.h"
 #include "core/config.h"
 #include "toolchain.h"
 #include "utils/utils.h"
+
 namespace aipubt
 {
-
 using namespace AsmZY;
 LinkerV2::LinkerV2()
 {
@@ -107,12 +107,13 @@ uint32_t LinkerV2::link(std::ostream &oss)
         }
         m_objs.push_back(perf_o_file);
     }
-    if (BuilderConfig::get<bool>(Constants::enable_cl_opt))
+    auto ds_code = get_ds_code().str();
+    if (ds_code.size())
     {
         std::string cl_file = m_workdir + "/" + "ds_impl.cl";
         std::string o_file = m_workdir + "/" + "ds_impl.o";
         std::ofstream objfile(cl_file);
-        objfile << get_ds_cl_code().str();
+        objfile << ds_code;
         objfile.close();
         if (aipuocc(cl_file, o_file) != 0)
         {

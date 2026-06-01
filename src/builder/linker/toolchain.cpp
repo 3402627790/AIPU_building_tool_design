@@ -274,12 +274,60 @@ int aipuld(const std::vector<std::string> &objs, const std::string &out)
     return m_aipuld(argv.size(), &argv[0]);
 }
 
+static const std::string &get_cpsld()
+{
+    static std::string exe_path = "cpsld";
+    auto env = utils::get_env(Constants::CPSLD);
+    if (!env.empty())
+    {
+        exe_path = env;
+        return exe_path;
+    }
+    auto path = utils::get_env("PATH");
+    for (auto d : utils::split_string(path, ':'))
+    {
+        if (utils::file_exists(d + "/cpsld"))
+        {
+            exe_path = "cpsld";
+            return exe_path;
+        }
+    }
+#if RELEASE_VERSION
+    WARN() << "Can NOT find aipuold in PATH. Please make sure you have added it to PATH.";
+    exe_path = "aipuold";
+#else
+    //3. use default: push the dir to path
+    // std::string lpath = path + "/project/ai/scratch01/toolchain/llvm/binary/bin/";
+    // setenv("PATH", lpath.c_str(), 1);
+    exe_path = "/project/ai/scratch01/compass-toolkit/compiler/latest/bin/cpsld";
+#endif
+    return exe_path;
+}
+
+int cpsld(const std::vector<std::string> &objs, const std::string &out)
+{
+    std::vector<std::string> args;
+    args.push_back(get_cpsld());
+    args.insert(args.end(), objs.begin(), objs.end());
+    args.push_back("-static");
+    // // disable --gc-sections because .bss will be discarded.
+    // // if enable --gc-sections, .bss should be kept by KEEP cmd in link script.
+    // args.push_back("--gc-sections");
+    args.push_back("-o");
+    args.push_back(out);
+    auto cmd = utils::join_string(" ", args);
+    DEBUG() << "linker args:" << utils::join_string(" ", args);
+
+    return system(cmd.c_str());
+}
+
 class ToolChainHelper
 {
 public:
     ToolChainHelper()
     {
-        while(dlerror());
+        while (dlerror())
+            ;
         m_as_handler = dlopen("libaiputoolchain.so", RTLD_LAZY | RTLD_GLOBAL);
         if (m_as_handler)
         {
