@@ -1324,10 +1324,26 @@ const std::string Node::dot(const std::string &color, const std::string &prefix)
         }
         if (sgn->attrs().count(Constants::plugin_attrs_name))
         {
-            auto plugin_info = sgn->get_attr<BuilderOpPluginInfo *>(Constants::plugin_attrs_name);
-            auto plugin_name = plugin_info->name;
-            // plugin_name = utils::replace(plugin_name, "aipubt::", "");
-            real_node_names += " (" + plugin_name + ")";
+            real_node_names += " (";
+            if (sgn->attrs().count(Constants::kernel_infos))
+            {
+                auto kernel_infos = sgn->get_attr<KernelInfos>(Constants::kernel_infos);
+                for (size_t i = 0; i < kernel_infos.size(); ++i)
+                {
+                    real_node_names += kernel_infos[i].kernel_name;
+                    if (i < kernel_infos.size() - 1)
+	
+	
+                    {
+	
+	
+                        real_node_names += ",";
+	
+	
+                    }
+                }
+            }
+            real_node_names += ")";
         }
         else
         {

@@ -52,6 +52,7 @@ void KernelAdapter::kernel_adapt()
                 {
                     auto plugin_impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
                     auto kernel_infos = plugin_impl->kernel_infos();
+                    n->set_attr(Constants::kernel_infos, kernel_infos);
                     auto lib_name = plugin_impl->kernel_cpsbin();
                     if (lib_name == "GB_DEFAULT_PATH")
                     {

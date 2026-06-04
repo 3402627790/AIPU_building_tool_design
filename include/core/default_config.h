@@ -109,6 +109,8 @@ constexpr auto get_default_config_dict()
         std::make_pair(Constants::remove_origin_constant, false),
         std::make_pair(Constants::enable_cse_tile_node, false),
         std::make_pair(Constants::specify_wt_gm, ""),
+        std::make_pair(Constants::mq_save_ir, ""),
+        std::make_pair(Constants::mq_load_ir, ""),
         std::make_pair(Constants::set_profile_option, ""),
         std::make_pair(Constants::show_soms_bottleneck, false),
         std::make_pair(Constants::split_wt_act, false),

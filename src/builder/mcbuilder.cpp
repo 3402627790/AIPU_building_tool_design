@@ -933,7 +933,11 @@ void GraphELFBuilder::gen_loop_kernel_asm(std::stringstream &m_stream,
             << "{mfctrl0 r0,0x14;}\n" // get TCB pointer
             << "{ld r1,r0,80;}\n"     //get tec id
             << "{lsr r1,r1,16;}\n"
-            << "{cbnz r1, .L_ONLY_TEC0_" << label_name << ";}\n";
+            << "{cbnz r1, .L_ONLY_TEC0_" << label_name << ";}\n"
+
+            << "{add r2, r0, 56}\n"
+            << "{cacheop r2, 24, 0}\n";
+
         generate_dump_rt_tensor(m_stream);
         generate_wait_IRQ_empty(m_stream);
         m_stream << ".L_ONLY_TEC0_" << label_name << ":\n";
