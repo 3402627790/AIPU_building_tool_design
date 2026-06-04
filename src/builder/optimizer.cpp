@@ -90,11 +90,6 @@ void BuilderOptimizer::optimize(GraphPtr graph)
     if (enable_ds)
     {
         divide_graph(graph);
-        if (BuilderConfig::exist(Constants::show_divided_graph) &&
-            BuilderConfig::get<bool>(Constants::show_divided_graph))
-        {
-            graph->to_svg("graph_divided.svg");
-        }
     }
 
     auto all_graphs = graph->get_all_graphs();
