@@ -37,9 +37,12 @@ public:
     GraphPtr get_graph() override;
     CpsElfPtr get_elf() override;
 
+    std::map<TensorPtr, uint32_t> get_tensor_index_map();
+
 private:
     GraphPtr m_graph;
     CpsElfPtr m_elf;
+    std::map<TensorPtr, uint32_t> m_tensor_index_map;
 };
 
 } // namespace aipubt

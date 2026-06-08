@@ -23,6 +23,7 @@
 
 #include "builder/mqbuilder.h"
 #include "builder/assembler.h"
+#include "builder/builder.h"
 #include "builder/code_generator.h"
 #include "builder/gop_plugin.h"
 #include "builder/kernel_adapter.h"
@@ -76,6 +77,8 @@ bool MqBuilder::build()
     TensorPtr stream3 = std::make_shared<Tensor>("stream3", TensorShape({0}), Tensor::UINT8);
     m_graph->global_tensors()["stream3"] = stream3;
 
+    config_dynamic_shape(m_graph);
+
     BuilderOptimizer optimizer;
     optimizer.optimize_mq(m_graph);
     if (!m_graph->check_valid_name())
@@ -99,7 +102,7 @@ bool MqBuilder::build()
     kernel_adapter.set_graph(m_graph);
     kernel_adapter.kernel_adapt();
     auto const_tensors = kernel_adapter.get_const_tensors();
-    auto ws_tensors = kernel_adapter.get_ws_tensors();
+    auto ws_map = kernel_adapter.get_ws_map();
     auto surface_tensors = kernel_adapter.get_surface_tensors();
     auto kernel_lib_names = kernel_adapter.get_kernel_lib();
 
@@ -107,6 +110,7 @@ bool MqBuilder::build()
     scheduler.set_graph(m_graph);
     scheduler.set_levels(levels);
     scheduler.set_gm_size({0});
+    scheduler.set_ws(ws_map);
     scheduler.disable_sm();
     std::set<TensorPtr> not_reuse_tensor;
     std::set<TensorPtr> skip_tensors;
@@ -178,7 +182,7 @@ bool MqBuilder::build()
     assembler.assembly();
     auto streams = assembler.get_streams();
     auto param_offset_table = assembler.get_param_offset_table();
-    auto params = assembler.get_param();
+    auto &params = assembler.get_params();
     m_tensor_index_map = assembler.get_tensor_index_map();
     auto const_index_map = assembler.get_const_index_map();
 

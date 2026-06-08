@@ -73,7 +73,6 @@ struct GPattern
 
 struct Dim3
 {
-
     tongue::Expr x = 1, y = 1, z = 1;
     Dim3() {}
     Dim3(tongue::Expr x) : x(x) {}
@@ -99,7 +98,7 @@ public:
 
     virtual KernelInfos kernel_infos() = 0;
 
-    //optional, use for turning performance
+    // optional: use for turning performance
     virtual void update_prefer_cfg(const std::string &key, const Any &value)
     {
     }
@@ -109,13 +108,13 @@ public:
         return 0;
     }
 
-    // optional:  kernel cps bin file name
+    // optional: kernel cps bin file name
     virtual const std::string kernel_cpsbin()
     {
         return "";
     }
 
-    // optional : implement flops
+    // optional: implement flops
     virtual uint64_t flops() const
     {
         return 0;
