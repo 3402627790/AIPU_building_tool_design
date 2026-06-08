@@ -38,5 +38,5 @@ public:
 private:
     std::map<std::string, std::string> m_kernel_lib;
 };
-};     // namespace aipubt
+} // namespace aipubt
 #endif //!BUILDER_CODE_GENERATROR_H

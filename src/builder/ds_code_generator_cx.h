@@ -25,8 +25,6 @@
 
 namespace aipubt
 {
-std::stringstream &get_ds_code();
-
 struct DSParamDesc
 {
     enum SymbolType : int
@@ -424,4 +422,6 @@ public:
 
     void generate();
 };
+
+const std::string get_ds_code();
 } // namespace aipubt

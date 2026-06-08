@@ -21,7 +21,7 @@
  * @Last Modified time: 2024-08-21 16:16:53
  */
 #include "ds_code_generator.h"
-#include "builder/builder2.h"
+#include "builder/builder.h"
 #include "builder/plugin.h"
 #include "builder/ro_generator.h"
 #include "core/plugin_loader.h"
@@ -35,7 +35,6 @@ inline size_t aligned(size_t s, size_t align = 256)
 
 namespace aipubt
 {
-
 static void split_imm(uint32_t imm, int16_t &low, int16_t &high)
 {
     uint16_t half = imm & 0xffff;
@@ -54,6 +53,13 @@ static void gen_movi_asm(std::stringstream &m_stream, uint32_t imm, const std::s
     {
         m_stream << "{movh " << reg << "," << high << ";}\n";
     }
+}
+
+std::string gen_movi_code(uint32_t imm, const std::string &reg)
+{
+    std::stringstream oss;
+    gen_movi_asm(oss, imm, reg);
+    return oss.str();
 }
 
 static bool has_desc_exprs(const std::vector<ReadOnlyParam> &desc,
@@ -782,115 +788,128 @@ static std::vector<ReadOnlyParam> mask_non_max_batch_param(const std::vector<Rea
             {
                 if (tensor->attrs().count(Constants::expr_offset))
                 {
-                    tensor = std::make_shared<Tensor>(*tensor);
-                    tensor->erase_attr(Constants::expr_offset);
+    for (uint32_t i = 0; i < params.size(); ++i)
+    {
+        if (params[i].tensor)
+        {
+            auto tensor = params[i].tensor;
+            if (tensors.count(tensor))
+            {
+                continue;
+            }
+            for (auto t : tensors)
+            {
+                if (t->memory_offset()->is_shared_by(tensor->memory_offset()))
+                {
+                    // DEBUG() << "mapped tensor: " << tensor->name();
+                    std::vector<Expr> offsets = t->get_attr(Constants::max_batch_offset);
+                    tensor->set_attr(Constants::max_batch_offset, offsets);
+                    break;
                 }
-                p = ReadOnlyParam(tensor);
             }
         }
-        masked_params.push_back(p);
     }
-    return masked_params;
 }
 
-std::ostringstream &get_ds_cl_code()
+// add max-batch offset if shared memory
+static void patch_max_batch_offset(NodePtr node,
+                                   const std::vector<ReadOnlyParam> &ro,
+                                   const std::vector<ReadOnlyParam> &desc)
 {
-    static std::ostringstream cl_code;
-    return cl_code;
-}
-
-DSCodeGenerator::DSCodeGenerator(GraphPtr graph) : m_graph(graph)
-{
-    m_tp_base = graph->global_tensors()[Constants::temp_param_base];
-    m_ro_base = graph->global_tensors()[Constants::parambase];
-    m_desc_base = graph->global_tensors()[Constants::descriptorbase];
-
-    graph->walk_on_node([this](NodePtr n) {
-        if ((n->attrs().count(Constants::plugin_attrs_name) ||
-             n->type() == OpType_LayoutConvertor ||
-             n->type() == OpType_ForRangeEnder ||
-             n->type() == OpType_IfEnder) &&
-            n->attrs().count(Constants::ro_offset) &&
-            n->attrs().count(Constants::ro_size))
+    std::set<TensorPtr> tensors;
+    for (auto inp : node->inputs())
+    {
+        if (inp->attrs().count(Constants::max_batch_offset))
         {
-            m_plugin_nodes.push_back(n);
+            tensors.insert(inp);
         }
-    });
+    }
+    for (auto out : node->outputs())
+    {
+        if (out->attrs().count(Constants::max_batch_offset))
+        {
+            tensors.insert(out);
+        }
+    }
+    patch_max_batch_offset(tensors, ro);
+    patch_max_batch_offset(tensors, desc);
 }
 
-std::string DSCodeGenerator::gen_backup_plugin_param_asm(std::stringstream &m_stream,
-                                                         NodePtr node,
-                                                         const std::vector<ReadOnlyParam> &ro,
-                                                         const std::vector<ReadOnlyParam> &desc,
-                                                         const std::vector<ReadOnlyParam> &desc_param,
-                                                         const std::vector<ReadOnlyParam> &desc_act,
-                                                         uint32_t real_ro_size,
-                                                         uint32_t rel_ro_offset,
-                                                         bool data_aware)
+// mask all exprs except max-batch offsets
+static std::vector<ReadOnlyParam> mask_non_max_batch_param(const std::vector<ReadOnlyParam> &params)
 {
-    std::string call_name;
-    auto func_id = std::to_string(utils::get_increase_id64());
-    if (data_aware)
+    std::vector<ReadOnlyParam> masked_params;
+    for (uint32_t i = 0; i < params.size(); ++i)
     {
-        call_name = "_backup_param_da" + func_id;
-    }
-    else
-    {
-        call_name = "_backup_param" + func_id;
-    }
-    auto skip_label = "._skip_func_lbl_" + func_id;
-    m_stream << ".type " << call_name << ", function\n"
-             << call_name << ":\n"
-             << "{mfctrl0 r0,0x14;}\n"; // get TCB pointer
-    if (!data_aware && BuilderConfig::exist(Constants::default_input_shape))
-    {
-        m_stream << "{ld r1,r0,112;}\n" // r1: gp_base
-                 << "{ld r1,r1," << GP_DEFAULT_SHAPE_FLAG << ";}\n"
-                 << "{cbnz r1," << skip_label << ";}\n"; // only not default shape
-    }
-
-    // compute offset for each core in temp_param_base
-    uint32_t cluster_num = 1; // TODO
-    uint32_t core_num = get_target()->core_num();
-    uint32_t core_per_cluster = core_num / cluster_num;
-    uint32_t max_param_size = m_tp_base->mem_size() / core_num;
-    int16_t low, high;
-    split_imm(max_param_size, low, high);
-    m_stream << "{ld r1,r0,76; mov r3," << core_per_cluster << ";}\n"
-             << "{lsr r2,r1,16;}\n"   // get cluster id
-             << "{andl r1,r1,0xf;}\n" // get core id
-             << "{mul r2,r2,r3; mov r4," << low << ";}\n"
-             << "{add r2,r2,r1; movh r4," << high << ";}\n"
-             << "{mul r2,r2,r4; ld r1,r0,56;}\n"                // r1: pp_base
-             << "{add r2,r2,256; ld r3,r1,216; ld r4,r0,80;}\n" // r3: tp_base
-             << "{add r2,r2,r3; lsr r4,r4,16;}\n"               // r2: new pp_base
-             << "{st r2,r0,56;}\n"                              // update TCB PP
-             << "{cbnz r4," << skip_label << ";}\n"             // only tec0
-             << "{cacheop r2,8,0;}\n"                           // prefetch 64B
-             << "{st r1,r2,-4;}\n";
-
-    bool copy_desc = has_desc_exprs(desc, desc_param, desc_act);
-    if (is_desc_mapped_to_ro(node, m_ro_base, rel_ro_offset,
-                             desc, desc_param, desc_act))
-    {
-        copy_desc = true;
-    }
-    uint32_t ro_size = 4 * ro.size();
-    uint32_t desc_size = 4 * desc.size();
-    uint32_t desc_param_size = 4 * desc_param.size();
-    uint32_t desc_act_size = 4 * desc_act.size();
-
-    // copy ro to temp_param_base
-    std::string t0 = "t0", t1 = "t1";
-    constexpr uint32_t reserved_ro_num = 13; // number of RO reserved for GBuilder in each layer
-    for (uint32_t i = 0, i0 = 0; i < ro.size(); i += 8)
-    {
-        if (i >= real_ro_size && i + 7 < ro.size() - reserved_ro_num)
+        ReadOnlyParam p(0);
+        if (params[i].tensor)
         {
-            continue;
+            auto tensor = params[i].tensor;
+            if (tensor->attrs().count(Constants::max_batch_offset))
+            {
+                if (tensor->attrs().count(Constants::expr_offset))
+                {
+    for (uint32_t i = 0; i < params.size(); ++i)
+    {
+        if (params[i].tensor)
+        {
+            auto tensor = params[i].tensor;
+            if (tensors.count(tensor))
+            {
+                continue;
+            }
+            for (auto t : tensors)
+            {
+                if (t->memory_offset()->is_shared_by(tensor->memory_offset()))
+                {
+                    // DEBUG() << "mapped tensor: " << tensor->name();
+                    std::vector<Expr> offsets = t->get_attr(Constants::max_batch_offset);
+                    tensor->set_attr(Constants::max_batch_offset, offsets);
+                    break;
+                }
+            }
         }
-        if (i == 0)
+    }
+}
+
+// add max-batch offset if shared memory
+static void patch_max_batch_offset(NodePtr node,
+                                   const std::vector<ReadOnlyParam> &ro,
+                                   const std::vector<ReadOnlyParam> &desc)
+{
+    std::set<TensorPtr> tensors;
+    for (auto inp : node->inputs())
+    {
+        if (inp->attrs().count(Constants::max_batch_offset))
         {
+            tensors.insert(inp);
+        }
+    }
+    for (auto out : node->outputs())
+    {
+        if (out->attrs().count(Constants::max_batch_offset))
+        {
+            tensors.insert(out);
+        }
+    }
+    patch_max_batch_offset(tensors, ro);
+    patch_max_batch_offset(tensors, desc);
+}
+
+// mask all exprs except max-batch offsets
+static std::vector<ReadOnlyParam> mask_non_max_batch_param(const std::vector<ReadOnlyParam> &params)
+{
+    std::vector<ReadOnlyParam> masked_params;
+    for (uint32_t i = 0; i < params.size(); ++i)
+    {
+        ReadOnlyParam p(0);
+        if (params[i].tensor)
+        {
+            auto tensor = params[i].tensor;
+            if (tensor->attrs().count(Constants::max_batch_offset))
+            {
+                if (tensor->attrs().count(Constants::expr_offset))
+                {
             m_stream << "{ld " << t0 << ",r1," << 4 * i << ";}\n";
         }
         else
@@ -1120,9 +1139,6 @@ void DSCodeGenerator::gen_expr_func_asm(std::stringstream &m_stream,
                                         uint32_t offset,
                                         bool mode)
 {
-    bool enable_cl_opt = BuilderConfig::get<bool>(Constants::enable_cl_opt);
-    auto &m_cl_stream = get_ds_cl_code();
-
     auto &symbols = m_graph->symbols();
     DSFuncItem item;
     expr = expr->simplify();
@@ -1165,17 +1181,9 @@ void DSCodeGenerator::gen_expr_func_asm(std::stringstream &m_stream,
             func_name = "_expr_func" + func_id;
             auto func = expr_to_func(expr, func_name);
             auto code = sbe::emit(func, spilled, true);
-            if (enable_cl_opt && !spilled && args.size() <= 4)
-            {
-                // DEBUG() << "expr func: " << func_name;
-                m_cl_stream << expr_to_cl_func(expr, func_name);
-            }
-            else
-            {
-                // m_stream << "# " << expr->to_string() << "\n";
-                m_stream << ".type " << func_name << ", function\n"
-                         << code;
-            }
+            // m_stream << "# " << expr->to_string() << "\n";
+            m_stream << ".type " << func_name << ", function\n"
+                     << code;
         }
         m_total_exprs.push_back(expr);
         m_total_args.push_back(args);
@@ -1389,15 +1397,15 @@ std::string DSCodeGenerator::gen_modify_plugin_param_asm(std::stringstream &m_st
     return call_name;
 }
 
-std::string DSCodeGenerator::gen_backup_output_shape_asm(NodePtr node,
-                                                         const std::vector<ReadOnlyParam> &ro)
+int get_data_aware_param_index(NodePtr node,
+                               const std::vector<ReadOnlyParam> &ro)
 {
-    TensorPtr src_base = nullptr;
     auto op_type = node->type();
     if (node->attrs().count(Constants::plugin_attrs_name))
     {
         op_type = SubGraphNode::from_node(node)->get_real_node()[0]->type();
     }
+    TensorPtr src_base = nullptr;
     if (op_type == OpType_NonZero)
     {
         src_base = node->outputs()[1];
@@ -1422,26 +1430,32 @@ std::string DSCodeGenerator::gen_backup_output_shape_asm(NodePtr node,
     {
         src_base = node->inputs()[1];
     }
-    else
+    if (src_base)
+    {
+        for (size_t i = 0; i < ro.size(); ++i)
+        {
+            if (ro[i].tensor == src_base)
+            {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+std::string gen_copy_output_shape_code(NodePtr node, int param_index)
+{
+    if (param_index == -1)
     {
         return std::string();
     }
 
+    uint32_t src_offset = param_index * sizeof(uint32_t);
     auto dst_offset = node->get_attr_deep<uint32_t>(Constants::output_shape_offset);
     auto shape_size = node->get_attr_deep<uint32_t>(Constants::output_shape_size) / 4;
 
-    uint32_t src_offset = UINT32_MAX;
-    for (uint32_t i = 0; i < ro.size(); ++i)
+    if (shape_size == 0)
     {
-        if (ro[i].tensor == src_base)
-        {
-            src_offset = i * sizeof(uint32_t);
-            break;
-        }
-    }
-    if (src_offset == UINT32_MAX || !shape_size)
-    {
-        // DEBUG() << "unsupported node: " << node->name() << " (" << op_type << ")";
         return std::string();
     }
 
@@ -1464,6 +1478,13 @@ std::string DSCodeGenerator::gen_backup_output_shape_asm(NodePtr node,
             << "{brrl r21;}\n";
     }
     return oss.str();
+}
+
+std::string DSCodeGenerator::gen_backup_output_shape_asm(NodePtr node,
+                                                         const std::vector<ReadOnlyParam> &ro)
+{
+    auto param_index = get_data_aware_param_index(node, ro);
+    return gen_copy_output_shape_code(node, param_index);
 }
 
 // compute max-batch loop count
@@ -1577,29 +1598,31 @@ std::string DSCodeGenerator::gen_modify_addr_asm(std::stringstream &m_stream,
     return call_name;
 }
 
-void DSCodeGenerator::gen_restore_update_pp_asm(std::stringstream &m_stream, bool data_aware)
+std::string gen_restore_pp_code(bool data_aware)
 {
     auto label_id = std::to_string(utils::get_increase_id64());
     auto skip_label = "._skip_lbl_" + label_id;
-    auto func_name = data_aware ? restore_update_pp_da_fn : restore_update_pp_fn;
-    m_stream << ".type " << func_name << ", function\n"
-             << func_name << ":\n"
-             << "{mfctrl0 r0,0x14;}\n"; // get TCB pointer
+    std::ostringstream oss;
+    oss << "{mfctrl0 r0,0x14;}\n"; // get TCB pointer
     if (!data_aware && BuilderConfig::exist(Constants::default_input_shape))
     {
-        m_stream << "{ld r1,r0,112;}\n"
-                 << "{ld r1,r1," << GP_DEFAULT_SHAPE_FLAG << "; ld r2,r0,56;}\n" // r2: pp_base
-                 << "{cbnz r1," << skip_label << ";}\n";                         // only not default shape
+        oss << "{ld r2,r0,56; ld r1,r0,112;}\n" // r2: pp_base
+            << "{ld r1,r1," << GP_DEFAULT_SHAPE_FLAG << "; }\n"
+            << "{cbnz r1," << skip_label << ";}\n"; // only not default shape
     }
     else
     {
-        m_stream << "{ld r2,r0,56;}\n";
+        oss << "{ld r2,r0,56;}\n";
     }
-    m_stream << "{ld r2,r2,-4;}\n"
-             << "{st r2,r0,56;}\n" // update TCB PP
-             << skip_label << ":\n";
-    generate_pp_updater(m_stream);
-    m_stream << "{br ra;}\n";
+    oss << "{ld r2,r2,-4;}\n"
+        << "{st r2,r0,56;}\n" // update TCB PP
+        << skip_label << ":\n";
+    return oss.str();
+}
+
+std::string DSCodeGenerator::gen_restore_pp_asm(bool data_aware)
+{
+    return gen_restore_pp_code(data_aware);
 }
 
 void DSCodeGenerator::gen_set_global_param_asm(std::stringstream &m_stream)
@@ -1653,6 +1676,9 @@ void DSCodeGenerator::gen_set_global_param_asm(std::stringstream &m_stream)
     }
 
     m_stream << skip_label << ":\n"
+             << "{mov r21,-33;}\n"
+             << "{wfe r21,0;}\n" // wait lsu idle
+             << "{wfe r21,2;}\n"
              << "{br ra;}\n";
 }
 
@@ -1686,6 +1712,9 @@ void DSCodeGenerator::gen_record_output_shape_asm(std::stringstream &m_stream)
 
     m_stream << "{add ra,r11,0;}\n"
              << skip_label << ":\n"
+             << "{mov r21,-33;}\n"
+             << "{wfe r21,0;}\n" // wait lsu idle
+             << "{wfe r21,2;}\n"
              << "{br ra;}\n";
 }
 
@@ -1694,16 +1723,21 @@ void DSCodeGenerator::generate(std::stringstream &m_stream,
                                const std::vector<ReadOnlyParam> &desc,
                                std::map<int, DSCodePkg> &code_map)
 {
-    if (BuilderConfig::get<bool>(Constants::enable_cl_opt))
-    {
-        auto &m_cl_stream = get_ds_cl_code();
-        m_cl_stream.clear();
-        m_cl_stream << "#include <aipu.h>\n"
-                    << "#include <clc/clc.h>\n\n";
-    }
-
     auto enable_ds = BuilderConfig::get<bool>(Constants::enable_ds);
-    for (auto node : m_plugin_nodes)
+    std::vector<NodePtr> plugin_nodes;
+    m_graph->walk_on_node([&plugin_nodes](NodePtr n) {
+        if ((n->attrs().count(Constants::plugin_attrs_name) ||
+             n->type() == OpType_LayoutConvertor ||
+             n->type() == OpType_ForRangeEnder ||
+             n->type() == OpType_IfEnder) &&
+            n->attrs().count(Constants::ro_offset) &&
+            n->attrs().count(Constants::ro_size))
+        {
+            plugin_nodes.push_back(n);
+        }
+    });
+
+    for (auto node : plugin_nodes)
     {
         // DEBUG() << "generating: " << node->name() << " (" << node->type() << ")";
         uint32_t ro_index = node->get_attr<size_t>(Constants::ro_offset) / 4;
@@ -1824,9 +1858,14 @@ void DSCodeGenerator::generate(std::stringstream &m_stream,
                         m_func_map[func_id] = backup_param_code;
                     }
                 }
+                codes.data_aware = data_aware;
                 codes.ds[0] = backup_param_code;
                 codes.ds[1] = modify_param_code;
                 codes.ds[2] = gen_backup_output_shape_asm(node, node_ro);
+                if (backup_param_code.size())
+                {
+                    codes.ds[3] = gen_restore_pp_asm(data_aware);
+                }
             }
             if (node->attrs().count(Constants::max_batch_size) &&
                 node->attrs().count(Constants::kernel_loop_count))
@@ -1853,11 +1892,13 @@ void DSCodeGenerator::generate(std::stringstream &m_stream,
 
     if (enable_ds)
     {
-        gen_restore_update_pp_asm(m_stream, true);
-        gen_restore_update_pp_asm(m_stream, false);
-        gen_set_global_param_asm(m_stream);
-        gen_record_output_shape_asm(m_stream);
+        generate_global_functions(m_stream);
     }
 }
 
+void DSCodeGenerator::generate_global_functions(std::stringstream &m_stream)
+{
+    gen_set_global_param_asm(m_stream);
+    gen_record_output_shape_asm(m_stream);
+}
 } // namespace aipubt

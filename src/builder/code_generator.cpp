@@ -22,12 +22,13 @@
  */
 #include "builder/code_generator.h"
 #include "builder/ar/ar_reader.h"
+#include "builder/ds_code_generator_cx.h"
 #include "builder/linker/linker_cps.h"
+#include "builder/linker/toolchain.h"
 #include "builder/text_generator.h"
 #include "core/config.h"
 #include "core/constants.h"
 #include "utils/utils.h"
-#include <mutex>
 
 namespace aipubt
 {
@@ -36,6 +37,7 @@ void CodeGenerator::set_kernel_lib(const std::map<std::string, std::string> &ker
 {
     m_kernel_lib = kernel_lib;
 }
+
 void CodeGenerator::code_gen(CpsElfPtr &elf)
 {
     std::set<std::string> libs;
@@ -87,12 +89,29 @@ void CodeGenerator::code_gen(CpsElfPtr &elf)
         }
     }
 
-    std::stringstream oss_elf;
-    LinkerCps linker;
     std::vector<std::string> objs(libs.begin(), libs.end());
+    LinkerCps linker;
+
+    auto ds_code = get_ds_code();
+    if (ds_code.size())
+    {
+        auto workdir = linker.workdir();
+        auto c_file = workdir + "/" + "ds_impl.cps";
+        auto o_file = workdir + "/" + "ds_impl.o";
+        std::ofstream objfile(c_file);
+        objfile << ds_code;
+        objfile.close();
+        if (cpscc(c_file, o_file) != 0)
+        {
+            FATAL() << "error occurred while compiling the dynamic shape code!";
+        }
+        objs.push_back(o_file);
+    }
+
     linker.set_objects(objs);
-    linker.link(oss_elf);
-    elf->load(oss_elf.str());
+    std::stringstream oss;
+    linker.link(oss);
+    elf->load(oss.str());
 }
 
-}; // namespace aipubt
+} // namespace aipubt

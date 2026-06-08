@@ -63,6 +63,14 @@ BuilderOpPlugin *BuilderOptimizer::get_single_op_plugin(OpType t, uint32_t flag)
 
 void BuilderOptimizer::optimize_mq(GraphPtr graph)
 {
+    if (BuilderConfig::get<bool>(Constants::enable_ds))
+    {
+        pooling_to_globalpool(graph);
+        update_dynamic_max_shape(graph);
+    }
+    init_symbol_shape(graph);
+    infer_symbol_shape(graph);
+
     apply_gopplugins(graph);
 }
 
@@ -101,24 +109,22 @@ void BuilderOptimizer::optimize(GraphPtr graph)
             all_graphs.erase(it);
         }
     }
-
     for (auto g : all_graphs)
     {
         lower_before_optimize(g);
     }
-    infer_symbol_shape(graph);
 
     unfold_graph(graph);
     lower_after_unfold(graph);
-
+    infer_symbol_shape(graph);
     lower_before_plugin(graph);
+
+    apply_plugins(graph);
+
     if (enable_ds)
     {
         all_graphs = {graph};
     }
-
-    apply_plugins(graph);
-
     for (auto g : all_graphs)
     {
         lower_after_optimize(g);

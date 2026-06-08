@@ -40,6 +40,7 @@ namespace Constants
     constexpr const char *AIPUOCC = "AIPUOCC";
 
     constexpr const char *CPSLD = "CPSLD";
+    constexpr const char *CPSCC = "CPSCC";
 
     // switch keys/global config
     constexpr const char *random_init = "random-init";
@@ -109,12 +110,10 @@ namespace Constants
     constexpr const char *put_weight_gm = "put_weight_gm";
     constexpr const char *set_asid = "set_asid";
     constexpr const char *enable_ds = "enable_ds";
-    constexpr const char *enable_cl_opt = "enable_cl_opt";
     constexpr const char *input_shape = "input_shape";
     constexpr const char *max_input_shape = "max_input_shape";
     constexpr const char *default_input_shape = "default_input_shape";
     constexpr const char *dynamic_input_dim = "dynamic_input_dim";
-    constexpr const char *show_divided_graph = "show_divided_graph";
     constexpr const char *skip_simulator = "skip_simulator";
     constexpr const char *native_float_simulator = "native_float_simulator";
     constexpr const char *dump_schedule_cfg = "dump_schedule_cfg";
@@ -330,6 +329,7 @@ namespace Constants
 
     // for lib config
     constexpr const char *gsize = "gsize";
+    constexpr const char *base_oc = "base_oc";
 
 } // namespace Constants
 } // namespace aipubt

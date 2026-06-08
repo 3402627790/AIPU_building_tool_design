@@ -434,6 +434,18 @@ NodePtr SOMSScheduler::update_gen_consume(GraphPtr g, int &node_stamp, std::set<
 
         for (auto t : n->outputs())
         {
+            if (m_ws_map.count(n))
+            {
+                auto ws_set = m_ws_map[n];
+                for (auto ws : ws_set)
+                {
+                    auto ws_ptr = ws->memory_offset()->get_base_object();
+                    m_p_generators[ws_ptr].push_back(n);
+                    m_p_consumers[ws_ptr].push_back(n);
+                    all_mems.insert(ws_ptr);
+                    m_tensor_map[ws_ptr] = ws;
+                }
+            }
             auto ptr = t->memory_offset()->get_base_object();
             // INFO() << "SG tensor " <<t->name() << " node " << t->node()->name() << " ptr " << ptr;
             if (n->type() != OpType_SubGraphInput)
@@ -704,7 +716,10 @@ static void print_child(NodePtr n, const std::map<uint32_t, MemoryObjectPtr> &me
         {
             reason = m_conflict_reason.at(make_pair(mem, c_mem));
         }
-        std::string reason_str = reason == 0 ? "no reason" : reason == 1 ? "data parallel" : reason == 2 ? "multi core parallel" : reason == 3 ? "same core overlap" : "";
+        std::string reason_str = reason == 0 ? "no reason" : reason == 1 ? "data parallel"
+                                                         : reason == 2   ? "multi core parallel"
+                                                         : reason == 3   ? "same core overlap"
+                                                                         : "";
         INFO() << t->name() << "(0x" << std::hex << mem_size.at(mem) << ") offset 0x" << mem_offset << " child: " << c_t->name() << "(0x" << mem_size.at(c_mem) << ") offset: 0x" << c_offset << " conflict reason: " << reason_str;
         print_child(c, mem_map, offset_map, m_tensor_map, mem_size, m_conflict_reason);
     }
@@ -797,6 +812,16 @@ std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm
     };
 
     graph_memory(memory_size, m_graph->nodes());
+    for (auto ws_pair : m_ws_map)
+    {
+        auto ws_set = ws_pair.second;
+        for (auto ws : ws_set)
+        {
+            auto ws_ptr = ws->memory_offset()->get_base_object();
+            memory_size[ws_ptr] = ws->mem_size();
+        }
+    }
+
     for (auto gt : m_graph->global_tensors())
     {
         if (gt.second)
@@ -1851,6 +1876,11 @@ bool SOMSScheduler::same_stream(MemoryObjectPtr m1, MemoryObjectPtr m2)
 void SOMSScheduler::disable_sm()
 {
     m_enable_sm = false;
+}
+
+void SOMSScheduler::set_ws(std::map<NodePtr, std::set<TensorPtr>> &ws_map)
+{
+    m_ws_map = ws_map;
 }
 
 }; // namespace aipubt

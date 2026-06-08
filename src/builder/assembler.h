@@ -31,7 +31,6 @@
 #include "core/proxy_tensor.h"
 #include "core/subgraph.h"
 #include "core/surface.h"
-#include <vector>
 
 namespace aipubt
 {
@@ -63,30 +62,27 @@ public:
     void set_elf(const CpsElfPtr &elf);
     void assembly();
     std::vector<std::vector<task_t>> get_streams();
-    std::vector<uint32_t> get_param();
+    const BuilderParams &get_params() const;
     std::map<uint32_t, uint32_t> get_param_offset_table();
     std::map<TensorPtr, uint32_t> get_tensor_index_map();
     std::map<ConstTensorPtr, uint32_t> get_const_index_map();
 
-    // get_kernel_map();
 private:
     GraphPtr m_graph;
     std::vector<std::vector<task_t>> m_streams;
-    std::vector<uint32_t> m_params;
+    BuilderParams m_params;
     std::map<uint32_t, uint32_t> m_param_offset_table;
     std::map<TensorPtr, uint32_t> m_tensor_index_map;
     std::map<ConstTensorPtr, uint32_t> m_const_index_map;
-    std::map<SurfacePtr, uint32_t> m_surface_index_map;
     CpsElfPtr m_elf;
     uint32_t m_tensor_index = 1;
     uint32_t m_const_index = 1;
-    uint32_t m_surface_index = 0;
     uint32_t m_task_id = 0;
     uint32_t get_tensor_index(const TensorPtr t);
     uint32_t get_const_index(const ConstTensorPtr t);
-    void reset_surface_index();
-    uint32_t get_surface_index(const SurfacePtr s);
     uint32_t get_task_id();
 };
-};     // namespace aipubt
+
+BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info);
+} // namespace aipubt
 #endif //!BUILDER_ASSEMBLER_H

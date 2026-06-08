@@ -251,7 +251,6 @@ inline void get_common_argparser(ArgParser &args)
     args.add_hidden_argument("", "--perf_json", "set graph json path for cost model", true, false);
     args.add_hidden_argument("", "--perf_bin", "set profile data path for cost model", true, false);
     args.add_hidden_argument("", "--enable_ds", "enable dynamic shape", true, true);
-    args.add_hidden_argument("", "--enable_cl_opt", "enable cl optimization for dynamic shape", true, true);
     args.add_hidden_argument("", "--max_input_shape",
                              "Set the largest input shape when dynamic shape is enabled.", true, false);
     args.add_hidden_argument("", "--default_input_shape",
@@ -265,8 +264,6 @@ inline void get_common_argparser(ArgParser &args)
                              " Use comma to separate if there are multiple dimensions,"
                              " and use \"none\" if there is no dynamic input dimension.",
                              true, false);
-    args.add_hidden_argument("", "--show_divided_graph",
-                             "Show divided graph before lowering in dynamic shape mode", true, true);
     args.add_hidden_argument("", "--disable_separate_gm", "disable average separate gm in cores.", true, true);
     args.add_hidden_argument("", "--enable_separate_gm", "enable average separate gm in cores.", true, true);
     args.add_hidden_argument("", "--max_wt_size", "split wt into two half, unit in MByte", true, false);
@@ -293,8 +290,6 @@ inline void get_common_argparser(ArgParser &args)
     args.add_hidden_argument("", "--print_emitter_var", "print emitter variable", true, true);
     args.add_hidden_argument("", "--dump_constant_info", "dump constant information into constant_info.csv", true, true);
     args.add_hidden_argument("", "--dump_lora_info", "dump LoRA weight info into temp.lora_info.json", true, true);
-    args.add_hidden_argument("", "--mq_save_ir", "Save MQ IR after lowering to the specified file (.txt, a .bin file will be auto-generated).", true, false);
-    args.add_hidden_argument("", "--mq_load_ir", "Load MQ IR from the specified file, skipping the lowering stage.", true, false);
 }
 
 inline bool cmd_action(ArgParser &args, int &retcode)

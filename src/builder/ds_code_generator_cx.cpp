@@ -31,10 +31,30 @@ inline size_t aligned(size_t s, size_t align = 256)
 
 namespace aipubt
 {
-std::stringstream &get_ds_code()
+static std::stringstream ds_code;
+const std::string get_ds_code()
 {
-    static std::stringstream ds_code;
-    return ds_code;
+    auto code = ds_code.str();
+    auto arch = get_target()->isainfo().type;
+    if (code.size() && (arch == ISA_ZYv5 || arch == ISA_ZYv6))
+    {
+        std::stringstream oss;
+        oss << "typedef unsigned int uint;\n"
+            << "void _aipubt_copy_data(uint, uint, uint);\n"
+            << "__attribute__((overloadable)) float ceil(float);\n"
+            << "__attribute__((overloadable)) float round(float);\n"
+            << "__attribute__((overloadable)) float rint(float);\n"
+            << "__attribute__((overloadable)) float log2(float);\n"
+            << "__attribute__((overloadable)) float sqrt(float);\n"
+            << "__attribute__((overloadable)) float rsqrt(float);\n"
+            << "__attribute__((overloadable)) float floor(float);\n"
+            << "__attribute__((overloadable)) uint max(uint, uint);\n"
+            << "__attribute__((overloadable)) uint min(uint, uint);\n"
+            << "__attribute__((overloadable)) float pow(float, float);\n"
+            << "__attribute__((overloadable)) uint mul_hi(uint, uint);\n";
+        return oss.str() + "\n" + code;
+    }
+    return code;
 }
 
 void DSCodeOptimizer::optimize()
@@ -458,14 +478,8 @@ void DSCodeGeneratorCL::max_batch_preprocess(NodePtr node,
 
 void DSCodeGeneratorCL::generate(std::map<int, DSCodePkg> &code_map)
 {
-    auto &oss = get_ds_code();
+    auto &oss = ds_code;
     oss.clear();
-    if (BuilderConfig::get<bool>(Constants::enable_ds))
-    {
-        oss << "#include <aipu.h>\n"
-            << "#include <clc/clc.h>\n\n"
-            << "void _aipubt_copy_data(uint src, uint dst, uint size);\n\n";
-    }
 
     std::set<std::string> kernel_names;
     for (auto &kernel : m_kernels)
@@ -538,7 +552,7 @@ void DSCodeGeneratorCL::generate_kernel_code(std::stringstream &oss,
     auto tid = "tid";
     auto gp = "gp";
     oss << "void " << kernel.name << "()\n{\n"
-        << tab << "uint *" << tcbp << " = (uint *)__mfctrl0(0x14);\n"
+        << tab << "uint *" << tcbp << " = (uint *)__builtin_aipu_mfctrl0(0x14);\n"
         << tab << "uint *" << pp << " = (uint *)" << tcbp << "[14];\n"
         << tab << "uint " << tid << " = " << tcbp << "[20] >> 16;\n"
         << tab << "uint *" << gp << " = (uint *)" << tcbp << "[28];\n";
@@ -613,7 +627,7 @@ void DSCodeGeneratorCL::generate_kernel_code(std::stringstream &oss,
         {
             // write-back and invalidate data cache
             int cache_len = std::ceil(std::log2(std::max(total_desc_size / 1024.0, 1.0))) + 1;
-            oss << tab2 << "__cacheop((uint)" << desc << ", 24, " << cache_len << ");\n";
+            oss << tab2 << "__builtin_aipu_cacheop((uint)" << desc << ", 24, " << cache_len << ");\n";
 
             if (desc_size)
             {
@@ -688,164 +702,3 @@ void DSCodeGeneratorCL::generate_kernel_code(std::stringstream &oss,
         }
     }
 
-    auto isp = "isp";
-    auto osp = "osp";
-    oss << tab << "uint *" << isp << " = " << gp << " + " << GP_INPUT_SHAPE_OFFSET / 4 << ";\n";
-    if (data_aware)
-    {
-        oss << tab << "uint *" << osp << " = (uint *)" << gp << "[" << GP_OUTPUT_SHAPE_BASE / 4 << "];\n";
-    }
-    oss << tab << "if (" << tid << " == 0) {\n";
-    std::map<int, std::string> args;
-    std::map<ExprPtr, std::string> vars;
-
-    auto generate_update_code = [&](const std::vector<DSParamDesc> &params) {
-        for (auto &p : params)
-        {
-            for (auto &arg : p.args)
-            {
-                if (args.count(arg.id))
-                {
-                    continue;
-                }
-                std::string name;
-                auto idx = std::to_string(arg.offset / 4);
-                if (arg.type == DSParamDesc::GLOBAL)
-                {
-                    name = "d" + idx;
-                    oss << tab2 << "uint " << name << " = " << isp << "[" << idx << "];\n";
-                }
-                else
-                {
-                    name = "r" + idx;
-                    oss << tab2 << "uint " << name << " = " << osp << "[" << idx << "];\n";
-                }
-                args[arg.id] = name;
-            }
-            std::string res;
-            auto codes = expr_to_cl_code(p.expr, args, vars, res);
-            for (auto &c : codes)
-            {
-                oss << tab2 << c << "\n";
-            }
-            for (auto &d : p.dsts)
-            {
-                auto base = pp;
-                if (d.type == DSParamDesc::DESC)
-                {
-                    base = desc;
-                }
-                else if (d.type == DSParamDesc::DESC_PARAM)
-                {
-                    base = desc_param;
-                }
-                else if (d.type == DSParamDesc::DESC_ACT)
-                {
-                    base = desc_act;
-                }
-                auto val = "val" + std::to_string(var_id++);
-                oss << tab2 << "uint *" << val << " = " << base << " + " << d.offset / 4 << ";\n";
-                if (d.mode == DSParamDesc::FILL)
-                {
-                    oss << tab2 << "*" << val << " = " << res << ";\n";
-                }
-                else
-                {
-                    oss << tab2 << "*" << val << " = *" << val << " + " << res << ";\n";
-                }
-            }
-        }
-    };
-
-    auto label_id = std::to_string(utils::get_increase_id64());
-    auto skip_label = "_skip_label" + label_id;
-    if (data_aware)
-    {
-        generate_update_code(kernel.data_aware_params());
-        if (kernel.type == DSKernelDesc::KERNEL &&
-            BuilderConfig::exist(Constants::default_input_shape))
-        {
-            oss << tab2 << "if (" << gp << "[" << GP_DEFAULT_SHAPE_FLAG / 4 << "] != 0) {\n"
-                << tab2 << tab << "goto " << skip_label << ";\n"
-                << tab2 << "}\n";
-        }
-    }
-    generate_update_code(kernel.global_params());
-    oss << tab << "}\n";
-    if (kernel.type == DSKernelDesc::KERNEL &&
-        data_aware && BuilderConfig::exist(Constants::default_input_shape))
-    {
-        oss << skip_label << ":\n";
-    }
-
-    oss << tab << "barrier(CLK_LOCAL_MEM_FENCE);\n";
-    if (copy_param)
-    {
-        oss << tab << tcbp << "[14] = (uint)" << pp << ";\n";
-    }
-    oss << "}\n\n";
-}
-
-void DSCodeGeneratorCL::generate_eval_code(std::stringstream &oss,
-                                           const DSKernelDesc &kernel)
-{
-    auto tab = std::string(4, ' ');
-    auto tcbp = "tcbp";
-    auto gp = "gp";
-    oss << "uint " << kernel.name << "()\n{\n"
-        << tab << "uint *" << tcbp << " = (uint *)__mfctrl0(0x14);\n"
-        << tab << "uint *" << gp << " = (uint *)" << tcbp << "[28];\n";
-
-    auto isp = "isp";
-    auto osp = "osp";
-    oss << tab << "uint *" << isp << " = " << gp << " + " << GP_INPUT_SHAPE_OFFSET / 4 << ";\n";
-    if (kernel.data_aware())
-    {
-        oss << tab << "uint *" << osp << " = (uint *)" << gp << "[" << GP_OUTPUT_SHAPE_BASE / 4 << "];\n";
-    }
-
-    std::map<int, std::string> args;
-    std::map<ExprPtr, std::string> vars;
-    auto &p = kernel.params[0];
-    for (auto &arg : p.args)
-    {
-        if (args.count(arg.id))
-        {
-            continue;
-        }
-        std::string name;
-        auto idx = std::to_string(arg.offset / 4);
-        if (arg.type == DSParamDesc::GLOBAL)
-        {
-            name = "d" + idx;
-            oss << tab << "uint " << name << " = " << isp << "[" << idx << "];\n";
-        }
-        else
-        {
-            name = "r" + idx;
-            oss << tab << "uint " << name << " = " << osp << "[" << idx << "];\n";
-        }
-        args[arg.id] = name;
-    }
-
-    std::string res;
-    auto codes = expr_to_cl_code(p.expr, args, vars, res);
-    for (auto &c : codes)
-    {
-        oss << tab << c << "\n";
-    }
-    oss << tab << "return " << res << ";\n"
-        << "}\n\n";
-}
-
-void DSCodeGeneratorCPS::parse(GraphPtr graph)
-{
-    m_kernels.clear();
-
-    optimize();
-}
-
-void DSCodeGeneratorCPS::generate()
-{
-}
-} // namespace aipubt

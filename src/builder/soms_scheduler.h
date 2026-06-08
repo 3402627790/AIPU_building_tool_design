@@ -40,6 +40,7 @@ public:
 
     void disable_sm();
     std::vector<MemoryObjectPtr> const_allocate(const std::set<ConstTensorPtr> &const_tensor);
+    void set_ws(std::map<NodePtr, std::set<TensorPtr>> &ws_map);
 
 private:
     bool m_enable_sm = true;
@@ -51,6 +52,7 @@ private:
     std::set<MemoryObjectPtr> m_input_mem;
     std::set<MemoryObjectPtr> m_keep_mem;
     std::map<MemoryObjectPtr, TensorPtr> m_tensor_map;
+    std::map<NodePtr, std::set<TensorPtr>> m_ws_map;
     std::map<std::pair<MemoryObjectPtr, MemoryObjectPtr>, uint32_t> m_conflict_reason;
     std::map<std::pair<NodePtr, uint32_t>, std::set<NodePtr>> m_anc_streams_cache;
     std::map<MemoryObjectPtr, std::vector<NodePtr>> m_src_streams_cache;

@@ -616,11 +616,14 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
     aipubt::BuilderConfig::erase(Constants::max_input_shape);
     aipubt::BuilderConfig::erase(Constants::default_input_shape);
     aipubt::BuilderConfig::erase(Constants::dynamic_input_dim);
-    aipubt::BuilderConfig::erase(Constants::show_divided_graph);
 
     if (arg_map.count("enable_ds"))
     {
-        bool status = aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv5;
+        bool status = cast_any<bool>(arg_map["enable_ds"]);
+        if (aipubt::get_target()->isainfo().type < aipubt::ISA_ZYv5)
+        {
+            status = false;
+        }
         aipubt::BuilderConfig::set(Constants::enable_ds, status);
     }
     for (auto &opt : {"input_shape", "max_input_shape", "default_input_shape"})
@@ -674,17 +677,6 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
         else
         {
             WARN() << "Option --dynamic_input_dim is ignored because option --enable_ds is not enabled.";
-        }
-    }
-    if (arg_map.count("show_divided_graph"))
-    {
-        if (aipubt::BuilderConfig::get<bool>(Constants::enable_ds))
-        {
-            aipubt::BuilderConfig::set(Constants::show_divided_graph, true);
-        }
-        else
-        {
-            WARN() << "Option --show_divided_graph is ignored because option --enable_ds is not enabled.";
         }
     }
 
@@ -1863,7 +1855,6 @@ GraphPtr infershape(GraphPtr g,
     {
         new_g = g->clone();
     }
-    allocate_output_shape(new_g); // compute data-aware symbol offsets
     init_symbol_shape(new_g);
     infer_symbol_shape(new_g);
 
@@ -1912,78 +1903,82 @@ GraphPtr aipurun(GraphPtr g,
         elf->save(ss);
 
         aipubt::rt::Launcher launcher;
-        launcher.load_from_mem(ss.str().data(), ss.str().size());
+        auto str = ss.str();
+        launcher.load_from_mem(str.data(), str.size());
 
         auto slot_addr = launcher.get_slot_addresses();
         optimized_g->set_attr("addr_vec_list", slot_addr);
 
         actions_after_build(optimized_g, arg_map);
 
-        auto inputs = launcher.get_inputs();
-        for (size_t i = 0; i < inputs.size(); ++i)
+        if (!arg_map.count("skip_simulator"))
         {
-            auto &input = inputs[i];
-            input.data = input_tensors[i]->data<char>();
-            input.length = input_tensors[i]->mem_size();
-            input.name = input_tensors[i]->name();
-            input.shape = input_tensors[i]->shape();
-        }
-        INFO() << "fun with btrt:";
-        uint64_t t0, t1;
-        t0 = utils::get_time_in_us();
-        launcher.run(inputs);
-        t1 = utils::get_time_in_us();
-        INFO() << "simulator done! total time: " << (t1 - t0) / 1000 / 1000. << " s";
-
-        launcher.dump_outputs(cast_any<std::string>(arg_map["output"]));
-        if (arg_map.count("dump"))
-        {
-            launcher.dump_temp(".");
-        }
-        if (BuilderConfig::get<bool>("dump_all_tensors"))
-        {
-            std::set<TensorPtr> dump_tensors;
-            std::map<TensorPtr, int> layer_id_map;
-            auto tensor_index_map = ((MqBuilder *)builder)->get_tensor_index_map();
-            for (auto s : optimized_g->nodes())
+            auto inputs = launcher.get_inputs();
+            for (size_t i = 0; i < inputs.size(); ++i)
             {
-                auto sgn = SubGraphNode::from_node(s);
-                if (sgn)
+                auto &input = inputs[i];
+                input.data = input_tensors[i]->data<char>();
+                input.length = input_tensors[i]->mem_size();
+                input.name = input_tensors[i]->name();
+                input.shape = input_tensors[i]->shape();
+            }
+            INFO() << "run with btrt:";
+            uint64_t t0, t1;
+            t0 = utils::get_time_in_us();
+            launcher.run(inputs);
+            t1 = utils::get_time_in_us();
+            INFO() << "simulator done! total time: " << (t1 - t0) / 1000 / 1000. << " s";
+
+            launcher.dump_outputs(cast_any<std::string>(arg_map["output"]));
+            if (arg_map.count("dump"))
+            {
+                launcher.dump_temp(".");
+            }
+            if (BuilderConfig::get<bool>("dump_all_tensors"))
+            {
+                std::set<TensorPtr> dump_tensors;
+                std::map<TensorPtr, int> layer_id_map;
+                auto tensor_index_map = ((MqBuilder *)builder)->get_tensor_index_map();
+                for (auto s : optimized_g->nodes())
                 {
-                    auto sg = sgn->subgraph();
-                    for (auto n : sg->nodes())
+                    auto sgn = SubGraphNode::from_node(s);
+                    if (sgn)
                     {
-                        if (n->type() == OpType_Input || n->type() == OpType_SubGraphInput)
+                        auto sg = sgn->subgraph();
+                        for (auto n : sg->nodes())
                         {
-                            continue;
-                        }
-                        for (auto out : n->outputs())
-                        {
-                            auto tensor_p = std::dynamic_pointer_cast<ProxyTensor>(out);
-                            if (tensor_p)
+                            if (n->type() == OpType_Input || n->type() == OpType_SubGraphInput)
                             {
-                                out = tensor_p->proxied_tensor(true);
+                                continue;
                             }
-                            dump_tensors.insert(out);
-                            layer_id_map[out] = n->get_attr("layer_id");
+                            for (auto out : n->outputs())
+                            {
+                                auto tensor_p = std::dynamic_pointer_cast<ProxyTensor>(out);
+                                if (tensor_p)
+                                {
+                                    out = tensor_p->proxied_tensor(true);
+                                }
+                                dump_tensors.insert(out);
+                                layer_id_map[out] = n->get_attr("layer_id");
+                            }
                         }
                     }
                 }
-            }
-            std::map<int, std::pair<std::string, int>> dump_map;
-            for (auto t : dump_tensors)
-            {
-                if (!tensor_index_map.count(t))
+                std::map<int, std::pair<std::string, int>> dump_map;
+                for (auto t : dump_tensors)
                 {
-                    ERROR();
+                    if (!tensor_index_map.count(t))
+                    {
+                        ERROR();
+                    }
+                    auto index = tensor_index_map[t];
+                    auto id = layer_id_map[t];
+                    auto name = "dumptensor_" + to_string(id) + "_" + utils::verify_name(t->name()) + ".bin";
+                    auto size = t->mem_size();
+                    dump_map[index] = make_pair(name, size);
                 }
-                auto index = tensor_index_map[t];
-                auto id = layer_id_map[t];
-                auto name = "dumptensor_" + to_string(id) + "_" + utils::verify_name(t->name()) + ".bin";
-                auto size = t->mem_size();
-                dump_map[index] = make_pair(name, size);
+                launcher.dump_tensors(dump_map);
             }
-            launcher.dump_tensors(dump_map);
         }
 
         delete builder;
@@ -1993,11 +1988,6 @@ GraphPtr aipurun(GraphPtr g,
         // build
         auto builder = run_gb(g, input_tensors, arg_map);
         optimized_g = builder->graph();
-        if (GCompilerLogger::get_error_count() > error_cnt)
-        {
-            INFO() << "There are some errors in compiling time, Simulator would not run.";
-            return nullptr;
-        }
 
         // dump
         std::string global_cwd = BuilderConfig::get<std::string>(Constants::global_cwd);
