@@ -186,8 +186,6 @@ namespace Constants
     constexpr const char *tile_split_output_c_conv = "tile_split_output_c_conv";
     constexpr const char *remove_origin_constant = "remove_origin_constant";
     constexpr const char *specify_wt_gm = "specify_wt_gm";
-    constexpr const char *mq_save_ir = "mq_save_ir";
-    constexpr const char *mq_load_ir = "mq_load_ir";
 
     // attributes keys
     constexpr const char *random_reg = "random_reg";
