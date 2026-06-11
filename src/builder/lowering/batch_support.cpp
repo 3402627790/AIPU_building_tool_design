@@ -78,6 +78,12 @@ static void add_spliter(NodePtr node, TensorPtr inp, NodePtrList &split_nodes)
     spliter->params()["splits"] = {};
     spliter->add_input(inp);
 
+    if (node->is_dynamic())
+    {
+        std::vector<tongue::Expr> ds_splits;
+        spliter->params()["ds_splits"] = ds_splits;
+    }
+
     g->add_node(spliter);
     split_nodes.push_back(spliter);
     ADD_LOCATION_BY_NODE(spliter, node);
@@ -159,12 +165,19 @@ static NodePtrList apply_split(NodePtr node, std::vector<int> batches)
             auto spliter = split_nodes[i];
             if (spliter)
             {
-                auto t = std::make_shared<Tensor>(*spliter->inputs()[0]);
-                t->shape()[0] = step;
+                auto t = std::make_shared<Tensor>(g->get_valid_tensor_name(spliter->name() + "_" + std::to_string(b / step)),
+                                                  change_shape_by_axis(spliter->inputs()[0]->shape(), batch_axis, step),
+                                                  spliter->inputs()[0]->type());
+                t->quantization() = spliter->inputs()[0]->quantization();
                 t->memory_offset()->size = t->memory_offset()->size / batch * step;
-                t->set_name(g->get_valid_tensor_name(spliter->name() + "_" + std::to_string(b / step)));
                 spliter->params()["splits"].push_back(t->shape()[0]);
                 spliter->add_output(t);
+                if (node->is_dynamic())
+                {
+                    std::vector<tongue::Expr> ds_splits = spliter->params()["ds_splits"];
+                    ds_splits.push_back(tongue::Expr((uint32_t)t->shape()[0]));
+                    spliter->params()["ds_splits"] = ds_splits;
+                }
                 subnode->add_input(t);
             }
             else
@@ -176,11 +189,12 @@ static NodePtrList apply_split(NodePtr node, std::vector<int> batches)
         // concat
         for (auto concat : concat_nodes)
         {
-            auto t = std::make_shared<Tensor>(*concat->outputs()[0]);
+            auto t = std::make_shared<Tensor>(g->get_valid_tensor_name(concat->name() + "_" + std::to_string(b / step)),
+                                              change_shape_by_axis(concat->outputs()[0]->shape(), batch_axis, step),
+                                              concat->outputs()[0]->type());
+            t->quantization() = concat->outputs()[0]->quantization();
             t->set_io_tensor(false);
-            t->shape()[batch_axis] = step;
             t->memory_offset()->size = t->memory_offset()->size / batch * step;
-            t->set_name(g->get_valid_tensor_name(concat->name() + "_" + std::to_string(b / step)));
             subnode->add_output(t);
             concat->add_input(t);
         }
@@ -205,7 +219,27 @@ static NodePtrList apply_split(NodePtr node, std::vector<int> batches)
             tiling_set_constant(node, subnode, "biases", b, step);
         }
 
+        if (subnode->params().count("ds_output_shape"))
+        {
+            std::vector<std::vector<Expr>> ds_output_shape = subnode->params()["ds_output_shape"];
+            ds_output_shape[batch_axis] = {tongue::Expr(step)};
+            subnode->params()["ds_output_shape"] = ds_output_shape;
+        }
+
         b += step;
+    }
+
+    if (node->is_dynamic())
+    {
+        for (auto subnode : subnodes)
+        {
+            subnode->infer_shape(true);
+        }
+
+        for (auto concat : concat_nodes)
+        {
+            concat->infer_shape(true);
+        }
     }
 
     g->remove_node(node);
@@ -266,17 +300,17 @@ bool check_manual_tile_n(NodePtr n)
         }
     }
 
-    if (type == OpType_Transpose)
-    {
-        if (n->params().count("perm"))
-        {
-            std::vector<int> perm = n->params()["perm"];
-            if (perm[0] != 0)
-            {
-                return false;
-            }
-        }
-    }
+    // if (type == OpType_Transpose)
+    // {
+    //     if (n->params().count("perm"))
+    //     {
+    //         std::vector<int> perm = n->params()["perm"];
+    //         if (perm[0] != 0)
+    //         {
+    //             return false;
+    //         }
+    //     }
+    // }
 
     if (type == OpType_Gather)
     {
