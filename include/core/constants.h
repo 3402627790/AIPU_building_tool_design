@@ -137,6 +137,8 @@ namespace Constants
     constexpr const char *print_emitter_var = "print_emitter_var";
     constexpr const char *dump_constant_info = "dump_constant_info";
     constexpr const char *dump_lora_info = "dump_lora_info";
+    constexpr const char *mq_save_ir = "mq_save_ir";
+    constexpr const char *mq_load_ir = "mq_load_ir";
 
     constexpr const char *load_addr_cfg = "load_addr_cfg";
     constexpr const char *dump_addr_cfg = "dump_addr_cfg";

@@ -290,6 +290,8 @@ inline void get_common_argparser(ArgParser &args)
     args.add_hidden_argument("", "--print_emitter_var", "print emitter variable", true, true);
     args.add_hidden_argument("", "--dump_constant_info", "dump constant information into constant_info.csv", true, true);
     args.add_hidden_argument("", "--dump_lora_info", "dump LoRA weight info into temp.lora_info.json", true, true);
+    args.add_hidden_argument("", "--mq_save_ir", "save the post-lowering MQ graph IR/weight to the given directory for caching", true, false);
+    args.add_hidden_argument("", "--mq_load_ir", "load a previously saved MQ post-lowering graph IR/weight from the given directory and skip re-parsing the input IR", true, false);
 }
 
 inline bool cmd_action(ArgParser &args, int &retcode)

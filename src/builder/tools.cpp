@@ -757,6 +757,14 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
     {
         aipubt::BuilderConfig::set(Constants::load_reorder_cfg, cast_any<std::string>(arg_map["load_reorder_cfg"]));
     }
+    if (arg_map.count("mq_save_ir"))
+    {
+        aipubt::BuilderConfig::set(Constants::mq_save_ir, cast_any<std::string>(arg_map["mq_save_ir"]));
+    }
+    if (arg_map.count("mq_load_ir"))
+    {
+        aipubt::BuilderConfig::set(Constants::mq_load_ir, cast_any<std::string>(arg_map["mq_load_ir"]));
+    }
     if (arg_map.count("soms_gm_loop"))
     {
         aipubt::BuilderConfig::set(aipubt::Constants::soms_gm_loop, (uint32_t)cast_any<uint32_t>(arg_map["soms_gm_loop"]));

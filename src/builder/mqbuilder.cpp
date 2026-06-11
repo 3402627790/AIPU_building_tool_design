@@ -28,16 +28,21 @@
 #include "builder/gop_plugin.h"
 #include "builder/kernel_adapter.h"
 #include "builder/load_balancer.h"
+#include "builder/mq_ir_cache.h"
 #include "builder/object_generator.h"
 #include "builder/optimizer.h"
 #include "builder/soms_scheduler.h"
 #include "core/config.h"
+#include "core/graph.h"
 #include "core/tensor.h"
 #include "statistic/perf_estimator.h"
 #include "transform/passes.h"
 
 namespace aipubt
 {
+
+GraphPtr load_mq_ir_cache(const std::string &dir);
+void save_mq_ir_cache(GraphPtr graph, const std::string &dir);
 
 MqBuilder::MqBuilder(GraphPtr graph) : m_graph(graph)
 {
@@ -61,6 +66,23 @@ std::map<TensorPtr, uint32_t> MqBuilder::get_tensor_index_map()
 
 bool MqBuilder::build()
 {
+    bool loaded_from_cache = false;
+    auto mq_load_ir = BuilderConfig::get<std::string>("mq_load_ir");
+    if (!mq_load_ir.empty())
+    {
+        auto cached_graph = load_mq_ir_cache(mq_load_ir);
+        if (!cached_graph)
+        {
+            ERROR() << "mq_load_ir: failed to load cache from " << mq_load_ir;
+            return false;
+        }
+        else
+        {
+            m_graph = cached_graph;
+            loaded_from_cache = true;
+        }
+    }
+
     m_graph->global_tensors().clear();
     TensorPtr sp = std::make_shared<Tensor>("stack", TensorShape({8192}), Tensor::UINT8);
     m_graph->global_tensors()["stack"] = sp;
@@ -79,11 +101,20 @@ bool MqBuilder::build()
 
     config_dynamic_shape(m_graph);
 
-    BuilderOptimizer optimizer;
-    optimizer.optimize_mq(m_graph);
-    if (!m_graph->check_valid_name())
+    if (!loaded_from_cache)
     {
-        ERROR() << "check valid name failed";
+        BuilderOptimizer optimizer;
+        optimizer.optimize_mq(m_graph);
+        if (!m_graph->check_valid_name())
+        {
+            ERROR() << "check valid name failed";
+        }
+
+        auto mq_save_ir = BuilderConfig::get<std::string>("mq_save_ir");
+        if (!mq_save_ir.empty())
+        {
+            save_mq_ir_cache(m_graph, mq_save_ir);
+        }
     }
 
     PerfEstimator perf;
