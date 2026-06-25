@@ -6,7 +6,7 @@ from ..onnx.passes.common_passes import apply_subgraph_plugin, record_output_ten
 from ...graph.graph_algo import infer, clear_redundant_nodes
 from ..onnx.passes.front_passes import fuse_weights_const, convert_deconv
 from .passes.front_passes import convert_to_onnx, convert_fc, remove_useless_atenop, convert_rsqrt, \
-    convert_local_scalar_dense, convert_custom_sdpa, convert_aten_add
+    convert_local_scalar_dense, convert_custom_sdpa, convert_aten_add_sub, convert_aten_max
 from ...logger import INFO, DEBUG, WARN, ERROR, FATAL
 
 
@@ -21,7 +21,8 @@ def front_process_executorch(graph, params):
         remove_useless_atenop(
             graph, ['_to_copy', 'alias_copy'])
 
-        convert_aten_add(graph)
+        convert_aten_add_sub(graph)
+        convert_aten_max(graph)
         convert_custom_sdpa(graph)
         convert_local_scalar_dense(graph)
         convert_fc(graph)

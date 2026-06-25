@@ -185,9 +185,9 @@ class BatchNormalizationOp(LayoutConcernedOp, OpHasVariableOutPorts, OnnxOp):
             reshape_dim = None
             if inputs[0].ndim != 4:
                 if self.data_format.startswith('NC'):
-                    reshape_dim = list(inputs[0].shape[:2]) + [int(np.prod(inputs[0].shape[2:])), 1]
+                    reshape_dim = list(inputs[0].shape[:2]) + [int(np.prod(inputs[0].shape[2:]).item()), 1]
                 else:
-                    reshape_dim = [1, 1, int(np.prod(inputs[0].shape[:-1])), inputs[0].shape[-1]]
+                    reshape_dim = [1, 1, int(np.prod(inputs[0].shape[:-1]).item()), inputs[0].shape[-1]]
                 inp = np.reshape(inputs[0], reshape_dim)
             else:
                 inp = inputs[0]
@@ -280,7 +280,7 @@ class Col2ImOp(OpHasPaddingStrides, OpHasOneOutPort, OnnxOp):
         block_shape = inputs[2].tolist()
         if not self.kernel_shape:
             self.kernel_shape = block_shape
-        channels = input_shape[1] // int(np.prod(block_shape))
+        channels = input_shape[1] // int(np.prod(block_shape).item())
         out_shape = [batch, channels] + image_shape
         out_tensor = np.random.ranf(size=out_shape).astype(inputs[0].dtype)
         self.set_out_tensor(out_tensor)

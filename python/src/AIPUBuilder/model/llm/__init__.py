@@ -20,9 +20,11 @@ from .zimagetransformer import *
 from .clip_resnet50 import *
 from .gpt_oss import *
 from .t5 import *
+from .resnet import *
+from .bevformer import *
 from .wantransformer3d import *
 from .autoencoderkl_wan import *
-
-from .chat_template import *
 from .alternateVLDiT import *
 from .qwen2_5Omni import *
+
+from .chat_template import *

@@ -37,7 +37,10 @@ bool file_exists(const std::string &file)
 {
     return path_exists(file);
 }
-
+bool file_readable(const std::string &file)
+{
+    return (access(file.c_str(), R_OK) == 0);
+}
 bool remove_file(const std::string &filename)
 {
     return (remove(filename.c_str()) != 0);

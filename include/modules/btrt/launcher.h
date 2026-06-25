@@ -13,9 +13,10 @@ namespace aipubt::rt
 
 typedef struct tensor_data
 {
-    void *data;             // if it is an input request, data should be initialized
-    uint32_t length;        // actual data length being used
-    std::string name;      // input tensor name
+    void *data;                  // if it is an input request, data should be initialized
+    uint32_t length;             // actual data length being used
+    uint8_t dtype;
+    std::string name;            // input tensor name
     std::vector<uint32_t> shape; // When using dynamic shapes, each frame of input data must have a shape.
 } tensor_data_t;
 
@@ -42,17 +43,23 @@ public:
     int run_async(AsyncCallback callback, const std::vector<tensor_data_t> &inputs = {},
                   const std::map<std::string, int> &symbols = {});
 
-    std::vector<tensor_data_t> get_inputs();
+    std::vector<tensor_data_t> get_inputs() const;
 
-    std::vector<tensor_data_t> get_outputs();
+    std::vector<tensor_data_t> get_outputs() const;
 
-    int dump_outputs(const std::map<int, std::string> &tensor_names = {});
+    const std::vector<uint64_t> &get_slot_addresses() const;
+
+    int dump_tensors(const std::map<int, std::pair<std::string, int>> &) const;
+
+    int dump_outputs(const std::string &name = {}) const;
+
+    int dump_temp(const std::string &path = "temp/") const;
 
     int bind_device(int device_id);
 
     int set_run_priority(uint8_t priority);
 
-    uint8_t get_run_priority();
+    uint8_t get_run_priority() const;
 
 private:
     std::unique_ptr<LauncherImpl> impl_;

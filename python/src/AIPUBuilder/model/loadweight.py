@@ -395,6 +395,31 @@ class CompressedTensorsTrans(_QTrans):
         return ''
 
     @staticmethod
+    def update_tensor_data(out_t, data_map, key, format='native-quantized'):
+        from AIPUBuilder.model.utils import update_tensor_data
+        one_t = out_t
+        if isinstance(out_t, (list, tuple)):
+            one_t = out_t[0]
+        its_node = one_t.op
+        if key not in its_node.constants:
+            ERROR(f"key={key} not in {its_node}.constants, so cannot update tensor data")
+            return
+
+        updated_t = its_node.constants[key]
+        if format in ['nvfp4-pack-quantized', 'native-quantized']:
+            for data_key, data in data_map.items():
+                if data_key == 'weight_scale':
+                    updated_t.quantization.scales = data
+                elif data_key == 'weight_global_scale':
+                    its_node.params['weight_global_scale'] = data.item()
+                elif data_key == 'input_global_scale':
+                    its_node.params['input_global_scale'] = data.item()
+                else:
+                    update_tensor_data(updated_t, {data_key: data})
+        else:
+            ERROR(f"un-supported format={format} in CompressedTensorsTrans")
+
+    @staticmethod
     def _old_unpack_weight_uint32_into_fp4(packed_weight, bits=4):
         assert packed_weight.dtype == torch.uint8
         oc, packed_ic = packed_weight.shape  # [oc, ic//2]
@@ -439,12 +464,18 @@ class CompressedTensorsTrans(_QTrans):
             if 'zerop' in self.data_map:
                 unpacked_zp = self.data_map['zerop']
             else:
-                unpacked_zp = torch.zeros_like(weight_block_scales)
+                unpacked_zp = torch.zeros_like(weight_block_scales).float()
 
             # mxfp4 scale/zp ==> aipu scale/zp
             weight_block_scales = 1.0 / weight_block_scales.float()
             unpacked_zp = 0 - unpacked_zp
-            weight_global_scale = 1.0 / weight_global_scale.float()
+            # weight_global_scale = 1.0 / weight_global_scale.float()
+
+            if 'input_global_scale' in self.data_map:
+                input_global_scale = self.data_map['input_global_scale']
+                input_global_scale = 1.0 / input_global_scale.float()
+                self.data_map.update({'input_global_scale': input_global_scale})
+
             self.data_map.update({'weight_scale': weight_block_scales})
             self.data_map.update({'weight_global_scale': weight_global_scale})
             self.data_map.update({'zerop': unpacked_zp})
@@ -475,9 +506,6 @@ class CompressedTensorsTrans(_QTrans):
             self.data_map.pop('weight_global_scale')
             if 'zerop' in self.data_map:
                 self.data_map.pop('zerop')
-
-    def update(self, aipu_tensor):
-        pass
 
 
 @register_quant_method_trans('gguf')
@@ -639,7 +667,7 @@ class TorchpthWeight(BaseWeight):
         else:
             file_path = os.path.join(self.model_path, filename)
         if os.path.exists(file_path):
-            w = torch.load(file_path)
+            w = torch.load(file_path, map_location='cpu')
             '''
             # torch.pth maybe include other info, like:
             checkpoint = {

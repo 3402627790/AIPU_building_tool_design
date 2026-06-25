@@ -1078,7 +1078,7 @@ def convert_softmax(graph):
             insert_reshape(graph, pre_trans, softmax, pre_trans_out_attr, pre_reshape_dim)
 
             post_reshape_dim = [in_shape[axis] for axis in pre_trans_perm]
-            post_reshape_old_dim = [np.prod(post_reshape_dim[:len(softmax_axes)])] + \
+            post_reshape_old_dim = [np.prod(post_reshape_dim[:len(softmax_axes)]).item()] + \
                 post_reshape_dim[len(softmax_axes):]
             post_trans_perm = Op.cal_inverse_perm(pre_trans_perm)
             post_reshape = insert_reshape_after(graph, softmax, post_reshape_dim, post_reshape_old_dim)

@@ -47,9 +47,9 @@ def print_help(mode="run"):
     from AIPUBuilder._C._tools import aipurun as caipurun
     from AIPUBuilder._C._tools import aipugb as caipugb
     if mode == "run":
-        caipurun(["aipurun", "-h"])
+        caipurun([sys.argv[0], "-h"])
     else:
-        caipugb(["aipugb", "-h"])
+        caipugb([sys.argv[0], "-h"])
     _logger_stdout_write("""  -c <CONFIGFile>,--cfg <CONFIGFile>
         The config file, if config file and command line option both present, we will ignore command line options.
 """)
@@ -65,7 +65,7 @@ def cfg_to_cmd(mode="run"):
     argv = sys.argv[:]
     idx = None
     if "-h" in argv or "--help" in argv:
-        print_help()
+        print_help(mode)
         _sys_exit(0)
     if "-c" in argv:
         idx = argv.index("-c")
@@ -77,7 +77,7 @@ def cfg_to_cmd(mode="run"):
             # missing cfg file
             _logger_stdout_write("""ERROR: missing cfg file.
 """)
-            print_help()
+            print_help(mode)
             _sys_exit(-1)
             pass
         cfg = argv[idx + 1]
@@ -138,7 +138,7 @@ def cfg_to_cmd(mode="run"):
         else:
             _logger_stdout_write("""ERROR: cfg file missing the common section.
 """)
-            print_help()
+            print_help(mode)
             _sys_exit(-1)
 
 

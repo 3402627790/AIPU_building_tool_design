@@ -122,7 +122,7 @@ class Op(abc.ABC):
         assert start == offset, 'Offset not matches when writing data to bin (Node name: %s, %d)!' % (name, offset)
         ndarray.tofile(bin)
         end = bin.tell()
-        if not (ndarray.dtype.itemsize * int(np.prod(ndarray.shape)) == end - start):
+        if not (ndarray.dtype.itemsize * int(np.prod(ndarray.shape).item()) == end - start):
             ERROR(
                 '[Parser]: Meets error when writing data to bin for Node(%s)!' % name)
 
@@ -136,7 +136,7 @@ class Op(abc.ABC):
                     rs_out_shape_cp[i] = rs_in_shape[i]
         if -1 in rs_out_shape:
             idx = rs_out_shape.index(-1)
-            rs_out_shape_cp[idx] = int(np.prod(rs_in_shape) // -np.prod(rs_out_shape_cp))
+            rs_out_shape_cp[idx] = int(np.prod(rs_in_shape).item() // -np.prod(rs_out_shape_cp).item())
         reshape_axes_map = []
         # [[(rs_in_axes), (rs_out_axes)], ...]
         rs_in_axes = []
@@ -474,7 +474,7 @@ class Op(abc.ABC):
                     output.append(out_s.subs(sub_list))
             if -1 in output:
                 idx = output.index(-1)
-                output[idx] = int(np.prod(input_shapes[0]) // (-np.prod(output)))
+                output[idx] = int(np.prod(input_shapes[0]).item() // (-np.prod(output).item()))
             output_shapes.append(output)
         return output_shapes
 
@@ -4483,7 +4483,10 @@ class AtenOp(ExecutorchOp):
     def attributes(cls):
         '''return attributes of AtenOp class.'''
         return {
-            'data_format': {'default': 'NCHW'},
+            1:
+                {
+                    'data_format': {'default': 'NCHW'}
+                }
         }
 
     def __init__(self, graph, attr_dict=None):

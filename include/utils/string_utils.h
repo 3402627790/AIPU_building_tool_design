@@ -81,6 +81,8 @@ std::string int_to_hex(T i)
     return stream.str();
 }
 bool is_number(const std::string &s);
+std::string wrap_text(const std::string &text, size_t max_width, const std::string &break_chars = " ,.;)，。");
+
 }; // namespace utils
 
 #endif //!UTILS_STRING_UTILS_H

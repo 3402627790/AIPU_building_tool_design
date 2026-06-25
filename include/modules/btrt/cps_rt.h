@@ -52,14 +52,16 @@ extern "C"
     typedef cpsError_t (*cps_model_create_pfn_t)(cpsModel_t *, unsigned int);
     typedef cpsError_t (*cps_model_1arg_pfn_t)(cpsModel_t);
     // stream
-    cpsError_t cpsModelStreamCreate(cpsModel_t model, cpsStream_t *stream);
+    cpsError_t cpsModelStreamCreate(cpsModel_t model, cpsStream_t *stream, size_t size);
     cpsError_t cpsModelStreamDestroy(cpsModel_t model, cpsStream_t stream);
+    cpsError_t cpsModelGetStreamPtr(cpsStream_t stream, void** stream_ptr);
     cpsError_t cpsModelStreamPush(cpsStream_t stream, const cpsRawCommand_t *cmds, unsigned int len);
     cpsError_t cpsModelStreamPushHostCb(cpsStream_t stream, cpsCallback_t cb, void *context, cpsHostEvent_t event);
     cpsError_t cpsModelStreamWaitHostEvent(cpsStream_t stream, cpsHostEvent_t event);
-    typedef cpsError_t (*cps_model_stream_create_pfn_t)(cpsModel_t, cpsStream_t *);
+    typedef cpsError_t (*cps_model_stream_create_pfn_t)(cpsModel_t, cpsStream_t *, size_t);
     typedef cpsError_t (*cps_model_stream_destroy_pfn_t)(cpsModel_t, cpsStream_t);
     typedef cpsError_t (*cps_model_stream_push_pfn_t)(cpsStream_t, const cpsRawCommand_t *, unsigned int);
+    typedef cpsError_t (*cps_model_get_stream_ptr_pfn_t)(cpsStream_t, void**);
 
     // event
     cpsError_t cpsModelHostEventCreate(cpsHostEvent_t *event);

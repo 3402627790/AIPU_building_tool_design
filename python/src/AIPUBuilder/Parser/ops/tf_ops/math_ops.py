@@ -576,6 +576,14 @@ class TfErfOp(OpHasOneOutPort, TfOp):
         return {'type': 'Erf', 'version': 13}
 
 
+class TfErfcOp(OpHasOneOutPort, TfOp):
+    def infer_shape(self):
+        super(TfErfcOp, self).infer_shape()
+        inputs = self.get_input_tensors()
+        out_tensor = (1 - tf.math.erf(inputs[0]).numpy()).astype(inputs[0].dtype)
+        self.set_out_tensor(out_tensor)
+
+
 class TfExpOp(OpHasOneOutPort, TfOp):
     def infer_shape(self):
         super(TfExpOp, self).infer_shape()

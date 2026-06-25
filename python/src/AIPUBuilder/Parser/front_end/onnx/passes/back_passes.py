@@ -64,9 +64,9 @@ def adjust_5d_to_4d(graph):
                 old_dim = None
                 pre_dims = []
                 if node_obj.type == 'ArmBatchNorm':
-                    last_2_dim = np.gcd(int(np.prod(in_shape[1:-1])), 1920)
+                    last_2_dim = np.gcd(int(np.prod(in_shape[1:-1]).item()), 1920).item()
                     pre_dim = [in_shape[0],
-                               int(np.prod(in_shape[1:-1])) // last_2_dim,
+                               int(np.prod(in_shape[1:-1]).item()) // last_2_dim,
                                last_2_dim,
                                in_shape[-1]]
                     node_obj.axis = 3
@@ -92,14 +92,14 @@ def adjust_5d_to_4d(graph):
                             old_dim = []
                             bound_idx = diff_axes[0] if 0 in same_axes else same_axes[0]
                             pre0_shape = [
-                                int(np.prod(inp0_batch_shape[:bound_idx])),
-                                int(np.prod(inp0_batch_shape[bound_idx:])),
+                                int(np.prod(inp0_batch_shape[:bound_idx]).item()),
+                                int(np.prod(inp0_batch_shape[bound_idx:]).item()),
                                 input_shapes[0][-2],
                                 input_shapes[0][-1]
                             ]
                             pre1_shape = [
-                                int(np.prod(inp1_batch_shape[:bound_idx])),
-                                int(np.prod(inp1_batch_shape[bound_idx:])),
+                                int(np.prod(inp1_batch_shape[:bound_idx]).item()),
+                                int(np.prod(inp1_batch_shape[bound_idx:]).item()),
                                 input_shapes[1][-2],
                                 input_shapes[1][-1]
                             ]
@@ -119,7 +119,7 @@ def adjust_5d_to_4d(graph):
                     if pre_dim is None or idx != 0:
                         in_shape_idx = input_shapes[idx]
                         pre_dim = [in_shape_idx[0],
-                                   int(np.prod(in_shape_idx[1:-2])),
+                                   int(np.prod(in_shape_idx[1:-2]).item()),
                                    in_shape_idx[-2],
                                    in_shape_idx[-1]]
                     if pre_dims:
@@ -131,7 +131,7 @@ def adjust_5d_to_4d(graph):
                 if node_obj.type in ('ArmMatMul', 'ArmDiv'):
                     if old_dim is None:
                         old_dim = [output_shapes[0][0],
-                                   int(np.prod(output_shapes[0][1:-2])),
+                                   int(np.prod(output_shapes[0][1:-2]).item()),
                                    output_shapes[0][-2],
                                    output_shapes[0][-1]]
                 else:
@@ -2394,7 +2394,7 @@ def rename_conv(graph):
             continue
         conv_attr = conv_obj.copied_attr()
         if conv_obj.type == 'Conv':
-            if int(np.prod(conv_obj.weights.shape[0:2])) == conv_obj.group \
+            if int(np.prod(conv_obj.weights.shape[0:2]).item()) == conv_obj.group \
                     and conv_obj.group > 1 and len(conv_obj.weights.shape) == 4:
                 multiplier = conv_obj.weights.shape[0] // conv_obj.group
                 new_weights = np.transpose(
@@ -2956,7 +2956,7 @@ def rename_onehot(graph):
                 and is_const_node:
             matched = True
             graph.remove_edges_from(in_edges[1:])
-            depth = int(in_edges[1][2]['tensor'].value)
+            depth = in_edges[1][2]['tensor'].value.item()
             values = in_edges[2][2]['tensor'].value
             if values.dtype == 'float64':
                 values = np.array(values).astype(np.float32)
@@ -3518,7 +3518,7 @@ def rename_topk(graph):
                 if ver == 1:
                     k = topk_obj.k
                 else:
-                    k = int(in_consts[0][2]) if in_consts else -1
+                    k = int(in_consts[0][2].item()) if in_consts else -1
                 need_sorted = topk_obj.sorted if ver >= 11 else True
                 largest = topk_obj.largest if ver >= 11 else True
                 topk_attr = topk_obj.copied_attr()
@@ -4019,16 +4019,16 @@ def detection_post_process(graph, params):
                     out2_new_dim = [out2_out_shapes[0][0], pred_box_num, 4]
             elif (len(out1_out_shapes[0]) == 4 or len(out2_out_shapes[0]) == 4):
                 if out1_out_shapes[0][0] != out2_out_shapes[0][0] \
-                        or int(np.prod(out1_out_shapes[0][1:-1])) != int(np.prod(out2_out_shapes[0][1:-1])):
+                        or int(np.prod(out1_out_shapes[0][1:-1]).item()) != int(np.prod(out2_out_shapes[0][1:-1]).item()):
                     ERROR('[Parser]: Meets unexpected output shape of output nodes (%s, %s) for detection_post_process!' % (
                         out1, out2))
                     return
                 if len(out1_out_shapes[0]) == 4:
                     out1_new_dim = [out1_out_shapes[0][0], int(
-                        np.prod(out1_out_shapes[0][1:-1])), out1_out_shapes[0][-1]]
+                        np.prod(out1_out_shapes[0][1:-1]).item()), out1_out_shapes[0][-1]]
                 else:  # len(out2_out_shapes[0]) == 4
                     out2_new_dim = [out2_out_shapes[0][0], int(
-                        np.prod(out2_out_shapes[0][1:-1])), out2_out_shapes[0][-1]]
+                        np.prod(out2_out_shapes[0][1:-1]).item()), out2_out_shapes[0][-1]]
 
             if out1_new_dim is not None:
                 out1_out_edges = graph.sorted_out_edges(out1, data=True)
@@ -4345,7 +4345,7 @@ def detection_post_process(graph, params):
             if net_out_shapes \
                     and net_out_shapes[0] is not None \
                     and (net_out_shapes[0][1:3] in ([13, 13], [12, 12]) or net_out_shapes[0][2:4] in ([13, 13], [12, 12]))\
-                    and (int(np.prod(net_out_shapes[0][3:])) % anchors_num == 0 or net_out_shapes[0][1] % anchors_num == 0) \
+                    and (int(np.prod(net_out_shapes[0][3:]).item()) % anchors_num == 0 or net_out_shapes[0][1] % anchors_num == 0) \
                     and len(net_out_edges) == 1:
 
                 if net_out_shapes[0][2:4] in ([13, 13], [12, 12]):
@@ -4366,7 +4366,7 @@ def detection_post_process(graph, params):
                     net_out_edges = graph.sorted_out_edges(
                         transpose, data=True)
 
-                obj_num = int(np.prod(net_out_shapes[0][3:])) // anchors_num
+                obj_num = int(np.prod(net_out_shapes[0][3:]).item()) // anchors_num
                 class_num = obj_num - 5
 
                 if len(net_out_shapes[0]) == 4:
@@ -4643,7 +4643,7 @@ def detection_post_process(graph, params):
                     class_reshape_dim = [
                         1, *[s for s in class_shape if s != 1]]
                     box_num = class_reshape_dim[1]
-                    class_num = int(np.prod(box_shape)) // box_num // 4
+                    class_num = int(np.prod(box_shape).item()) // box_num // 4
                     box_reshape_dim = [1, box_num, class_num, 4]
                     roi_reshape_dim = [1] + roi_shape
 
@@ -6001,7 +6001,7 @@ def sink_transpose_through_special_reshape(graph):
                 else:
                     new_perm_adj.append(axis)
 
-            if int(np.prod(new_rs_shape)) != int(np.prod(reshape_in_shape)):
+            if int(np.prod(new_rs_shape).item()) != int(np.prod(reshape_in_shape).item()):
                 WARN(
                     f'[Parser]: Meets invalid Reshape({reshape}) dim {new_rs_shape} in sink_transpose_through_special_reshape!')
                 continue
@@ -6843,7 +6843,8 @@ def back_passes(graph, params):
 
     remove_useless_op(graph, ['ArmReduce', 'ArmTile', 'ArmCast'])
     remove_redundant_bn(graph)
-    remove_redundant_slice(graph)
+    while remove_redundant_slice(graph):
+        pass
     remove_special_transpose(graph)
     sink_transpose_through_special_reshape(graph)
     convert_special_reshape(graph)

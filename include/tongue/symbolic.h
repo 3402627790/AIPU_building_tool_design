@@ -475,6 +475,10 @@ bool compare(ExprPtr a, const std::vector<Symbol> &arga,
              bool relaxed_mode = false);
 
 sbe::Function expr_to_func(Expr expr, const std::string &func_name);
+std::vector<std::string> expr_to_cl_code(Expr expr,
+                                         const std::map<int, std::string> &func_args,
+                                         std::map<ExprPtr, std::string> &func_vars,
+                                         std::string &res);
 std::vector<std::string> expr_to_cl_code(Expr expr, std::string &res);
 std::string expr_to_cl_func(Expr expr, const std::string &func_name);
 

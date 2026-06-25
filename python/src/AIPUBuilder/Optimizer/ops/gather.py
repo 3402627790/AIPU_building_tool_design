@@ -20,8 +20,12 @@ def gather(self, *args):
     try:
         inp0_betensors = self.inputs[0].betensor.clone()
         axis = self.get_param('axis')
-        batch_dims = self.get_param('batch_dims')
+        if axis < 0:
+            axis += inp0_betensors.dim()
+        output_axis = axis
+        batch_dims = self.get_param('batch_dims', optional=True, default_value=0)
         indice_betensor = None
+        indice_dtype = None
         # if lut is in IR, one of gather's two inputs is from lut
         # if method =='idx_lut', indice from lut,or gather's object from lut
         if len(self.inputs) < 2:
@@ -30,16 +34,19 @@ def gather(self, *args):
                 OPT_FATAL("Please check your input or lut should be included in IR")
             else:
                 if lut_idx == 'idx_lut':
+                    indice_dtype = self.constants['lut'].dtype
                     indice_betensor = self.constants['lut'].betensor.long()
                 else:
                     inp0_betensors = self.constants['lut'].betensor
+                    indice_dtype = self.inputs[0].dtype
                     indice_betensor = self.inputs[0].betensor.long()
         else:
+            indice_dtype = self.inputs[1].dtype
             indice_betensor = self.inputs[1].betensor.clone().long()
         select_valid_index = False
         invalid_index = None
-        if indice_betensor.dtype in [Dtype.UINT32, Dtype.INT32, Dtype.INT64, Dtype.UINT64]:
-            _, invalid_index = dtype2range(indice_betensor.dtype)
+        if indice_dtype in [Dtype.UINT32, Dtype.INT32, Dtype.INT64, Dtype.UINT64]:
+            _, invalid_index = dtype2range(indice_dtype)
             select_valid_index = True
         virtual_batch = torch.prod(torch.tensor(
             inp0_betensors.shape[:batch_dims], device=indice_betensor.device)).int().item()
@@ -56,7 +63,7 @@ def gather(self, *args):
         # to get total indice length, it maybe be allocated in seveal dims, batch_dims is border
         # such as indice is [10,100,2], if batch_dims is 1, then [100,2] is indice,10 is batch
         outshape = newshape[0:axis] + indice_betensor.shape[batch_dims:] + newshape[axis + 1:]
-        temp_out = torch.zeros(outshape, device=indice_betensor.device)
+        temp_out = torch.zeros(outshape, device=inp0_betensors.device, dtype=inp0_betensors.dtype)
         newshape = (virtual_batch,) + indice_betensor.shape[batch_dims:]
 
         indice_betensor = indice_betensor.reshape(newshape)
@@ -68,12 +75,13 @@ def gather(self, *args):
             padding_value = 0
         for i in range(virtual_batch):
             # axis include dim, so need axis-1
-            if torch.max(indice_betensor) <= inp0_betensors.shape[axis]:
-                max_len = inp0_betensors[i].shape[axis - 1]
-                pos = indice_betensor[i].flatten() != max_len
-                inp_indice = indice_betensor[i].flatten()[pos].long()
+            max_len = inp0_betensors[i].shape[axis - 1]
+            current_indice = indice_betensor[i].flatten()
+            if current_indice.numel() > 0 and torch.max(current_indice) <= max_len:
+                pos = current_indice != max_len
+                inp_indice = current_indice[pos].long()
             else:
-                inp_indice = indice_betensor[i].flatten().long()
+                inp_indice = current_indice.long()
             # index_select not support negative index,so we need do some transformation
 
             neg_index = (inp_indice < 0) * inp0_betensors[i].shape[axis - 1]
@@ -82,9 +90,10 @@ def gather(self, *args):
 
             # Remove the invalid index
             if select_valid_index:
-                mask = torch.where(inp_indice == invalid_index)[0][0]
-                inp_indice = inp_indice[:mask]
-                valid_num = inp_indice.shape[0]
+                invalid_pos = torch.where(inp_indice == invalid_index)[0]
+                if invalid_pos.numel() > 0:
+                    inp_indice = inp_indice[:invalid_pos[0].item()]
+                    valid_num = inp_indice.shape[0]
             out = torch.index_select(inp0_betensors[i], axis - 1, inp_indice)
             padding[-1] = indice_len - valid_num
             out = torch.nn.functional.pad(out, padding, value=padding_value)
@@ -99,22 +108,35 @@ def gather(self, *args):
             ds_output_shape = self.attrs['ds_output_shape']
             ir_shape = ds_output_shape
         elif ir_shape != t_shape:
-            ir_shape[axis] = -1
+            if output_axis >= len(ir_shape):
+                OPT_FATAL("Please check your shape, axis is out of range for output shape")
+            ir_shape[output_axis] = -1
         self.outputs[0].betensor = temp_out.reshape(ir_shape)
 
     except Exception as e:
         OPT_DEBUG(f"try normal impl gather failed, now try the dynamic shape impl: {e}")
         inp0_betensors = self.inputs[0].betensor.clone()
-        inp1_betensors = self.inputs[1].betensor.clone()
-        index = inp1_betensors.long()
         axis = self.get_param('axis')
+        if axis < 0:
+            axis += inp0_betensors.dim()
+        if len(self.inputs) < 2:
+            lut_idx = self.get_param('method')
+            if 'lut' not in self.constants:
+                OPT_FATAL("Please check your input or lut should be included in IR")
+            if lut_idx == 'idx_lut':
+                index = self.constants['lut'].betensor.clone().long()
+            else:
+                inp0_betensors = self.constants['lut'].betensor.clone()
+                index = self.inputs[0].betensor.clone().long()
+        else:
+            index = self.inputs[1].betensor.clone().long()
         # for exposing potential IR errors, do not clamp the index
         # index = index.clamp(-inp0_betensors.shape[axis], inp0_betensors.shape[axis]-1)
         if axis != 0:
             self.outputs[0].betensor = torch.index_select(inp0_betensors, axis, index)
         else:
-            if inp1_betensors.numel() == 1 and len(self.inputs[0].ir_shape) - len(self.outputs[0].ir_shape) == 1:
-                index = inp1_betensors.item()
+            if index.numel() == 1 and len(self.inputs[0].ir_shape) - len(self.outputs[0].ir_shape) == 1:
+                index = index.item()
             self.outputs[0].betensor = inp0_betensors[index]
 
     return self.outputs[0].betensor

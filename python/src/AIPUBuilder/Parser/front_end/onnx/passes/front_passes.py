@@ -317,7 +317,7 @@ def update_parent_quant_info(graph):
 
 
 def uplift_quant_through_concat(graph):
-    '''Convert x1/x2/...->Concat->QuantizeLinear to the following pattern so that
+    r'''Convert x1/x2/...->Concat->QuantizeLinear to the following pattern so that
     QuantizeLinear can merge with other nodes before Concat(x1/x2/...):
           x1             x2           ...
           |              |            ...
@@ -790,10 +790,10 @@ def merge_qgemm(graph):
             out_attr['tensor'].activation_quantization_axis = obj_dict['y_quant'].axis
             graph.add_edge(last_node, dst, **out_attr)
         if len(x_dequant_in_shapes[0]) != 2 and len(y_quant_out_shapes[0]) != 2:
-            pre_shape = [int(np.prod(x_dequant_in_shapes[0][:-1])), x_dequant_in_shapes[0][-1]]
+            pre_shape = [int(np.prod(x_dequant_in_shapes[0][:-1]).item()), x_dequant_in_shapes[0][-1]]
             insert_reshape(graph, src, m['gemm'], new_in_attr, pre_shape, quantize=True)
             post_shape = y_quant_out_shapes[0]
-            post_new_shape = [int(np.prod(y_quant_out_shapes[0][:-1])), y_quant_out_shapes[0][-1]]
+            post_new_shape = [int(np.prod(y_quant_out_shapes[0][:-1]).item()), y_quant_out_shapes[0][-1]]
             last_node = insert_reshape_after(graph, last_node, post_shape, post_new_shape, quantize=True)
 
         if m['y_quant'] in graph._attr['output_names']:

@@ -17,14 +17,19 @@
 
 #include "builder/mq_ir_cache.h"
 
+#include "builder/lowering/lowering.h"
 #include "core/any.h"
+#include "core/config.h"
 #include "core/constants.h"
 #include "core/node.h"
+#include "core/subgraph.h"
 #include "core/tensor.h"
 #include "utils/utils.h"
 
+#include <cstdint>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -34,6 +39,33 @@ namespace aipubt
 namespace
 {
 
+class BoolConfigGuard
+{
+public:
+    BoolConfigGuard(const std::string &key, bool value) : m_key(key), m_had_value(BuilderConfig::exist(key))
+    {
+        m_old_value = BuilderConfig::get<bool>(key);
+        BuilderConfig::set(key, value);
+    }
+
+    ~BoolConfigGuard()
+    {
+        if (m_had_value)
+        {
+            BuilderConfig::set(m_key, m_old_value);
+        }
+        else
+        {
+            BuilderConfig::erase(m_key);
+        }
+    }
+
+private:
+    std::string m_key;
+    bool m_had_value = false;
+    bool m_old_value = false;
+};
+
 template <typename T>
 void set_typed_json_attr(const std::string& key, const std::string& type, const T& value,
                          utils::JsonObject& json_obj)
@@ -42,6 +74,78 @@ void set_typed_json_attr(const std::string& key, const std::string& type, const 
     attr_obj["type"] = type;
     attr_obj["value"] = value;
     json_obj[key] = attr_obj;
+}
+
+utils::JsonObject serialize_layout(DataLayout layout)
+{
+    return datalayout_to_string(layout);
+}
+
+utils::JsonObject serialize_layout_list(const LayoutList &layouts)
+{
+    utils::JsonObject arr(utils::JsonObject::ARR);
+    for (auto layout : layouts)
+    {
+        arr.push_back(serialize_layout(layout));
+    }
+    return arr;
+}
+
+utils::JsonObject serialize_layout_combinations(const LayoutCombinations &layout_combinations)
+{
+    utils::JsonObject arr(utils::JsonObject::ARR);
+    for (const auto &layouts : layout_combinations)
+    {
+        arr.push_back(serialize_layout_list(layouts));
+    }
+    return arr;
+}
+
+bool deserialize_layout(const utils::JsonObject &obj, DataLayout &layout)
+{
+    if (obj.t == utils::JsonObject::STR)
+    {
+        layout = string_to_datalayout((std::string)obj);
+        return layout != DataLayout_UnSupport;
+    }
+    if (obj.t == utils::JsonObject::INT)
+    {
+        layout = static_cast<DataLayout>((int)obj);
+        return true;
+    }
+    return false;
+}
+
+bool deserialize_layout_list(const utils::JsonObject &obj, LayoutList &layouts)
+{
+    if (obj.t != utils::JsonObject::ARR)
+        return false;
+
+    layouts.clear();
+    for (const auto &item : obj.array())
+    {
+        DataLayout layout = DataLayout_UnSupport;
+        if (!deserialize_layout(item, layout))
+            return false;
+        layouts.push_back(layout);
+    }
+    return true;
+}
+
+bool deserialize_layout_combinations(const utils::JsonObject &obj, LayoutCombinations &layout_combinations)
+{
+    if (obj.t != utils::JsonObject::ARR)
+        return false;
+
+    layout_combinations.clear();
+    for (const auto &item : obj.array())
+    {
+        LayoutList layouts;
+        if (!deserialize_layout_list(item, layouts))
+            return false;
+        layout_combinations.push_back(layouts);
+    }
+    return true;
 }
 
 bool get_json_object_field(const utils::JsonObject& object, const std::string& key, utils::JsonObject& value)
@@ -62,8 +166,350 @@ bool get_json_object_field(const utils::JsonObject& object, const std::string& k
     return false;
 }
 
+bool has_json_object_field(const utils::JsonObject& object, const std::string& key)
+{
+    utils::JsonObject value;
+    return get_json_object_field(object, key, value);
+}
+
+void dump_graph_io_tensor_ptrs(GraphPtr graph, const std::string &tag)
+{
+    if (!graph)
+        return;
+
+    auto input_tensors = graph->get_input_tensors();
+    INFO() << tag << ": input_tensors size = " << input_tensors.size();
+    for (size_t i = 0; i < input_tensors.size(); ++i)
+    {
+        auto tensor = input_tensors[i];
+        INFO() << tag << ": input_tensors[" << i << "] name = "
+               << (tensor ? tensor->name() : std::string("<null>"))
+               << ", ptr = " << tensor.get();
+    }
+
+    auto output_tensors = graph->get_output_tensors();
+    INFO() << tag << ": output_tensors size = " << output_tensors.size();
+    for (size_t i = 0; i < output_tensors.size(); ++i)
+    {
+        auto tensor = output_tensors[i];
+        INFO() << tag << ": output_tensors[" << i << "] name = "
+               << (tensor ? tensor->name() : std::string("<null>"))
+               << ", ptr = " << tensor.get();
+    }
+}
+
+std::string pointer_id(const std::string &kind, const void *ptr)
+{
+    std::ostringstream oss;
+    oss << kind << ":0x" << std::hex << reinterpret_cast<uintptr_t>(ptr);
+    return oss.str();
+}
+
+utils::JsonObject make_pointer_ref(const std::string &id)
+{
+    utils::JsonObject ref_obj(utils::JsonObject::OBJ);
+    ref_obj["kind"] = "pointer";
+    ref_obj["id"] = id;
+    return ref_obj;
+}
+
+bool is_pointer_ref(utils::JsonObject obj)
+{
+    if (obj.t != utils::JsonObject::OBJ || !obj.exist("kind") || !obj.exist("id"))
+        return false;
+    return obj["kind"].t == utils::JsonObject::STR &&
+           obj["id"].t == utils::JsonObject::STR &&
+           (std::string)obj["kind"] == "pointer";
+}
+
+NodePtr find_node_by_name(GraphPtr graph, const std::string &node_name)
+{
+    if (!graph)
+        return nullptr;
+    for (auto node : graph->nodes())
+    {
+        if (node->name() == node_name)
+            return node;
+    }
+    return nullptr;
+}
+
+TensorPtr find_output_tensor(NodePtr node, utils::JsonObject tensor_json);
+TensorPtr find_constant_tensor(NodePtr node, utils::JsonObject tensor_json);
+TensorPtr find_placeholder_tensor(NodePtr node, utils::JsonObject tensor_json);
+
+class PointerRefTable
+{
+public:
+    explicit PointerRefTable(GraphPtr graph = nullptr) : m_graph(graph)
+    {
+    }
+
+    std::string add_tensor(TensorPtr tensor)
+    {
+        if (!tensor)
+            return "";
+
+        std::string id = pointer_id("tensor", tensor.get());
+        if (m_objects.count(id))
+            return id;
+        m_tensors[id] = tensor;
+
+        utils::JsonObject obj(utils::JsonObject::OBJ);
+        obj["object_kind"] = "tensor";
+        obj["tensor_name"] = tensor->name();
+
+        if (m_graph)
+        {
+            for (const auto &kv : m_graph->global_tensors())
+            {
+                if (kv.second == tensor)
+                {
+                    obj["role"] = "global";
+                    obj["global_key"] = kv.first;
+                    m_objects[id] = obj;
+                    return id;
+                }
+            }
+        }
+
+        auto owner = tensor->node();
+        if (owner)
+        {
+            obj["owner_node"] = owner->name();
+
+            for (size_t i = 0; i < owner->outputs().size(); ++i)
+            {
+                if (owner->outputs()[i] == tensor)
+                {
+                    obj["role"] = "output";
+                    obj["tensor_index"] = (int)i;
+                    m_objects[id] = obj;
+                    return id;
+                }
+            }
+
+            for (const auto &kv : owner->constants())
+            {
+                if (kv.second == tensor)
+                {
+                    obj["role"] = "constant";
+                    obj["constant_key"] = kv.first;
+                    m_objects[id] = obj;
+                    return id;
+                }
+            }
+
+            for (size_t i = 0; i < owner->placeholders().size(); ++i)
+            {
+                if (owner->placeholders()[i] == tensor)
+                {
+                    obj["role"] = "placeholder";
+                    obj["tensor_index"] = (int)i;
+                    m_objects[id] = obj;
+                    return id;
+                }
+            }
+        }
+
+        obj["role"] = "named";
+        m_objects[id] = obj;
+        return id;
+    }
+
+    utils::JsonObject tensor_ref(TensorPtr tensor)
+    {
+        return make_pointer_ref(add_tensor(tensor));
+    }
+
+    utils::JsonObject to_json() const
+    {
+        utils::JsonObject obj(utils::JsonObject::OBJ);
+        for (const auto &kv : m_objects)
+        {
+            obj[kv.first] = kv.second;
+        }
+        return obj;
+    }
+
+    utils::JsonObject serialize_payloads(const std::string &bin_path) const
+    {
+        utils::JsonObject payloads(utils::JsonObject::OBJ);
+        std::ofstream ofs;
+        std::map<char *, utils::JsonObject> data_map;
+        int payload_count = 0;
+
+        for (const auto &kv : m_tensors)
+        {
+            auto tensor = kv.second;
+            if (!tensor)
+                continue;
+
+            auto obj_it = m_objects.find(kv.first);
+            if (obj_it != m_objects.end())
+            {
+                const auto &obj = obj_it->second;
+                utils::JsonObject role;
+                if (get_json_object_field(obj, "role", role) && role.t == utils::JsonObject::STR &&
+                    (std::string)role == "constant")
+                {
+                    continue;
+                }
+            }
+
+            char *data = tensor->data<char>();
+            size_t size = tensor->mem_size();
+            if (!data || size == 0)
+                continue;
+
+            utils::JsonObject data_obj(utils::JsonObject::OBJ);
+            auto data_it = data_map.find(data);
+            if (data_it != data_map.end())
+            {
+                data_obj = data_it->second;
+            }
+            else
+            {
+                if (!ofs.is_open())
+                {
+                    ofs.open(bin_path, std::ios::binary);
+                    if (!ofs.is_open())
+                    {
+                        ERROR() << "Failed to open tensor payload file for writing: " << bin_path;
+                        return payloads;
+                    }
+                }
+
+                int64_t offset = (int64_t)ofs.tellp();
+                ofs.write(data, size);
+                if (ofs.fail())
+                {
+                    WARN() << "Failed to write tensor payload for " << tensor->name();
+                    continue;
+                }
+
+                data_obj["file"] = "lowered.payload.bin";
+                data_obj["offset"] = offset;
+                data_obj["size"] = (int64_t)size;
+                data_map[data] = data_obj;
+                payload_count++;
+            }
+
+            utils::JsonObject payload(utils::JsonObject::OBJ);
+            payload["object_kind"] = "tensor";
+            payload["tensor_name"] = tensor->name();
+            payload["data"] = data_obj;
+            payloads[kv.first] = payload;
+        }
+
+        if (payload_count > 0)
+        {
+            INFO() << "Saved " << payload_count << " tensor payloads to " << bin_path;
+        }
+        return payloads;
+    }
+
+private:
+    GraphPtr m_graph;
+    std::map<std::string, utils::JsonObject> m_objects;
+    std::map<std::string, TensorPtr> m_tensors;
+};
+
+TensorPtr resolve_tensor_by_desc(GraphPtr graph, utils::JsonObject desc)
+{
+    if (!graph || desc.t != utils::JsonObject::OBJ)
+        return nullptr;
+
+    if (desc.exist("role") && desc["role"].t == utils::JsonObject::STR &&
+        (std::string)desc["role"] == "global" &&
+        desc.exist("global_key") && desc["global_key"].t == utils::JsonObject::STR)
+    {
+        std::string key = (std::string)desc["global_key"];
+        if (graph->global_tensors().count(key))
+            return graph->global_tensors()[key];
+    }
+
+    if (desc.exist("owner_node") && desc["owner_node"].t == utils::JsonObject::STR)
+    {
+        auto node = find_node_by_name(graph, (std::string)desc["owner_node"]);
+        if (node && desc.exist("role") && desc["role"].t == utils::JsonObject::STR)
+        {
+            std::string role = (std::string)desc["role"];
+            if (role == "output")
+                return find_output_tensor(node, desc);
+            if (role == "constant")
+                return find_constant_tensor(node, desc);
+            if (role == "placeholder")
+                return find_placeholder_tensor(node, desc);
+        }
+    }
+
+    if (desc.exist("tensor_name") && desc["tensor_name"].t == utils::JsonObject::STR)
+    {
+        std::string tensor_name = (std::string)desc["tensor_name"];
+        for (const auto &kv : graph->global_tensors())
+        {
+            if (kv.second && kv.second->name() == tensor_name)
+                return kv.second;
+        }
+        for (auto node : graph->nodes())
+        {
+            for (auto tensor : node->outputs())
+            {
+                if (tensor->name() == tensor_name)
+                    return tensor;
+            }
+            for (auto &kv : node->constants())
+            {
+                if (kv.second->name() == tensor_name)
+                    return kv.second;
+            }
+            for (auto tensor : node->placeholders())
+            {
+                if (tensor->name() == tensor_name)
+                    return tensor;
+            }
+        }
+    }
+
+    return nullptr;
+}
+
+TensorPtr resolve_tensor_ref(GraphPtr graph, utils::JsonObject object_table, utils::JsonObject ref)
+{
+    if (!is_pointer_ref(ref) || object_table.t != utils::JsonObject::OBJ)
+        return nullptr;
+
+    std::string id = (std::string)ref["id"];
+    if (!object_table.exist(id))
+        return nullptr;
+
+    return resolve_tensor_by_desc(graph, object_table[id]);
+}
+
+TensorPtr resolve_tensor_by_desc_in_graphs(GraphPtr graph, utils::JsonObject desc)
+{
+    auto tensor = resolve_tensor_by_desc(graph, desc);
+    if (tensor)
+        return tensor;
+
+    if (!graph)
+        return nullptr;
+
+    for (auto subgraph : graph->get_all_graphs())
+    {
+        if (subgraph == graph)
+            continue;
+        tensor = resolve_tensor_by_desc(subgraph, desc);
+        if (tensor)
+            return tensor;
+    }
+
+    return nullptr;
+}
+
 // Helper function: serialize an Any value to JsonObject
-bool serialize_any_to_json(const std::string& key, const Any& value, utils::JsonObject& json_obj)
+bool serialize_any_to_json(const std::string& key, const Any& value, utils::JsonObject& json_obj, PointerRefTable *ref_table = nullptr)
 {
     if (!value.value())
         return false;
@@ -75,9 +521,24 @@ bool serialize_any_to_json(const std::string& key, const Any& value, utils::Json
         set_typed_json_attr(key, "int", value.cast<int>(), json_obj);
         return true;
     }
+    else if (type_id == GET_ANY_TYPEID<int32_t>())
+    {
+        set_typed_json_attr(key, "int32_t", value.cast<int32_t>(), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<uint32_t>())
+    {
+        set_typed_json_attr(key, "uint32_t", value.cast<uint32_t>(), json_obj);
+        return true;
+    }
     else if (type_id == GET_ANY_TYPEID<int64_t>())
     {
         set_typed_json_attr(key, "int64_t", value.cast<int64_t>(), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<uint64_t>())
+    {
+        set_typed_json_attr(key, "uint64_t", (int64_t)value.cast<uint64_t>(), json_obj);
         return true;
     }
     else if (type_id == GET_ANY_TYPEID<float>())
@@ -127,13 +588,35 @@ bool serialize_any_to_json(const std::string& key, const Any& value, utils::Json
         set_typed_json_attr(key, "vector<string>", arr, json_obj);
         return true;
     }
+    else if (type_id == GET_ANY_TYPEID<DataLayout>())
+    {
+        set_typed_json_attr(key, "DataLayout", serialize_layout(value.cast<DataLayout>()), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<LayoutList>())
+    {
+        set_typed_json_attr(key, "LayoutList", serialize_layout_list(value.cast<LayoutList>()), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<LayoutCombinations>())
+    {
+        set_typed_json_attr(key, "LayoutCombinations", serialize_layout_combinations(value.cast<LayoutCombinations>()), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<TensorPtr>() && ref_table)
+    {
+        set_typed_json_attr(key, "TensorPtr", ref_table->tensor_ref(value.cast<TensorPtr>()), json_obj);
+        return true;
+    }
 
     return false;
 }
 
 // Helper function: deserialize typed JsonObject to Any and set as node/tensor attribute
 bool deserialize_json_to_any(const std::string& key, const utils::JsonObject& json_value,
-                              std::function<void(const std::string&, const Any&)> set_attr_func)
+                              std::function<void(const std::string&, const Any&)> set_attr_func,
+                              GraphPtr graph = nullptr,
+                              const utils::JsonObject *object_table = nullptr)
 {
     utils::JsonObject type_obj;
     utils::JsonObject value_obj;
@@ -150,9 +633,24 @@ bool deserialize_json_to_any(const std::string& key, const utils::JsonObject& js
         set_attr_func(key, Any((int)value_obj));
         return true;
     }
+    else if (type == "int32_t")
+    {
+        set_attr_func(key, Any((int32_t)(int)value_obj));
+        return true;
+    }
+    else if (type == "uint32_t")
+    {
+        set_attr_func(key, Any((uint32_t)(int)value_obj));
+        return true;
+    }
     else if (type == "int64_t")
     {
         set_attr_func(key, Any((int64_t)value_obj));
+        return true;
+    }
+    else if (type == "uint64_t")
+    {
+        set_attr_func(key, Any((uint64_t)(int64_t)value_obj));
         return true;
     }
     else if (type == "float")
@@ -213,89 +711,750 @@ bool deserialize_json_to_any(const std::string& key, const utils::JsonObject& js
         set_attr_func(key, Any(vec));
         return true;
     }
+    else if (type == "DataLayout")
+    {
+        DataLayout layout = DataLayout_UnSupport;
+        if (!deserialize_layout(value_obj, layout))
+            return false;
+        set_attr_func(key, Any(layout));
+        return true;
+    }
+    else if (type == "LayoutList")
+    {
+        LayoutList layouts;
+        if (!deserialize_layout_list(value_obj, layouts))
+            return false;
+        set_attr_func(key, Any(layouts));
+        return true;
+    }
+    else if (type == "LayoutCombinations")
+    {
+        LayoutCombinations layout_combinations;
+        if (!deserialize_layout_combinations(value_obj, layout_combinations))
+            return false;
+        set_attr_func(key, Any(layout_combinations));
+        return true;
+    }
+    else if (type == "TensorPtr")
+    {
+        if (!graph || !object_table)
+            return false;
+        auto tensor = resolve_tensor_ref(graph, *object_table, value_obj);
+        if (!tensor)
+            return false;
+        set_attr_func(key, Any(tensor));
+        return true;
+    }
 
     return false;
 }
 
-// Save all node and tensor attributes to a JSON file
-bool save_graph_attributes(GraphPtr graph, const std::string& json_path)
+int serialize_attrs_to_json(const std::map<std::string, Any> &attrs, utils::JsonObject &json_obj, PointerRefTable *ref_table = nullptr)
 {
-    utils::JsonObject root(utils::JsonObject::OBJ);
+    int attr_count = 0;
+    for (const auto &attr : attrs)
+    {
+        if (serialize_any_to_json(attr.first, attr.second, json_obj, ref_table))
+        {
+            attr_count++;
+        }
+    }
+    return attr_count;
+}
+
+int deserialize_attrs_from_json(const utils::JsonObject &json_obj,
+                                std::function<void(const std::string&, const Any&)> set_attr_func,
+                                GraphPtr graph = nullptr,
+                                const utils::JsonObject *object_table = nullptr)
+{
+    if (json_obj.t != utils::JsonObject::OBJ)
+        return 0;
+
+    int attr_count = 0;
+    for (const auto &kv : json_obj.obj())
+    {
+        if (deserialize_json_to_any(kv.first, kv.second, set_attr_func, graph, object_table))
+        {
+            attr_count++;
+        }
+    }
+    return attr_count;
+}
+
+utils::JsonObject serialize_tensor_metadata(TensorPtr tensor, size_t tensor_index, int &tensor_attr_count, PointerRefTable *ref_table = nullptr)
+{
+    utils::JsonObject tensor_obj(utils::JsonObject::OBJ);
+    tensor_obj["tensor_name"] = tensor->name();
+    tensor_obj["tensor_index"] = (int)tensor_index;
+    tensor_obj["layout"] = serialize_layout(tensor->shape().layout());
+    if (ref_table)
+    {
+        tensor_obj["pointer_ref"] = ref_table->tensor_ref(tensor);
+    }
+
+    utils::JsonObject tensor_attrs(utils::JsonObject::OBJ);
+    int count = serialize_attrs_to_json(tensor->attrs(), tensor_attrs, ref_table);
+    if (count > 0)
+    {
+        tensor_obj["tensor_attrs"] = tensor_attrs;
+        tensor_attr_count += count;
+    }
+
+    return tensor_obj;
+}
+
+utils::JsonObject serialize_node_metadata(NodePtr node, int &node_attr_count, int &tensor_attr_count, PointerRefTable *ref_table = nullptr)
+{
+    utils::JsonObject node_obj(utils::JsonObject::OBJ);
+    node_obj["node_name"] = node->name();
+    if (node->graph())
+    {
+        node_obj["graph_name"] = node->graph()->name();
+    }
+    node_obj["op_type"] = optype_to_string(node->type());
+    if (node->attrs().count("layer_id"))
+    {
+        node_obj["layer_id"] = node->get_attr<int>("layer_id");
+    }
+
+    utils::JsonObject node_attrs(utils::JsonObject::OBJ);
+    int count = serialize_attrs_to_json(node->attrs(), node_attrs, ref_table);
+    if (count > 0)
+    {
+        node_obj["node_attrs"] = node_attrs;
+        node_attr_count += count;
+    }
+
+    utils::JsonObject tensors_arr(utils::JsonObject::ARR);
+    for (size_t i = 0; i < node->outputs().size(); ++i)
+    {
+        auto tensor_obj = serialize_tensor_metadata(node->outputs()[i], i, tensor_attr_count, ref_table);
+        if (has_json_object_field(tensor_obj, "tensor_attrs") || has_json_object_field(tensor_obj, "layout"))
+        {
+            tensors_arr.push_back(tensor_obj);
+        }
+    }
+    if (!tensors_arr.array().empty())
+    {
+        node_obj["output_tensors"] = tensors_arr;
+    }
+
+    utils::JsonObject constants_arr(utils::JsonObject::ARR);
+    int constant_index = 0;
+    for (const auto &kv : node->constants())
+    {
+        auto tensor_obj = serialize_tensor_metadata(kv.second, constant_index++, tensor_attr_count, ref_table);
+        tensor_obj["constant_key"] = kv.first;
+        constants_arr.push_back(tensor_obj);
+    }
+    if (!constants_arr.array().empty())
+    {
+        node_obj["constant_tensors"] = constants_arr;
+    }
+
+    utils::JsonObject placeholders_arr(utils::JsonObject::ARR);
+    for (size_t i = 0; i < node->placeholders().size(); ++i)
+    {
+        placeholders_arr.push_back(serialize_tensor_metadata(node->placeholders()[i], i, tensor_attr_count, ref_table));
+    }
+    if (!placeholders_arr.array().empty())
+    {
+        node_obj["placeholder_tensors"] = placeholders_arr;
+    }
+
+    return node_obj;
+}
+
+TensorPtr find_output_tensor(NodePtr node, utils::JsonObject tensor_json)
+{
+    if (tensor_json.t != utils::JsonObject::OBJ)
+        return nullptr;
+
+    if (tensor_json.exist("tensor_name"))
+    {
+        std::string tensor_name = (std::string)tensor_json["tensor_name"];
+        for (auto tensor : node->outputs())
+        {
+            if (tensor->name() == tensor_name)
+            {
+                return tensor;
+            }
+        }
+    }
+
+    if (tensor_json.exist("tensor_index"))
+    {
+        int tensor_index = tensor_json["tensor_index"];
+        if (tensor_index >= 0 && tensor_index < (int)node->outputs().size())
+        {
+            return node->outputs()[tensor_index];
+        }
+    }
+
+    return nullptr;
+}
+
+TensorPtr find_constant_tensor(NodePtr node, utils::JsonObject tensor_json)
+{
+    if (tensor_json.t != utils::JsonObject::OBJ)
+        return nullptr;
+
+    if (tensor_json.exist("constant_key"))
+    {
+        std::string key = (std::string)tensor_json["constant_key"];
+        if (node->constants().count(key))
+        {
+            return node->constants()[key];
+        }
+    }
+
+    if (tensor_json.exist("tensor_name"))
+    {
+        std::string tensor_name = (std::string)tensor_json["tensor_name"];
+        for (auto &kv : node->constants())
+        {
+            if (kv.second->name() == tensor_name)
+            {
+                return kv.second;
+            }
+        }
+    }
+
+    return nullptr;
+}
+
+TensorPtr find_placeholder_tensor(NodePtr node, utils::JsonObject tensor_json)
+{
+    if (tensor_json.t != utils::JsonObject::OBJ)
+        return nullptr;
+
+    if (tensor_json.exist("tensor_name"))
+    {
+        std::string tensor_name = (std::string)tensor_json["tensor_name"];
+        for (auto tensor : node->placeholders())
+        {
+            if (tensor->name() == tensor_name)
+            {
+                return tensor;
+            }
+        }
+    }
+
+    if (tensor_json.exist("tensor_index"))
+    {
+        int tensor_index = tensor_json["tensor_index"];
+        if (tensor_index >= 0 && tensor_index < (int)node->placeholders().size())
+        {
+            return node->placeholders()[tensor_index];
+        }
+    }
+
+    return nullptr;
+}
+
+utils::JsonObject serialize_tensor_ref_list(const std::vector<TensorPtr> &tensors, PointerRefTable &ref_table)
+{
+    utils::JsonObject arr(utils::JsonObject::ARR);
+    for (auto tensor : tensors)
+    {
+        arr.push_back(ref_table.tensor_ref(tensor));
+    }
+    return arr;
+}
+
+utils::JsonObject serialize_graph_references(GraphPtr graph, PointerRefTable &ref_table)
+{
+    utils::JsonObject refs(utils::JsonObject::OBJ);
+    refs["input_tensors"] = serialize_tensor_ref_list(graph->get_input_tensors(), ref_table);
+    refs["output_tensors"] = serialize_tensor_ref_list(graph->get_output_tensors(), ref_table);
+
+    utils::JsonObject globals(utils::JsonObject::OBJ);
+    for (const auto &kv : graph->global_tensors())
+    {
+        if (kv.second)
+            globals[kv.first] = ref_table.tensor_ref(kv.second);
+    }
+    refs["global_tensors"] = globals;
+    return refs;
+}
+
+void restore_tensor_ref_list(GraphPtr graph,
+                             utils::JsonObject object_table,
+                             utils::JsonObject refs,
+                             std::vector<TensorPtr> &tensors)
+{
+    if (refs.t != utils::JsonObject::ARR)
+        return;
+
+    for (const auto &ref : refs.array())
+    {
+        auto tensor = resolve_tensor_ref(graph, object_table, ref);
+        if (tensor)
+            tensors.push_back(tensor);
+    }
+}
+
+void restore_graph_references(GraphPtr graph, utils::JsonObject graph_json, const utils::JsonObject *object_table)
+{
+    if (!graph || !object_table || graph_json.t != utils::JsonObject::OBJ || !graph_json.exist("graph_references"))
+        return;
+
+    auto refs = graph_json["graph_references"];
+    if (refs.t != utils::JsonObject::OBJ)
+        return;
+
+    if (refs.exist("input_tensors"))
+    {
+        std::vector<TensorPtr> tensors;
+        restore_tensor_ref_list(graph, *object_table, refs["input_tensors"], tensors);
+        if (!tensors.empty())
+            graph->record_input_tensors(tensors);
+    }
+    if (refs.exist("output_tensors"))
+    {
+        std::vector<TensorPtr> tensors;
+        restore_tensor_ref_list(graph, *object_table, refs["output_tensors"], tensors);
+        if (!tensors.empty())
+            graph->record_output_tensors(tensors);
+    }
+    if (refs.exist("global_tensors") && refs["global_tensors"].t == utils::JsonObject::OBJ)
+    {
+        for (const auto &kv : refs["global_tensors"].obj())
+        {
+            auto tensor = resolve_tensor_ref(graph, *object_table, kv.second);
+            if (tensor)
+                graph->global_tensors()[kv.first] = tensor;
+        }
+    }
+}
+
+int restore_object_payloads(GraphPtr graph,
+                            utils::JsonObject object_table,
+                            utils::JsonObject object_payloads,
+                            const std::string &bin_path)
+{
+    if (!graph || object_table.t != utils::JsonObject::OBJ || object_payloads.t != utils::JsonObject::OBJ)
+        return 0;
+
+    std::ifstream ifs(bin_path, std::ios::binary);
+    if (!ifs.is_open())
+    {
+        WARN() << "mq_load_ir: tensor payload file not found, skipping: " << bin_path;
+        return 0;
+    }
+
+    int restored = 0;
+    for (const auto &kv : object_payloads.obj())
+    {
+        const std::string &id = kv.first;
+        if (!object_table.exist(id))
+            continue;
+
+        utils::JsonObject data_obj;
+        if (!get_json_object_field(kv.second, "data", data_obj) || data_obj.t != utils::JsonObject::OBJ)
+            continue;
+
+        utils::JsonObject offset_obj;
+        utils::JsonObject size_obj;
+        if (!get_json_object_field(data_obj, "offset", offset_obj) ||
+            !get_json_object_field(data_obj, "size", size_obj) ||
+            offset_obj.t != utils::JsonObject::INT ||
+            size_obj.t != utils::JsonObject::INT)
+        {
+            continue;
+        }
+
+        int64_t offset = offset_obj;
+        int64_t size = size_obj;
+        if (offset < 0 || size <= 0)
+            continue;
+
+        auto tensor = resolve_tensor_by_desc_in_graphs(graph, object_table[id]);
+        if (!tensor)
+        {
+            WARN() << "mq_load_ir: cannot resolve tensor payload ref " << id;
+            continue;
+        }
+
+        size_t data_size = (size_t)size;
+        char *data = new char[data_size];
+        ifs.seekg(offset);
+        ifs.read(data, data_size);
+        if (ifs.fail())
+        {
+            WARN() << "mq_load_ir: failed to read tensor payload for " << tensor->name();
+            delete[] data;
+            ifs.clear();
+            continue;
+        }
+
+        tensor->set_data(data, (uint32_t)data_size);
+        restored++;
+    }
+
+    INFO() << "mq_load_ir: restored " << restored << " tensor payloads from " << bin_path;
+    return restored;
+}
+
+int restore_tensor_metadata(TensorPtr tensor, utils::JsonObject tensor_json, GraphPtr graph, const utils::JsonObject *object_table)
+{
+    if (!tensor || tensor_json.t != utils::JsonObject::OBJ)
+        return 0;
+
+    if (tensor_json.exist("layout"))
+    {
+        DataLayout layout = DataLayout_UnSupport;
+        if (deserialize_layout(tensor_json["layout"], layout))
+        {
+            tensor->shape().set_layout(layout);
+        }
+    }
+
+    if (!tensor_json.exist("tensor_attrs"))
+        return 0;
+
+    return deserialize_attrs_from_json(tensor_json["tensor_attrs"],
+        [&tensor](const std::string& key, const Any& value) {
+            tensor->set_attr(key, value);
+        }, graph, object_table);
+}
+
+utils::JsonObject serialize_graph_metadata(GraphPtr graph, int &graph_attr_count, int &node_attr_count, int &tensor_attr_count, PointerRefTable &ref_table);
+
+utils::JsonObject serialize_subgraph_metadata(GraphPtr graph, int &graph_attr_count, int &node_attr_count, int &tensor_attr_count, PointerRefTable &ref_table)
+{
+    return serialize_graph_metadata(graph, graph_attr_count, node_attr_count, tensor_attr_count, ref_table);
+}
+
+void add_subgraph_metadata(utils::JsonObject &node_obj, NodePtr node, int &graph_attr_count, int &node_attr_count, int &tensor_attr_count, PointerRefTable &ref_table)
+{
+    auto sgn = SubGraphNode::from_node(node);
+    if (!sgn)
+    {
+        return;
+    }
+    node_obj["subgraph"] = serialize_subgraph_metadata(sgn->subgraph(), graph_attr_count, node_attr_count, tensor_attr_count, ref_table);
+}
+
+utils::JsonObject serialize_graph_metadata(GraphPtr graph, int &graph_attr_count, int &node_attr_count, int &tensor_attr_count, PointerRefTable &ref_table)
+{
+    utils::JsonObject graph_obj(utils::JsonObject::OBJ);
     utils::JsonObject nodes_arr(utils::JsonObject::ARR);
 
-    int total_node_attrs = 0;
-    int total_tensor_attrs = 0;
+    graph_obj["graph_name"] = graph->name();
+    graph_obj["layout"] = serialize_layout(graph->layout());
+    utils::JsonObject graph_attrs(utils::JsonObject::OBJ);
+    int count = serialize_attrs_to_json(graph->attrs(), graph_attrs, &ref_table);
+    if (count > 0)
+    {
+        graph_obj["graph_attrs"] = graph_attrs;
+        graph_attr_count += count;
+    }
 
-    // Iterate through all nodes
     for (auto node : graph->nodes())
     {
-        utils::JsonObject node_obj(utils::JsonObject::OBJ);
-        node_obj["node_name"] = node->name();
-        node_obj["layer_id"] = node->get_attr<int>("layer_id");
-
-        // Serialize node attributes
-        utils::JsonObject node_attrs(utils::JsonObject::OBJ);
-        int node_attr_count = 0;
-
-        for (const auto& attr : node->attrs())
+        auto node_obj = serialize_node_metadata(node, node_attr_count, tensor_attr_count, &ref_table);
+        add_subgraph_metadata(node_obj, node, graph_attr_count, node_attr_count, tensor_attr_count, ref_table);
+        if (has_json_object_field(node_obj, "node_attrs") ||
+            has_json_object_field(node_obj, "output_tensors") ||
+            has_json_object_field(node_obj, "constant_tensors") ||
+            has_json_object_field(node_obj, "placeholder_tensors") ||
+            has_json_object_field(node_obj, "subgraph"))
         {
-            if (serialize_any_to_json(attr.first, attr.second, node_attrs))
+            nodes_arr.push_back(node_obj);
+        }
+    }
+
+    graph_obj["nodes"] = nodes_arr;
+    graph_obj["graph_references"] = serialize_graph_references(graph, ref_table);
+    return graph_obj;
+}
+
+void restore_graph_metadata(GraphPtr graph, utils::JsonObject graph_json, const utils::JsonObject *object_table = nullptr);
+void restore_node_metadata(GraphPtr graph, NodePtr node, utils::JsonObject node_json, int &loaded_node_attrs, int &loaded_tensor_attrs, const utils::JsonObject *object_table = nullptr);
+
+NodePtr fold_subgraph_from_metadata(GraphPtr graph,
+                                    const std::string &node_name,
+                                    utils::JsonObject node_json,
+                                    std::map<std::string, NodePtr> &node_map)
+{
+    if (!graph || node_json.t != utils::JsonObject::OBJ || !node_json.exist("subgraph"))
+    {
+        return nullptr;
+    }
+
+    auto subgraph_json = node_json["subgraph"];
+    if (subgraph_json.t != utils::JsonObject::OBJ || !subgraph_json.exist("nodes"))
+    {
+        return nullptr;
+    }
+
+    std::vector<NodePtr> subgraph_nodes;
+    for (auto &sub_node_json : subgraph_json["nodes"].array())
+    {
+        if (sub_node_json.t != utils::JsonObject::OBJ || !sub_node_json.exist("node_name"))
+        {
+            continue;
+        }
+
+        std::string sub_node_name = (std::string)sub_node_json["node_name"];
+        NodePtr sub_node = nullptr;
+        auto it = node_map.find(sub_node_name);
+        if (it != node_map.end())
+        {
+            sub_node = it->second;
+        }
+        else if (sub_node_json.exist("subgraph"))
+        {
+            sub_node = fold_subgraph_from_metadata(graph, sub_node_name, sub_node_json, node_map);
+        }
+
+        if (!sub_node)
+        {
+            WARN() << "Subgraph internal node not found in graph: " << sub_node_name;
+            return nullptr;
+        }
+        subgraph_nodes.push_back(sub_node);
+    }
+
+    if (subgraph_nodes.empty())
+    {
+        return nullptr;
+    }
+
+    auto sg = SubGraph::create(graph, subgraph_nodes);
+    if (subgraph_json.exist("graph_name"))
+    {
+        sg->set_name((std::string)subgraph_json["graph_name"]);
+    }
+    if (subgraph_json.exist("layout"))
+    {
+        DataLayout layout = DataLayout_UnSupport;
+        if (deserialize_layout(subgraph_json["layout"], layout))
+        {
+            sg->set_layout(layout);
+        }
+    }
+
+    auto sgn = sg->as_node(true, true);
+    for (auto node : subgraph_nodes)
+    {
+        node_map.erase(node->name());
+    }
+    sgn->set_name(node_name);
+    node_map[node_name] = sgn;
+    return sgn;
+}
+
+NodePtr replace_node_with_subgraph(GraphPtr graph, NodePtr node, utils::JsonObject subgraph_json, const utils::JsonObject *object_table = nullptr)
+{
+    if (!graph || !node || subgraph_json.t != utils::JsonObject::OBJ)
+    {
+        return node;
+    }
+
+    auto sg = SubGraph::create(graph);
+    if (subgraph_json.exist("graph_name"))
+    {
+        sg->set_name((std::string)subgraph_json["graph_name"]);
+    }
+    if (subgraph_json.exist("layout"))
+    {
+        DataLayout layout = DataLayout_UnSupport;
+        if (deserialize_layout(subgraph_json["layout"], layout))
+        {
+            sg->set_layout(layout);
+        }
+    }
+
+    auto sub_node = SubGraphNode::create(sg, node->name());
+    sub_node->params() = node->params();
+    for (auto &kv : node->attrs())
+    {
+        sub_node->set_attr(kv.first, kv.second);
+    }
+    for (auto &kv : node->constants())
+    {
+        sub_node->constants()[kv.first] = kv.second;
+    }
+    for (auto t : node->placeholders())
+    {
+        sub_node->placeholders().push_back(t);
+    }
+
+    graph->replace_node_by(node, sub_node);
+    restore_graph_metadata(sg, subgraph_json, object_table);
+    return sub_node;
+}
+
+void restore_graph_metadata(GraphPtr graph, utils::JsonObject graph_json, const utils::JsonObject *object_table)
+{
+    if (!graph || graph_json.t != utils::JsonObject::OBJ)
+    {
+        return;
+    }
+
+    if (graph_json.exist("layout"))
+    {
+        DataLayout layout = DataLayout_UnSupport;
+        if (deserialize_layout(graph_json["layout"], layout))
+        {
+            graph->set_layout(layout);
+        }
+    }
+    if (graph_json.exist("graph_attrs"))
+    {
+        deserialize_attrs_from_json(graph_json["graph_attrs"],
+            [&graph](const std::string& key, const Any& value) {
+                graph->set_attr(key, value);
+            }, graph, object_table);
+    }
+    if (!graph_json.exist("nodes"))
+    {
+        restore_graph_references(graph, graph_json, object_table);
+        return;
+    }
+
+    std::map<std::string, NodePtr> node_map;
+    for (auto node : graph->nodes())
+    {
+        node_map[node->name()] = node;
+    }
+
+    auto nodes_arr = graph_json["nodes"].array();
+    int loaded_node_attrs = 0;
+    int loaded_tensor_attrs = 0;
+    for (auto &node_json : nodes_arr)
+    {
+        if (node_json.t != utils::JsonObject::OBJ || !node_json.exist("node_name"))
+        {
+            continue;
+        }
+        std::string node_name = (std::string)node_json["node_name"];
+        auto it = node_map.find(node_name);
+        NodePtr node = nullptr;
+        if (it == node_map.end())
+        {
+            node = fold_subgraph_from_metadata(graph, node_name, node_json, node_map);
+            if (!node)
             {
-                node_attr_count++;
+                WARN() << "Node not found in graph: " << node_name;
+                continue;
             }
         }
-
-        if (node_attr_count > 0)
+        else
         {
-            node_obj["node_attrs"] = node_attrs;
-            total_node_attrs += node_attr_count;
+            node = it->second;
         }
+        restore_node_metadata(graph, node, node_json, loaded_node_attrs, loaded_tensor_attrs, object_table);
+    }
 
-        // Serialize tensor attributes for each output tensor
-        utils::JsonObject tensors_arr(utils::JsonObject::ARR);
-        int tensor_attr_count = 0;
+    restore_graph_references(graph, graph_json, object_table);
+}
 
-        for (size_t i = 0; i < node->outputs().size(); ++i)
+void restore_node_metadata(GraphPtr graph, NodePtr node, utils::JsonObject node_json, int &loaded_node_attrs, int &loaded_tensor_attrs, const utils::JsonObject *object_table)
+{
+    if (!node)
+    {
+        return;
+    }
+
+    if (node_json.exist("node_attrs"))
+    {
+        loaded_node_attrs += deserialize_attrs_from_json(node_json["node_attrs"],
+            [&node](const std::string& key, const Any& value) {
+                node->set_attr(key, value);
+            }, graph, object_table);
+    }
+
+    if (node_json.exist("output_tensors"))
+    {
+        auto tensors_arr = node_json["output_tensors"].array();
+        for (auto& tensor_json : tensors_arr)
         {
-            auto tensor = node->outputs()[i];
-            utils::JsonObject tensor_obj(utils::JsonObject::OBJ);
-            tensor_obj["tensor_name"] = tensor->name();
-            tensor_obj["tensor_index"] = (int)i;
-
-            utils::JsonObject tensor_attrs(utils::JsonObject::OBJ);
-            int count = 0;
-
-            for (const auto& attr : tensor->attrs())
-            {
-                if (serialize_any_to_json(attr.first, attr.second, tensor_attrs))
-                {
-                    count++;
-                }
-            }
-
-            if (count > 0)
-            {
-                tensor_obj["tensor_attrs"] = tensor_attrs;
-                tensors_arr.push_back(tensor_obj);
-                tensor_attr_count += count;
-            }
+            loaded_tensor_attrs += restore_tensor_metadata(find_output_tensor(node, tensor_json), tensor_json, graph, object_table);
         }
+    }
 
-        if (tensor_attr_count > 0)
+    if (node_json.exist("constant_tensors"))
+    {
+        auto tensors_arr = node_json["constant_tensors"].array();
+        for (auto& tensor_json : tensors_arr)
         {
-            node_obj["output_tensors"] = tensors_arr;
-            total_tensor_attrs += tensor_attr_count;
+            loaded_tensor_attrs += restore_tensor_metadata(find_constant_tensor(node, tensor_json), tensor_json, graph, object_table);
         }
+    }
 
-        // Only add node to JSON if it has attributes
-        if (node_attr_count > 0 || tensor_attr_count > 0)
+    if (node_json.exist("placeholder_tensors"))
+    {
+        auto tensors_arr = node_json["placeholder_tensors"].array();
+        for (auto& tensor_json : tensors_arr)
+        {
+            loaded_tensor_attrs += restore_tensor_metadata(find_placeholder_tensor(node, tensor_json), tensor_json, graph, object_table);
+        }
+    }
+
+    if (node_json.exist("subgraph"))
+    {
+        auto sgn = SubGraphNode::from_node(node);
+        if (sgn)
+        {
+            restore_graph_metadata(sgn->subgraph(), node_json["subgraph"], object_table);
+        }
+        else
+        {
+            replace_node_with_subgraph(graph, node, node_json["subgraph"], object_table);
+        }
+    }
+}
+
+// Save graph, node and tensor metadata that the textual IR does not fully represent.
+bool save_graph_attributes(GraphPtr graph, const std::string& json_path, const std::string &payload_bin_path)
+{
+    utils::JsonObject root(utils::JsonObject::OBJ);
+    utils::JsonObject graph_obj(utils::JsonObject::OBJ);
+    utils::JsonObject nodes_arr(utils::JsonObject::ARR);
+
+    int total_graph_attrs = 0;
+    int total_node_attrs = 0;
+    int total_tensor_attrs = 0;
+    PointerRefTable ref_table(graph);
+
+    graph_obj["graph_name"] = graph->name();
+    graph_obj["layout"] = serialize_layout(graph->layout());
+    utils::JsonObject graph_attrs(utils::JsonObject::OBJ);
+    int root_graph_attrs = serialize_attrs_to_json(graph->attrs(), graph_attrs, &ref_table);
+    if (root_graph_attrs > 0)
+    {
+        graph_obj["graph_attrs"] = graph_attrs;
+        total_graph_attrs += root_graph_attrs;
+    }
+    graph_obj["graph_references"] = serialize_graph_references(graph, ref_table);
+    root["graph"] = graph_obj;
+
+    for (auto node : graph->nodes())
+    {
+        auto node_obj = serialize_node_metadata(node, total_node_attrs, total_tensor_attrs, &ref_table);
+        add_subgraph_metadata(node_obj, node, total_graph_attrs, total_node_attrs, total_tensor_attrs, ref_table);
+        if (has_json_object_field(node_obj, "node_attrs") ||
+            has_json_object_field(node_obj, "output_tensors") ||
+            has_json_object_field(node_obj, "constant_tensors") ||
+            has_json_object_field(node_obj, "placeholder_tensors") ||
+            has_json_object_field(node_obj, "subgraph"))
         {
             nodes_arr.push_back(node_obj);
         }
     }
 
     root["nodes"] = nodes_arr;
+    root["object_table"] = ref_table.to_json();
+    auto object_payloads = ref_table.serialize_payloads(payload_bin_path);
+    if (object_payloads.t == utils::JsonObject::OBJ && !object_payloads.obj().empty())
+    {
+        root["object_payloads"] = object_payloads;
+    }
     root["total_nodes"] = (int)nodes_arr.array().size();
+    root["total_graph_attrs"] = total_graph_attrs;
     root["total_node_attrs"] = total_node_attrs;
     root["total_tensor_attrs"] = total_tensor_attrs;
 
@@ -310,14 +1469,15 @@ bool save_graph_attributes(GraphPtr graph, const std::string& json_path)
     ofs << root.to_string();
     ofs.close();
 
-    INFO() << "Saved " << total_node_attrs << " node attributes and "
+    INFO() << "Saved " << total_graph_attrs << " graph attributes, "
+           << total_node_attrs << " node attributes and "
            << total_tensor_attrs << " tensor attributes to " << json_path;
 
     return true;
 }
 
 // Load node and tensor attributes from a JSON file
-bool load_graph_attributes(GraphPtr graph, const std::string& json_path)
+bool load_graph_attributes(GraphPtr graph, const std::string& json_path, const std::string &payload_bin_path)
 {
     std::ifstream ifs(json_path);
     if (!ifs.is_open())
@@ -339,11 +1499,42 @@ bool load_graph_attributes(GraphPtr graph, const std::string& json_path)
         return false;
     }
 
+    const utils::JsonObject *object_table = nullptr;
+    utils::JsonObject object_table_obj;
+    if (root.exist("object_table") && root["object_table"].t == utils::JsonObject::OBJ)
+    {
+        object_table_obj = root["object_table"];
+        object_table = &object_table_obj;
+    }
+
+    if (root.exist("graph"))
+    {
+        auto graph_json = root["graph"];
+        if (graph_json.t == utils::JsonObject::OBJ)
+        {
+            if (graph_json.exist("layout"))
+            {
+                DataLayout layout = DataLayout_UnSupport;
+                if (deserialize_layout(graph_json["layout"], layout))
+                {
+                    graph->set_layout(layout);
+                }
+            }
+            if (graph_json.exist("graph_attrs"))
+            {
+                deserialize_attrs_from_json(graph_json["graph_attrs"],
+                    [&graph](const std::string& key, const Any& value) {
+                        graph->set_attr(key, value);
+                    }, graph, object_table);
+            }
+        }
+    }
+
     auto nodes_arr = root["nodes"].array();
     int loaded_node_attrs = 0;
     int loaded_tensor_attrs = 0;
 
-    // Create a map from node name to node pointer for fast lookup
+    // Create a map from node name to node pointer for fast lookup.
     std::map<std::string, NodePtr> node_map;
     for (auto node : graph->nodes())
     {
@@ -356,64 +1547,34 @@ bool load_graph_attributes(GraphPtr graph, const std::string& json_path)
         if (node_json.t != utils::JsonObject::OBJ)
             continue;
 
-        std::string node_name = node_json["node_name"];
+        std::string node_name = (std::string)node_json["node_name"];
         auto it = node_map.find(node_name);
+        NodePtr node = nullptr;
         if (it == node_map.end())
         {
-            WARN() << "Node not found in graph: " << node_name;
-            continue;
-        }
-
-        NodePtr node = it->second;
-
-        // Load node attributes
-        if (node_json.exist("node_attrs"))
-        {
-            auto node_attrs = node_json["node_attrs"].obj();
-            for (const auto& kv : node_attrs)
+            node = fold_subgraph_from_metadata(graph, node_name, node_json, node_map);
+            if (!node)
             {
-                if (deserialize_json_to_any(kv.first, kv.second,
-                    [&node](const std::string& key, const Any& value) {
-                        node->set_attr(key, value);
-                    }))
-                {
-                    loaded_node_attrs++;
-                }
+                WARN() << "Node not found in graph: " << node_name;
+                continue;
             }
         }
-
-        // Load tensor attributes
-        if (node_json.exist("output_tensors"))
+        else
         {
-            auto tensors_arr = node_json["output_tensors"].array();
-            for (auto& tensor_json : tensors_arr)
-            {
-                if (tensor_json.t != utils::JsonObject::OBJ)
-                    continue;
-
-                int tensor_index = tensor_json["tensor_index"];
-
-                if (tensor_index >= 0 && tensor_index < (int)node->outputs().size())
-                {
-                    auto tensor = node->outputs()[tensor_index];
-
-                    if (tensor_json.exist("tensor_attrs"))
-                    {
-                        auto tensor_attrs = tensor_json["tensor_attrs"].obj();
-                        for (const auto& kv : tensor_attrs)
-                        {
-                            if (deserialize_json_to_any(kv.first, kv.second,
-                                [&tensor](const std::string& key, const Any& value) {
-                                    tensor->set_attr(key, value);
-                                }))
-                            {
-                                loaded_tensor_attrs++;
-                            }
-                        }
-                    }
-                }
-            }
+            node = it->second;
         }
+
+        restore_node_metadata(graph, node, node_json, loaded_node_attrs, loaded_tensor_attrs, object_table);
+    }
+
+    if (root.exist("graph") && root["graph"].t == utils::JsonObject::OBJ)
+    {
+        restore_graph_references(graph, root["graph"], object_table);
+    }
+
+    if (object_table && root.exist("object_payloads") && root["object_payloads"].t == utils::JsonObject::OBJ)
+    {
+        restore_object_payloads(graph, *object_table, root["object_payloads"], payload_bin_path);
     }
 
     INFO() << "Loaded " << loaded_node_attrs << " node attributes and "
@@ -427,6 +1588,7 @@ bool load_graph_attributes(GraphPtr graph, const std::string& json_path)
 constexpr const char *kMqIrCacheDef = "lowered.def";
 constexpr const char *kMqIrCacheBin = "lowered.bin";
 constexpr const char *kMqIrCacheAttrs = "lowered.attrs.json";
+constexpr const char *kMqIrCachePayloadBin = "lowered.payload.bin";
 
 inline std::string mq_ir_cache_def_path(const std::string &dir)
 {
@@ -441,6 +1603,11 @@ inline std::string mq_ir_cache_bin_path(const std::string &dir)
 inline std::string mq_ir_cache_attrs_path(const std::string &dir)
 {
     return dir + "/" + kMqIrCacheAttrs;
+}
+
+inline std::string mq_ir_cache_payload_bin_path(const std::string &dir)
+{
+    return dir + "/" + kMqIrCachePayloadBin;
 }
 
 } // namespace
@@ -467,21 +1634,27 @@ GraphPtr load_mq_ir_cache(const std::string &dir)
         return nullptr;
     }
 
-    // Load node and tensor attributes from JSON file if it exists
-    if (utils::file_exists(attrs_path))
-    {
-        INFO() << "mq_load_ir: loading cached attributes from " << attrs_path;
-        if (!load_graph_attributes(g, attrs_path))
-        {
-            WARN() << "mq_load_ir: failed to load attributes, continuing without them";
-        }
-    }
-    else
-    {
-        DEBUG() << "mq_load_ir: no attributes file found, skipping attribute loading";
-    }
+    // Rebuild runtime-only GOP plugin metadata before folding subgraphs back from JSON.
+    // plugin_impl is a C++ object pointer and is intentionally not serialized.
+    apply_gopplugins(g);
 
     return g;
+}
+
+bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir)
+{
+    auto attrs_path = mq_ir_cache_attrs_path(dir);
+    auto payload_bin_path = mq_ir_cache_payload_bin_path(dir);
+    if (!utils::file_exists(attrs_path))
+    {
+        DEBUG() << "mq_load_ir: no attributes file found, skipping attribute loading";
+        return true;
+    }
+
+    INFO() << "mq_load_ir: loading cached attributes from " << attrs_path;
+    bool loaded = load_graph_attributes(graph, attrs_path, payload_bin_path);
+    dump_graph_io_tensor_ptrs(graph, "mq_load_ir: after reloading attributes");
+    return loaded;
 }
 
 // Serialize the current graph into `dir`
@@ -493,20 +1666,22 @@ void save_mq_ir_cache(GraphPtr graph, const std::string &dir)
         return;
     }
 
-    graph->set_attr(Constants::serialize_scale_zp, true);
-    graph->set_attr(Constants::dump_debug_IR, true);
-
     auto abs_dir = utils::get_abspath(dir);
     auto def_path = mq_ir_cache_def_path(abs_dir);
     auto bin_path = mq_ir_cache_bin_path(abs_dir);
     auto attrs_path = mq_ir_cache_attrs_path(abs_dir);
+    auto payload_bin_path = mq_ir_cache_payload_bin_path(abs_dir);
 
     INFO() << "mq_save_ir: dumping post-lowering MQ IR to " << def_path;
-    graph->serialize(def_path, bin_path);
+    {
+        BoolConfigGuard serialize_scale_zp(Constants::serialize_scale_zp, true);
+        BoolConfigGuard dump_debug_ir(Constants::dump_debug_IR, true);
+        graph->serialize(def_path, bin_path);
+    }
 
     // Save node and tensor attributes to separate JSON file
     INFO() << "mq_save_ir: dumping attributes to " << attrs_path;
-    if (!save_graph_attributes(graph, attrs_path))
+    if (!save_graph_attributes(graph, attrs_path, payload_bin_path))
     {
         WARN() << "mq_save_ir: failed to save attributes file";
     }

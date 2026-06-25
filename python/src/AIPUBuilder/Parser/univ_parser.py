@@ -12,6 +12,8 @@ from .common.utils import is_file, is_dir, multi_string_to_list, list_string_to_
 from .graph.graph import Graph
 from .logger import *
 
+np.seterr(over='ignore')  # ignore overflow warning in numpy when converting large float32 to float16
+
 
 def univ_parser(params):
     ret = True
@@ -216,6 +218,8 @@ def univ_parser(params):
             params['tmp_tensors_path'] = tmp_tensors_path
 
             if model_type in ('tf', 'tflite'):
+                # Use Keras 2 API in TF2 to load model for better compatibility. For TF1, it won't cause any issue.
+                os.environ['TF_USE_LEGACY_KERAS'] = '1'
                 try:
                     import tensorflow as tf
                     tf.config.set_visible_devices([], 'GPU')
@@ -267,6 +271,16 @@ def univ_parser(params):
                         '.keras') or is_dir(model_path)
                     if is_keras_model:
                         from .front_end.tf2.process import process_tf2
+                        # TF >= 2.16 ships Keras 3 by default, which rejects layer
+                        # names containing '/' and breaks loading of legacy Keras 2
+                        # models (e.g. MobileNetV3). Fall back to the standalone
+                        # ``tf_keras`` (Keras 2) package when it is installed.
+                        if version_to_tuple(tf.__version__) >= version_to_tuple('2.16.0'):
+                            import importlib.util
+                            if importlib.util.find_spec('tf_keras') is None:
+                                FATAL('[Parser]: TensorFlow %s ships Keras 3 which cannot load some legacy '
+                                      'Keras 2 models. Please install the `tf-keras` package '
+                                      '(pip install tf-keras) and retry.' % tf.__version__)
                         graph = process_tf2(graph, model_path, params)
                     else:
                         from .front_end.tf.process import process_tf

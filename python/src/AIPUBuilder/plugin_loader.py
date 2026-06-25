@@ -35,10 +35,10 @@ VERSIONS = {t.value: dict() for t in PluginType}
 PLUGIN_FILES = set()
 
 
-def register_plugin(type, version=0):
+def register_plugin(plugin_type, version=0):
     '''
-    register a plugin with type and version
-    supporting plugin type: Parser,Builder
+    register a plugin with plugin_type and version
+    supporting plugin plugin_type: Parser,Builder
     '''
     import inspect
     global PLUGINS, VERSIONS, PLUGIN_FILES
@@ -46,8 +46,8 @@ def register_plugin(type, version=0):
     frame = inspect.stack()[1]
     p = frame[0].f_code.co_filename
     PLUGIN_FILES.add(os.path.realpath(p))
-    flag = type.value >> 16
-    type = PluginType(type.value & 0xfff)
+    flag = plugin_type.value >> 16
+    plugin_type = PluginType(plugin_type.value & 0xfff)
 
     def tofloat(str_version):
         try:
@@ -59,42 +59,42 @@ def register_plugin(type, version=0):
         return fval
 
     def wrapper(cls):
-        if type not in PluginType:
+        if plugin_type not in PluginType:
             raise PluginTypeError("Unsupported Plugin Type.")
-        elif type == PluginType.Parser:
+        elif plugin_type == PluginType.Parser:
             from AIPUBuilder.Parser.plugin_loader import register_plugin as register_parser_plugin
             register_parser_plugin(version=version)(cls)
-        elif type == PluginType.Builder:
+        elif plugin_type == PluginType.Builder:
             from AIPUBuilder.CGBuilder._plugin_loader import register_builder_plugin
             # process version
             register_builder_plugin(version, flag)(cls)
             pass
-        elif type == PluginType.Checker:
+        elif plugin_type == PluginType.Checker:
             from AIPUBuilder.CGBuilder._plugin_loader import register_checker_plugin
             # process version
             register_checker_plugin(version)(cls)
             pass
-        elif type == PluginType.Dataset:
+        elif plugin_type == PluginType.Dataset:
             from AIPUBuilder.executor.plugin_loader import register_plugin as register_dataset_plugin
             register_dataset_plugin(PluginType.Dataset, version=version)(cls)
-        elif type == PluginType.PreGSIM:
+        elif plugin_type == PluginType.PreGSIM:
             from AIPUBuilder.simplifier.plugin import register_pre_pass, register_pass_function, BasePassPlugin
-            if isinstance(cls, BasePassPlugin):
+            if issubclass(cls, BasePassPlugin):
                 register_pre_pass(cls)
             else:
                 register_pass_function(register_pre_pass, cls, version)
-        elif type == PluginType.PostGSIM:
+        elif plugin_type == PluginType.PostGSIM:
             from AIPUBuilder.simplifier.plugin import register_post_pass, register_pass_function, BasePassPlugin
-            if isinstance(cls, BasePassPlugin):
+            if issubclass(cls, BasePassPlugin):
                 register_post_pass(cls)
             else:
                 register_pass_function(register_post_pass, cls, version)
-        if type not in PLUGINS:
-            PLUGINS[type] = dict()
-            VERSIONS[type] = dict()
-        if cls.__name__ not in PLUGINS[type]:
-            PLUGINS[type][cls.__name__] = cls
-            VERSIONS[type][cls.__name__] = str(version)
+        if plugin_type not in PLUGINS:
+            PLUGINS[plugin_type] = dict()
+            VERSIONS[plugin_type] = dict()
+        if cls.__name__ not in PLUGINS[plugin_type]:
+            PLUGINS[plugin_type][cls.__name__] = cls
+            VERSIONS[plugin_type][cls.__name__] = str(version)
         return cls
     return wrapper
 

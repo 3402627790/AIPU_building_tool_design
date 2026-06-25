@@ -49,6 +49,9 @@ def convert_attr_to_onnx(attr_dict):
                 new_attr.update(
                     {'dilations': [new_attr.get('dilations', [1, 1])[0], v]})
             new_attr.pop(k)
+        elif k == 'Flags':
+            new_attr.update({'flag': v})
+            new_attr.pop(k)
         elif k == 'GroupInputChannels':
             new_attr.update({'group_ic': v})
             new_attr.pop(k)
@@ -71,6 +74,9 @@ def convert_attr_to_onnx(attr_dict):
             new_attr.pop(k)
         elif k == 'NewWidth':
             new_attr.update({'new_width': v})
+            new_attr.pop(k)
+        elif k == 'OffsetsAsNumpy':
+            new_attr.update({'offset': v.tolist()})
             new_attr.pop(k)
         elif k == 'PaddingTop':
             padding = new_attr.get('padding', [0, 0, 0, 0])
@@ -96,8 +102,23 @@ def convert_attr_to_onnx(attr_dict):
             new_attr.update(
                 {'padding': padding})
             new_attr.pop(k)
+        elif k == 'PaddingValue ':
+            new_attr.update({'pad_value': v})
+            new_attr.pop(k)
         elif k == 'PermAsNumpy':
             new_attr.update({'perm': v.tolist()})
+            new_attr.pop(k)
+        elif k == 'PrePaddingsAsNumpy':
+            new_attr.update({'pads': v.tolist()})
+            new_attr.pop(k)
+        elif k == 'PostPaddingsAsNumpy':
+            post_pads = v.tolist()
+            pads = new_attr.get('pads', [0] * len(post_pads))
+            pads.extend(post_pads)
+            new_attr.update({'pads': pads})
+            new_attr.pop(k)
+        elif k == 'SizesAsNumpy':
+            new_attr.update({'size': v.tolist()})
             new_attr.pop(k)
         elif k in ('SubsamplingHeight', 'StrideHeight'):
             strides = new_attr.get('strides', [1, 1])
@@ -333,8 +354,8 @@ def convert_executorch_to_graph(graph, model_path, params):
                                     rs_pre_node_src_out_port = [o['name']
                                                                 for o in rs_pre_node['outputs']].index(rs_in_tensor_name)
                                     rs_pre_node_out_tensor_size = int(
-                                        np.prod(rs_pre_node['outputs'][rs_pre_node_src_out_port]['shape']))
-                                    current_tensor_size = int(np.prod(in_tensor['shape']))
+                                        np.prod(rs_pre_node['outputs'][rs_pre_node_src_out_port]['shape']).item())
+                                    current_tensor_size = int(np.prod(in_tensor['shape']).item())
                                     assert rs_pre_node_out_tensor_size == current_tensor_size, 'Graph disconnected and cannot insert reshape.'
 
                                     dim = in_tensor['shape']

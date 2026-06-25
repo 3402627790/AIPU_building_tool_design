@@ -643,18 +643,21 @@ def convert_avg_pool(g, input, kernel_size, strides, paddings, ceil_mode, count_
     assert isinstance(dim, int) and dim in [
         1, 2, 3], 'Meets invalid dim in convert_avg_pool!'
     if not ceil_mode:
-        try:
-            from torch.onnx.symbolic_opset11 import avg_pool1d, avg_pool2d, avg_pool3d
-            avg_pool_func = avg_pool1d if dim == 1 else (
-                avg_pool2d if dim == 2 else avg_pool3d)
-        except ImportError:  # torch 2.1
-            from torch.onnx.symbolic_opset10 import _avg_pool
+        # torch >= 2.9 removed the public ``torch.onnx.symbolic_opset11``
+        # module (the torchscript exporter was relocated to
+        # ``torch.onnx._internal.torchscript_exporter``).
+        if version_to_tuple(torch.onnx.producer_version) >= version_to_tuple('2.9.0'):
+            from torch.onnx._internal.torchscript_exporter.symbolic_opset10 import _avg_pool
             if dim == 1:
                 avg_pool_func = _avg_pool('avg_pool1d', 1)
             elif dim == 2:
                 avg_pool_func = _avg_pool('avg_pool2d', 2)
             else:  # dim == 3
                 avg_pool_func = _avg_pool('avg_pool3d', 3)
+        else:
+            from torch.onnx.symbolic_opset11 import avg_pool1d, avg_pool2d, avg_pool3d
+            avg_pool_func = avg_pool1d if dim == 1 else (
+                avg_pool2d if dim == 2 else avg_pool3d)
         return avg_pool_func(g, input, kernel_size, strides, paddings, ceil_mode, count_include_pad, divisor_override)
 
     input_shape = helper._get_tensor_sizes(input)
@@ -803,7 +806,9 @@ def convert_max_pool(g, input, kernel_size, strides, paddings, dilations, ceil_m
     assert isinstance(dim, int) and dim in [
         1, 2, 3], 'Meets invalid dim in convert_max_pool!'
     if not ceil_mode:
-        try:
+        torch_version = version_to_tuple(torch.onnx.producer_version)
+        if torch_version < version_to_tuple('2.1.0'):
+            # Public symbolic_opset9.max_pool* helpers are still available.
             if return_indices:
                 from torch.onnx.symbolic_opset9 import max_pool1d_with_indices, max_pool2d_with_indices, \
                     max_pool3d_with_indices
@@ -813,9 +818,13 @@ def convert_max_pool(g, input, kernel_size, strides, paddings, dilations, ceil_m
                 from torch.onnx.symbolic_opset9 import max_pool1d, max_pool2d, max_pool3d
                 max_pool_func = max_pool1d if dim == 1 else (
                     max_pool2d if dim == 2 else max_pool3d)
-        except ImportError:  # >= torch 2.1
-            from torch.onnx.symbolic_opset10 import _max_pool
-            torch_version = version_to_tuple(torch.onnx.producer_version)
+        else:
+            # torch >= 2.9 relocated the torchscript exporter under
+            # torch.onnx._internal.torchscript_exporter.
+            if torch_version >= version_to_tuple('2.9.0'):
+                from torch.onnx._internal.torchscript_exporter.symbolic_opset10 import _max_pool
+            else:
+                from torch.onnx.symbolic_opset10 import _max_pool
             max_pool_func_name = 'max_pool1d_with_indices' if dim == 1 else (
                 'max_pool2d_with_indices' if dim == 2 else 'max_pool3d_with_indices')
             cnt_param = torch.nn.modules.utils._single if dim == 1 else (
@@ -1015,7 +1024,7 @@ def convert_meshgrid(g, tensor_list, indexing='ij'):
         inputs.append(input_1d)
         size_nodes.append(helper._reshape_helper(g, g.op('Size', t), [1]))
         t_size = helper._get_tensor_sizes(t)
-        shape = None if (t_size is None or None in t_size) else int(np.prod(t_size))
+        shape = None if (t_size is None or None in t_size) else int(np.prod(t_size).item())
         output_shape.append(shape)
     outs = g.op('custom::Meshgrid', *inputs, indexing_s=indexing, outputs=len(inputs))
     if any(shape is None for shape in output_shape):
@@ -1558,7 +1567,7 @@ def convert_index_put(g, x, indices_list_value, values, accumulate=False):
         exp_values_shape = np.concatenate([np.array(broadcast_index_size), np.array(sub_data_shape)], axis=0).tolist()
         exp_values_shape_t = g.op('Constant', value_t=torch.tensor(exp_values_shape, dtype=torch.int64))
         need_expand = True
-        if values_shape and np.prod(values_shape) == np.prod(exp_values_shape):
+        if values_shape and np.prod(values_shape).item() == np.prod(exp_values_shape).item():
             need_expand = False
 
         if need_expand:
@@ -1912,7 +1921,7 @@ def convert_torch_to_onnx(model_path, params):
         is_torch_script_model = True
     except RuntimeError:
         try:
-            model = torch.load(model_path, map_location=torch.device(device))
+            model = torch.load(model_path, weights_only=False, map_location=torch.device(device))
             if isinstance(model, torch.nn.Module):
                 model.eval()
             else:
@@ -2014,6 +2023,8 @@ def convert_torch_to_onnx(model_path, params):
     # if onnx_opset_version < 18:  # not yet supported in torch 2.1
     # The lowest version of onnx BitwiseAnd/Not/Or/Xor is 18
     # (onnx_opset_version is 16 for torch 1.12.0).
+    torch.onnx.register_custom_op_symbolic(
+        'aten::_cast_Float', lambda g, x, *a: g.op('Cast', x, to_i=1), onnx_opset_version)
     torch.onnx.register_custom_op_symbolic(
         'aten::bitwise_and', convert_bitwise_and, onnx_opset_version)
     torch.onnx.register_custom_op_symbolic(
@@ -2319,7 +2330,7 @@ def convert_torch_to_onnx(model_path, params):
     # Get the file name of the onnx model to be exported
     onnx_model_path = os.path.join(params.get('output_dir', './'),
                                    os.path.basename(model_path) + '.onnx')
-    INFO('[Parser]: Convert torch model (%s) to onnx model...' % model_path)
+    INFO(f'[Parser]: Convert torch model ({model_path}) to onnx model with torch: {torch.__version__}...')
     if use_gpu:
         try:
             parallel_model = nn.DataParallel(model)

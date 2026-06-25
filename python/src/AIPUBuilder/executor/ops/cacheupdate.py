@@ -82,7 +82,7 @@ def gen_input_data(self):
     else:
         input0 = np.random.randint(np.iinfo(in_type0).min, np.iinfo(in_type0).max, size=in_shape0, dtype=in_type0)
         input2 = np.random.randint(np.iinfo(in_type2).min, np.iinfo(in_type2).max, size=in_shape2, dtype=in_type2)
-    input1 = np.random.randint(0, max_idx, size=in_shape1, dtype=in_type1)
+    input1 = np.random.randint(0, max_idx + 1, size=in_shape1, dtype=in_type1)
 
     input_data = [input0, input1, input2]
     self.inputs[0].betensor = input_data[0]

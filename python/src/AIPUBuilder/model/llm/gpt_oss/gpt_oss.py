@@ -756,7 +756,7 @@ class GptOssCausalLM(BaseModel):
             else:
                 hidden_states = ops.input([batch, seq_len, self.config.hidden_size], Dtype.FP32,
                                           name='embeded', exprs=['batch', 'seq_len', self.config.hidden_size])
-            if self.use_cache:
+            if use_cache:
                 attention_mask = ops.input([batch, 1, seq_len, seq_len + past_len],
                                            Dtype.FP32, name='attention_mask')
             else:

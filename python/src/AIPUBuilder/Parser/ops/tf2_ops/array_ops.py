@@ -458,7 +458,7 @@ class TfuniqueOp(OpHasMultipleOutPorts, DynamicShapeOp, Tf2Op):
             inp = inputs[0]
         else:
             inp_shape = inputs[0].shape
-            inp = np.arange(int(np.prod(inp_shape)), dtype=inputs[0].dtype).reshape(inp_shape)
+            inp = np.arange(int(np.prod(inp_shape).item()), dtype=inputs[0].dtype).reshape(inp_shape)
         x, out_idx = tf.unique(inp, out_idx=tf.dtypes.as_dtype(self.out_idx))
         out_ports = self.get_out_ports()
         out_dict = {
@@ -490,7 +490,7 @@ class Tfunique_with_countsOp(OpHasMultipleOutPorts, DynamicShapeOp, Tf2Op):
             inp = inputs[0]
         else:
             inp_shape = inputs[0].shape
-            inp = np.arange(int(np.prod(inp_shape)), dtype=inputs[0].dtype).reshape(inp_shape)
+            inp = np.arange(int(np.prod(inp_shape).item()), dtype=inputs[0].dtype).reshape(inp_shape)
         x, out_idx, counts = tf.unique_with_counts(inp, out_idx=tf.dtypes.as_dtype(self.out_idx))
         out_ports = self.get_out_ports()
         out_dict = {

@@ -29,7 +29,10 @@
 #include <map>
 #include <memory>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aipubt
@@ -48,8 +51,34 @@ enum
     TASK_TYPE_BARRIER_SET,
     TASK_TYPE_BARRIER_WAIT,
     TASK_TYPE_CTRL_FLOW,
-    TASK_TYPE_CACHE_MGR
+    TASK_TYPE_CACHE_MGR,
+    TASK_TYPE_MAX
 };
+
+enum
+{
+    BUF_TYPE_PARAM,
+    BUF_TYPE_WEIGHT,
+    BUF_TYPE_SLOT,
+    BUF_TYPE_STREAM,
+};
+
+struct buf_desc_t
+{
+    uint32_t type;
+    uint32_t index;
+    size_t size;
+    size_t alignment;
+    uint8_t data[0];
+};
+
+struct buf_loc_t
+{
+    uint32_t type;
+    uint32_t index;
+    size_t offset;
+};
+
 struct task_t
 {
     int type;
@@ -88,6 +117,8 @@ struct task_t
         {
             uint64_t src_addr;
             size_t size;
+            uint8_t mode;
+            uint8_t evict_priority;
             int osd_ctrl;
             sync_ctrl_t sync;
         } dma;
@@ -96,8 +127,8 @@ struct task_t
         {
             uint64_t addr;
             uint32_t data;
-            uint32_t mask;
             int interrupt;
+            uint8_t wr_be;
             int timer_mode;
             bool bar_src;
         } barrier_set;
@@ -106,9 +137,9 @@ struct task_t
         {
             uint64_t addr;
             uint32_t ref;
-            uint32_t mask;
             int func;
             int pool_interval;
+            uint8_t rd_be;
             bool bar_src;
         } barrier_wait;
 
@@ -140,11 +171,6 @@ struct tensor_info_t
     uint8_t dtype;
     std::vector<uint32_t> shape;
 };
-struct memory_plan_t
-{
-    std::vector<uint64_t> slots;
-    std::map<uint32_t, std::pair<uint32_t, uint64_t>> tso; // tensor to slot and with offset;
-};
 
 class CpsElf
 {
@@ -160,6 +186,7 @@ public:
     {
         return elfio_.load(stream);
     }
+
     bool save(const std::string &filename)
     {
         return elfio_.save(filename);
@@ -167,6 +194,55 @@ public:
     bool save(std::ostream &stream)
     {
         return elfio_.save(stream);
+    }
+
+    const buf_desc_t *get_buffer(uint32_t type, uint32_t idx) const
+    {
+        std::string key = "type" + std::to_string(type) + "_idx" + std::to_string(idx);
+        auto sect = get_note_section(key);
+        if (sect.first != nullptr)
+        {
+            const buf_desc_t *desc = (const buf_desc_t *)sect.first;
+            if (desc->size + sizeof(buf_desc_t) == sect.second || sizeof(buf_desc_t) == sect.second)
+                return desc;
+        }
+        return nullptr;
+    }
+    void set_buffer(uint32_t type, uint32_t idx, size_t size,
+                    size_t alignment = 1, const void *data = nullptr)
+    {
+        auto real_size = sizeof(buf_desc_t);
+        buf_desc_t *desc = nullptr;
+        if (data == nullptr)
+        {
+            desc = (buf_desc_t *)malloc(real_size);
+        }
+        else
+        {
+            real_size += size;
+            desc = (buf_desc_t *)malloc(real_size);
+            memcpy(desc->data, data, size);
+        }
+
+        desc->type = type;
+        desc->index = idx;
+        desc->size = size;
+        desc->alignment = alignment;
+
+        ELFIO::note_section_accessor nsa(elfio_, force_get_note());
+        std::string key = "type" + std::to_string(type) + "_idx" + std::to_string(idx);
+        nsa.add_note(0, key, desc, real_size);
+
+        free(desc);
+    }
+
+    std::map<uint32_t, buf_loc_t> get_tensor_offsets() const
+    {
+        return get_tab<uint32_t, buf_loc_t>("tensor_offset_tab");
+    }
+    void set_tensor_offsets(const std::map<uint32_t, buf_loc_t> &offsets)
+    {
+        set_tab("tensor_offset_tab", offsets);
     }
 
     std::pair<const void *, size_t> get_text() const
@@ -252,27 +328,6 @@ public:
         nsa.add_note(0, "graph", buffer.get(), total_size);
     }
 
-    std::pair<const void *, size_t> get_data() const
-    {
-        return get_note_section("data");
-    }
-    void set_data(const void *data, size_t size)
-    {
-        auto note = force_get_note();
-        ELFIO::note_section_accessor nsa(elfio_, note);
-        nsa.add_note(0, "data", data, size);
-    }
-
-    std::pair<const void *, size_t> get_param() const
-    {
-        return get_note_section("param");
-    }
-    void set_param(const void *param, size_t size)
-    {
-        auto note = force_get_note();
-        ELFIO::note_section_accessor nsa(elfio_, note);
-        nsa.add_note(0, "param", param, size);
-    }
     std::map<uint32_t, uint32_t> get_param_tab() const
     {
         return get_tab<uint32_t, uint32_t>("param_tab");
@@ -281,14 +336,7 @@ public:
     {
         set_tab("param_tab", pt);
     }
-    std::map<uint32_t, uint64_t> get_weight_tab() const
-    {
-        return get_tab<uint32_t, uint64_t>("weight_tab");
-    }
-    void set_weight_tab(const std::map<uint32_t, uint64_t> &wt)
-    {
-        set_tab("weight_tab", wt);
-    }
+
     std::multimap<uint8_t, tensor_info_t> get_tensor_tab() const
     {
         std::multimap<uint8_t, tensor_info_t> tis;
@@ -367,72 +415,6 @@ public:
 
         nsa.add_note(0, "tensor_tab", buffer.get(), total_size);
     }
-    memory_plan_t get_memory_plan() const
-    {
-        memory_plan_t mem_plan;
-        auto mp = get_note_section("memory_plan");
-        if (mp.first == nullptr)
-            return mem_plan;
-
-        const uint8_t *p = (const uint8_t *)mp.first;
-        const auto &slots_count = *((const int *)p);
-        mem_plan.slots.resize(slots_count);
-        p += sizeof(slots_count);
-        const auto slot_data_size = sizeof(uint64_t) * slots_count;
-        memcpy(mem_plan.slots.data(), p, slot_data_size);
-        p += slot_data_size;
-        const auto &tso_count = *((const int *)p);
-        p += sizeof(tso_count);
-        for (int i = 0; i < tso_count; ++i)
-        {
-            auto &tensor_id = *((uint32_t *)p);
-            p += sizeof(tensor_id);
-
-            auto &slot_off = *((std::pair<uint32_t, uint64_t> *)p);
-
-            mem_plan.tso.emplace(tensor_id, slot_off);
-
-            p += sizeof(slot_off);
-        }
-        return mem_plan;
-    }
-
-    void set_memory_plan(const memory_plan_t &mem_plan)
-    {
-        // memory_plan_t
-        //{
-        //    slot_size:int
-        //    slot_data : uint64_t*
-        //    map :uint8_t[]
-        // } per stream
-        const auto slot_data_size = sizeof(uint64_t) * mem_plan.slots.size();
-        const auto total_size = sizeof(int) + slot_data_size + sizeof(int) +
-                                (sizeof(uint32_t) + sizeof(std::pair<uint32_t, uint64_t>)) * mem_plan.tso.size();
-        auto buffer = std::make_unique<uint8_t[]>(total_size);
-        uint8_t *p = buffer.get();
-        auto &slots_count = *((int *)p);
-        slots_count = mem_plan.slots.size();
-        p += sizeof(slots_count);
-        memcpy(p, mem_plan.slots.data(), slot_data_size);
-        p += slot_data_size;
-        auto &tso_count = *((int *)p);
-        tso_count = mem_plan.tso.size();
-        p += sizeof(tso_count);
-        for (const auto &tso : mem_plan.tso)
-        {
-            auto &tensor_id = *((uint32_t *)p);
-            tensor_id = tso.first;
-            p += sizeof(tensor_id);
-
-            auto &slot_off = *((std::pair<uint32_t, uint64_t> *)p);
-            slot_off = tso.second;
-            p += sizeof(slot_off);
-        }
-        auto note = force_get_note();
-        ELFIO::note_section_accessor nsa(elfio_, note);
-
-        nsa.add_note(0, "memory_plan", buffer.get(), total_size);
-    }
 
     ELFIO::section *get_section(const std::string &name)
     {
@@ -493,7 +475,11 @@ private:
     template <class _Key, class _Val, template <class...> class _Tab = std::map, class... _Args>
     _Tab<_Key, _Val, _Args...> get_tab(const std::string &name) const
     {
-        using tab_elem_t = std::pair<_Key, _Val>;
+        static_assert(std::is_trivial_v<_Key> && std::is_standard_layout_v<_Key>,
+                      "'key' must be a plain data type.");
+        static_assert(std::is_trivial_v<_Val> && std::is_standard_layout_v<_Val>,
+                      "'value' must be a plain data type.");
+        using tab_elem_t = typename _Tab<_Key, _Val, _Args...>::value_type;
         _Tab<_Key, _Val, _Args...> tab;
         const auto p = get_note_section(name);
         const auto *end = (const tab_elem_t *)(((uint8_t *)p.first) + p.second);
@@ -504,18 +490,24 @@ private:
     template <class _Key, class _Val, template <class...> class _Tab = std::map, class... _Args>
     void set_tab(const std::string &name, const _Tab<_Key, _Val, _Args...> &tab)
     {
-        using tab_elem_t = std::pair<_Key, _Val>;
+        static_assert(std::is_trivial_v<_Key> && std::is_standard_layout_v<_Key>,
+                      "'key' must be a plain data type.");
+        static_assert(std::is_trivial_v<_Val> && std::is_standard_layout_v<_Val>,
+                      "'value' must be a plain data type.");
+        using tab_elem_t = typename _Tab<_Key, _Val, _Args...>::value_type;
         ELFIO::note_section_accessor nsa(elfio_, force_get_note());
         auto buf = std::make_unique<tab_elem_t[]>(tab.size());
         tab_elem_t *p = buf.get();
-        for (auto it = tab.begin(); it != tab.end(); ++it)
-            *p++ = *it;
+        for (auto it = tab.begin(); it != tab.end(); ++it, ++p)
+            memcpy((void *)p, &(*it), sizeof(tab_elem_t));
         nsa.add_note(0, name, buf.get(), tab.size() * sizeof(tab_elem_t));
     }
 
     ELFIO::elfio elfio_;
 };
+
 using CpsElfPtr = std::shared_ptr<CpsElf>;
+
 } // namespace aipubt
 
 #endif //!__CPS_ELF_H__

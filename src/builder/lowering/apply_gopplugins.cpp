@@ -23,19 +23,22 @@
 #include "builder/gop_plugin.h"
 #include "builder/lowering/lowering.h"
 #include "builder/plugin.h"
+#include "builder/plugin/ds_code_wrapper.h"
+#include "builder/target.h"
 #include "core/config.h"
 #include "core/constants.h"
 #include "core/graph.h"
 #include "core/graph_matcher.h"
 #include "core/logger.h"
 #include "core/node.h"
+#include "core/ops/ops.h"
 #include "core/plugin_loader.h"
 #include "core/subgraph.h"
 #include <algorithm>
-#include <builder/target.h>
 #include <set>
 #include <unistd.h>
 #include <vector>
+
 namespace aipubt
 {
 struct ImplInfo
@@ -180,7 +183,31 @@ static bool apply_gopplugin_(GraphPtr g,
             return false;
         }
         INFO() << "get best impl for " << n;
-        auto sg = SubGraph::create(g, info.nodes);
+
+        auto sg_nodes = info.nodes;
+        if (BuilderConfig::get<bool>(Constants::enable_ds))
+        {
+            auto it = std::find_if(info.nodes.begin(), info.nodes.end(), [](NodePtr n) {
+                return n->is_dynamic();
+            });
+            if (it != info.nodes.end())
+            {
+                auto out_name = g->get_valid_tensor_name("paramupdate/output");
+                TensorPtr out = std::make_shared<Tensor>(out_name, TensorShape{0}, Tensor::UINT8);
+                auto update_node = Node::create(g->get_valid_node_name("paramupdate"), OpType_ParamUpdate);
+                update_node->add_output(out);
+                update_node->set_attr("_match_list", std::vector<NodePtr>{update_node});
+                update_node->set_attr(Constants::plugin_impl, std::make_shared<GopDSCodeImpl>());
+                g->add_node(update_node);
+                fused.insert(update_node);
+
+                auto dummy_node = ops::dummy({out})[0]->node();
+                sg_nodes.push_back(dummy_node);
+                fused.insert(dummy_node);
+            }
+        }
+
+        auto sg = SubGraph::create(g, sg_nodes);
         auto node = sg->as_node(true, false); // no need sg input
         node->set_unified_view(unified_view);
         node->set_attr("_match_list", info.nodes);

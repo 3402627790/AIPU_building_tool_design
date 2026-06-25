@@ -20,6 +20,7 @@
  * @Last Modified by: Samuel Han
  * @Last Modified time: 2024-07-22 13:59:08
  */
+#include "builder/gop_plugin.h"
 #include "builder/plugin.h"
 #include "builder/profiler.h"
 #include "builder/readonly_param.h"
@@ -209,6 +210,11 @@ NodeParamValue::NodeParamValue(long int i)
     v.i = i;
     t = NodeParamType_int;
 }
+NodeParamValue::NodeParamValue(long long i)
+{
+    v.i = i;
+    t = NodeParamType_int;
+}
 NodeParamValue::NodeParamValue(int i)
 {
     v.i = i;
@@ -230,6 +236,11 @@ NodeParamValue::NodeParamValue(unsigned int i)
     t = NodeParamType_uint;
 }
 NodeParamValue::NodeParamValue(unsigned long int i)
+{
+    v.ui = i;
+    t = NodeParamType_uint;
+}
+NodeParamValue::NodeParamValue(unsigned long long i)
 {
     v.ui = i;
     t = NodeParamType_uint;
@@ -374,6 +385,15 @@ NodeParamValue::operator long int() const
         return v.f;
     return 0;
 }
+NodeParamValue::operator long long() const
+{
+    if (t == NodeParamType_int || t == NodeParamType_bool || t == NodeParamType_uint)
+        return v.i;
+    if (t == NodeParamType_float)
+        return v.f;
+    return 0;
+}
+
 NodeParamValue::operator unsigned int() const
 {
     if (t == NodeParamType_int || t == NodeParamType_bool || t == NodeParamType_uint)
@@ -391,6 +411,14 @@ NodeParamValue::operator unsigned long int() const
     return 0;
 }
 
+NodeParamValue::operator unsigned long long() const
+{
+    if (t == NodeParamType_int || t == NodeParamType_bool || t == NodeParamType_uint)
+        return v.ui;
+    if (t == NodeParamType_float)
+        return v.f;
+    return 0;
+}
 NodeParamValue::operator double() const
 {
     if (t == NodeParamType_float)
@@ -471,6 +499,14 @@ NodeParamValue::operator tongue::Expr() const
     if (t == NodeParamType_expr)
     {
         return expr;
+    }
+    if (t == NodeParamType_int || t == NodeParamType_uint || t == NodeParamType_bool)
+    {
+        return Expr(v.i);
+    }
+    if (t == NodeParamType_float)
+    {
+        return Expr(v.f);
     }
     return tongue::Expr();
 }
@@ -1291,7 +1327,7 @@ const std::string Node::dot(const std::string &color, const std::string &prefix)
         int cid = (int)type();
         m_color = colors[cid % colors.size()];
     }
-    std::ostringstream oss, tmp;
+    std::ostringstream oss, tmp, tmp2;
     std::string name = m_name;
 
     name = get_node_dot_name();
@@ -1324,6 +1360,13 @@ const std::string Node::dot(const std::string &color, const std::string &prefix)
         }
         if (sgn->attrs().count(Constants::plugin_attrs_name))
         {
+            auto plugin_info = sgn->get_attr<BuilderOpPluginInfo *>(Constants::plugin_attrs_name);
+            auto plugin_name = plugin_info->name;
+            // plugin_name = utils::replace(plugin_name, "aipubt::", "");
+            real_node_names += " (" + plugin_name + ")";
+        }
+        else if (sgn->attrs().count(Constants::plugin_impl))
+        {
             real_node_names += " (";
             if (sgn->attrs().count(Constants::kernel_infos))
             {
@@ -1332,14 +1375,8 @@ const std::string Node::dot(const std::string &color, const std::string &prefix)
                 {
                     real_node_names += kernel_infos[i].kernel_name;
                     if (i < kernel_infos.size() - 1)
-	
-	
                     {
-	
-	
                         real_node_names += ",";
-	
-	
                     }
                 }
             }
@@ -1393,7 +1430,8 @@ const std::string Node::dot(const std::string &color, const std::string &prefix)
         }
     }
 
-    oss << real_node_names;
+    oss << utils::wrap_text(real_node_names, 100);
+    ;
 
     oss << "|";
     if (m_inputs.size())
@@ -1403,13 +1441,13 @@ const std::string Node::dot(const std::string &color, const std::string &prefix)
             auto inp = m_inputs[i];
             if (i != 0)
             {
-                oss << ",";
+                tmp2 << ",";
                 tmp << ",";
             }
-            oss << inp->shape().to_string();
+            tmp2 << inp->shape().to_string();
             tmp << inp->shape().layout() << ":" << inp->type();
         }
-        oss << " \\-\\> ";
+        tmp2 << " \\-\\> ";
         tmp << " \\-\\> ";
     }
     if (m_outputs.size())
@@ -1419,18 +1457,20 @@ const std::string Node::dot(const std::string &color, const std::string &prefix)
             auto out = m_outputs[i];
             if (i != 0)
             {
-                oss << ",";
+                tmp2 << ",";
                 tmp << ",";
             }
-            oss << out->shape().to_string();
+            tmp2 << out->shape().to_string();
             tmp << out->shape().layout() << ":" << out->type();
         }
     }
+    oss << utils::wrap_text(tmp2.str(), 100);
     if (m_type != OpType_Input)
     {
-        oss << "|" << tmp.str();
+        oss << "|" << utils::wrap_text(tmp.str(), 100);
     }
     tmp.clear();
+    tmp2.clear();
     if (m_attrs.count(Constants::dot_sections))
     {
         auto dot_label = get_attr<StringMapPtr>(Constants::dot_sections);
@@ -1890,55 +1930,86 @@ void Node::serialize(std::map<char *, uint32_t> &data_map, std::ostream &oss, st
                     }
                     return text;
                 };
+
+                auto do_quantization_serialize = [&](Quantization &quantization, std::string suffix = "") {
+                    auto scales = quantization.scales();
+                    auto offsets = quantization.offsets();
+
+                    // 1. serialize scales
+                    auto s_size = scales.size();
+                    bool is_params = false;
+                    bool is_offset = false;
+                    if (s_size == 1)
+                    {
+                        oss << kv.first << "_scale" << suffix << "=" << float_to_string(scales[0]) << "\n";
+                        is_params = true;
+                    }
+                    else if (s_size > 1)
+                    {
+                        oss << kv.first << "_scale" << suffix << "_type=" << scales->type_s() << "\n";
+                        oss << kv.first << "_scale" << suffix << "_offset=" << wt_oss.tellp() << "\n";
+                        oss << kv.first << "_scale" << suffix << "_size=" << scales->mem_size() << "\n";
+                        oss << kv.first << "_scale" << suffix << "_shape=" << scales->shape().to_string() << "\n";
+                        wt_oss.write(scales->data<char>(), scales->mem_size());
+                        is_offset = true;
+                    }
+
+                    // 2. serialize zp
+                    auto z_size = offsets.size();
+                    if (is_params && z_size == 1)
+                    {
+                        oss << kv.first << "_zp" << suffix << "=" << offsets[0] << "\n";
+                    }
+                    else if (is_offset && z_size >= 1)
+                    {
+                        oss << kv.first << "_zp" << suffix << "_type=" << offsets->type_s() << "\n";
+                        oss << kv.first << "_zp" << suffix << "_offset=" << wt_oss.tellp() << "\n";
+                        oss << kv.first << "_zp" << suffix << "_size=" << offsets->mem_size() << "\n";
+                        oss << kv.first << "_zp" << suffix << "_shape=" << offsets->shape().to_string() << "\n";
+                        wt_oss.write(offsets->data<char>(), offsets->mem_size());
+                    }
+
+                    // 3. serialize range min/max
+                    auto range_min_size = quantization.mins().size();
+                    auto range_max_size = quantization.maxs().size();
+                    if (range_min_size == 1)
+                    {
+                        auto min_v = quantization.mins()[0];
+                        auto max_v = quantization.maxs()[0];
+                        oss << kv.first << "_range" << suffix << "=[" << min_v << "," << max_v << "]\n";
+                    }
+                    else if (range_min_size > 1 && range_max_size == range_min_size)
+                    {
+                        std::vector<float> mins_maxs_v = quantization.mins();
+                        auto maxs_v = quantization.maxs();
+                        mins_maxs_v.insert(mins_maxs_v.end(), maxs_v.begin(), maxs_v.end());
+                        auto s_m_size = mins_maxs_v.size() * sizeof(float);
+                        oss << kv.first << "_range" << suffix << "_type=" << Tensor::dtype_to_string(Tensor::FP32) << "\n";
+                        oss << kv.first << "_range" << suffix << "_offset=" << wt_oss.tellp() << "\n";
+                        oss << kv.first << "_range" << suffix << "_size=" << s_m_size << "\n";
+                        oss << kv.first << "_range" << suffix << "_shape="
+                            << "[2," << range_max_size << "]\n";
+                        wt_oss.write((char *)mins_maxs_v.data(), s_m_size);
+                    }
+                };
+
                 // weights/biases/negative_slope
                 auto scales = kv.second->quantization().scales();
-                auto s_size = scales.size();
-                if (s_size == 1)
+                if (!scales.contain_quant())
                 {
-                    oss << kv.first << "_scale=" << float_to_string(scales.astype(Tensor::FP32)[0]) << "\n";
+                    do_quantization_serialize(kv.second->quantization());
                 }
-                else if (s_size > 1)
+                else
                 {
-                    oss << kv.first << "_scale_type=" << scales->type_s() << "\n";
-                    oss << kv.first << "_scale_offset=" << wt_oss.tellp() << "\n";
-                    oss << kv.first << "_scale_size=" << scales->mem_size() << "\n";
-                    oss << kv.first << "_scale_shape=" << scales->shape().to_string() << "\n";
-                    wt_oss.write(scales->data<char>(), scales->mem_size());
-                }
-                auto offsets = kv.second->quantization().offsets();
-                auto z_size = offsets.size();
-                if (z_size == 1)
-                {
-                    oss << kv.first << "_zp=" << offsets.astype(Tensor::INT32)[0] << "\n";
-                }
-                else if (z_size > 1)
-                {
-                    oss << kv.first << "_zp_type=" << offsets->type_s() << "\n";
-                    oss << kv.first << "_zp_offset=" << wt_oss.tellp() << "\n";
-                    oss << kv.first << "_zp_size=" << offsets->mem_size() << "\n";
-                    oss << kv.first << "_zp_shape=" << offsets->shape().to_string() << "\n";
-                    wt_oss.write(offsets->data<char>(), offsets->mem_size());
-                }
-                auto range_min_size = kv.second->quantization().mins().size();
-                auto range_max_size = kv.second->quantization().maxs().size();
-                if (range_min_size == 1)
-                {
-                    auto min_v = kv.second->quantization().mins()[0];
-                    auto max_v = kv.second->quantization().maxs()[0];
-                    oss << kv.first << "_range=[" << min_v << "," << max_v << "]\n";
-                }
-                else if (range_min_size > 1 && range_max_size == range_min_size)
-                {
-                    std::vector<float> mins_maxs_v = kv.second->quantization().mins();
-                    auto maxs_v = kv.second->quantization().maxs();
-                    mins_maxs_v.insert(mins_maxs_v.end(), maxs_v.begin(), maxs_v.end());
-                    auto s_m_size = mins_maxs_v.size() * sizeof(float);
-                    oss << kv.first << "_range_type=" << Tensor::dtype_to_string(Tensor::FP32) << "\n";
-                    oss << kv.first << "_range_offset=" << wt_oss.tellp() << "\n";
-                    oss << kv.first << "_range_size=" << s_m_size << "\n";
-                    oss << kv.first << "_range_shape="
-                        << "[2," << range_max_size << "]\n";
-                    wt_oss.write((char *)mins_maxs_v.data(), s_m_size);
+                    int q_level = 0;
+                    auto quantization = kv.second->quantization();
+                    do
+                    {
+                        do_quantization_serialize(quantization, std::to_string(q_level++));
+                        scales = quantization.scales();
+                        if (scales.contain_quant())
+                            quantization = scales->quantization();
+                    } while (scales.contain_quant());
                 }
             }
         }

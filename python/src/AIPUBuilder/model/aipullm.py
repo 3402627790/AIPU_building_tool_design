@@ -5,7 +5,8 @@ import torch
 
 from typing import Union
 from AIPUBuilder.core import (Graph, aipugb, Target, use_cuda, check_graph,
-                              OpType, TensorList, SubGraphNode, AIPUELF, LlmInfo, BuilderConfig)
+                              OpType, TensorList, SubGraphNode, AIPUELF, LlmInfo,
+                              BuilderConfig, BackupPassmgr, disable_pass)
 from AIPUBuilder.logger import ERROR, INFO, DEBUG, WARN
 from AIPUBuilder import ops
 from AIPUBuilder.simplifier import gsim as aipu_gsim
@@ -13,6 +14,7 @@ from AIPUBuilder.model.register import CAUSALLMS, MODELQUANTIZE
 from AIPUBuilder.model.modelbuild import ModelBuild
 from AIPUBuilder.model.qinfo import ModelQuantize
 from AIPUBuilder.model.config import PretrainedConfig
+from AIPUBuilder.model.utils import parse_config_with_double_dash
 from AIPUBuilder.model.passes import conv2d_to_fc, convert_group_fp16_scales_to_fp8
 from AIPUBuilder.model.llm.llmutils import get_embedding_data, build_ir_postprocess
 
@@ -178,7 +180,7 @@ class AIPULLM(object):
 
     def _graph_opt_after_quantize(self, model):
         conv2d_to_fc(model)
-        afp8_type = self.hf_config.aipu_quant_config.get('afp8_type', '')
+        afp8_type = self.hf_config.get('aipu_quant_config', {}).get('afp8_type', '')
         if afp8_type in ['float8_e4m3fn', 'float8_e5m2']:
             convert_group_fp16_scales_to_fp8(model, afp8_type)
 
@@ -266,15 +268,30 @@ class AIPULLM(object):
 
         INFO(f"[LLM] begin to simplifier the compass {self.model_type} IR...")
         before_ns = _statistic_nodes_num(model)
-        if isinstance(self.hf_config.get('enable_gsim', False), str) and self.hf_config.get('enable_gsim', '').lower() == 'full':
-            ret = full_simplify(model)
-        else:
-            ret = simplify(model)
-        after_ns = _statistic_nodes_num(model)
-        if ret:
-            model.topological_sort()
-            model.reset_layer_id()
-        _show(before_ns, after_ns)
+        parsed_gsim_config = {}
+        if len(self.hf_config.get('gsim_config', '')):
+            parsed_gsim_config = parse_config_with_double_dash(self.hf_config.get('gsim_config'))
+            INFO(f"[LLM] gsim_config = {parsed_gsim_config}")
+
+        with BackupPassmgr():
+            configed_disable_passes = parsed_gsim_config.get('disable_pass', [])
+            if len(configed_disable_passes):
+                INFO(f"[LLM] gsim configurates the disable_pass = {configed_disable_passes}")
+            for dpasses in configed_disable_passes:
+                for p in dpasses.replace(' ', '').split(','):
+                    disable_pass(p)
+
+            enable_full = parsed_gsim_config.get('full', False)
+            if (isinstance(self.hf_config.get('enable_gsim', False), str) and
+                    self.hf_config.get('enable_gsim', '').lower() == 'full') or enable_full:
+                ret = full_simplify(model)
+            else:
+                ret = simplify(model)
+            after_ns = _statistic_nodes_num(model)
+            if ret:
+                model.topological_sort()
+                model.reset_layer_id()
+            _show(before_ns, after_ns)
         return ret
 
     def _gbuilder(self, model, aipu_bin, model_type, target, hf_config, enable_ds=True):

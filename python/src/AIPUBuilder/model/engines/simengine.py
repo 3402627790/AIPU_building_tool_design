@@ -12,7 +12,7 @@ from AIPUBuilder.model.register import register_engine
 from .baseengine import BaseEngine
 
 
-@register_engine('sim')
+@register_engine(['sim', 'simulator'])
 class SimEngine(BaseEngine):
     def __init__(self, config=None, aipu_binary_path='', simulator='', core_num=1):
 

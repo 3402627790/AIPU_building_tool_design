@@ -304,7 +304,7 @@ def merge_quantized_ln(graph):
         biases = np.reshape(biases, [-1])
         weights = np.array(objs_dict[gamma].value).astype(np.int8)
         weights = np.reshape(weights, [-1])
-        eps_q = objs_dict[epsilon].value.item(0)
+        eps_q = objs_dict[epsilon].value.item()
         eps_s, eps_z = add1_in_edges[1][2]['tensor'].scale_zp
 
         inp_out_attr = copy.deepcopy(reshape1_in_edges[0][2])
@@ -313,7 +313,7 @@ def merge_quantized_ln(graph):
         graph.remove_edges_from(add3_in_edges)
         graph.add_edge(reshape1_src, add3, **inp_out_attr)
         ln_attr = objs_dict[add3].copied_attr()
-        ln_attr.update({'epsilon': eps_q, 'eps_scale': eps_s, 'eps_zp': eps_z, 'weights': weights,
+        ln_attr.update({'epsilon': eps_q, 'eps_scale': eps_s.item(), 'eps_zp': eps_z.item(), 'weights': weights,
                         'biases': biases, 'opset_version': 6, 'non_channel_axes': axes, 'data_format': 'NCHW'})
         NodeWrap(graph, add3).replace_obj(
             'InstanceNormalization', ln_attr)
@@ -465,12 +465,12 @@ def merge_ln2(graph):
         matched = True
 
         if quant:
-            eps_q = objs_dict[eps].value.item(0)
+            eps_q = objs_dict[eps].value.item()
             eps_s, eps_z = add1_in_edges[1][2]['tensor'].scale_zp
 
-            eps = float((eps_q - eps_z) * eps_s)
+            eps = float((eps_q - eps_z.item()) * eps_s.item())
         else:
-            eps = float(objs_dict[eps].value.item(0))
+            eps = float(objs_dict[eps].value.item())
 
         inp_out_attr = copy.deepcopy(mean1_in_edges[0][2])
         inp_out_attr.update({'dst_in_port': 0})
@@ -643,11 +643,11 @@ def merge_ln3(graph):
         matched = True
 
         if quant:
-            eps_q = objs_dict[eps].value.item(0)
+            eps_q = objs_dict[eps].value.item()
             eps_s, eps_z = add1_in_edges[1][2]['tensor'].scale_zp
-            eps = float((eps_q - eps_z) * eps_s)
+            eps = float((eps_q - eps_z.item()) * eps_s.item())
         else:
-            eps = float(objs_dict[eps].value.item(0))
+            eps = float(objs_dict[eps].value.item())
 
         inp_out_attr = copy.deepcopy(mean1_in_edges[0][2])
         inp_out_attr.update({'dst_in_port': 0})
@@ -744,11 +744,11 @@ def merge_rms_norm(graph):
         matched = True
 
         if quant:
-            eps_q = objs_dict[eps].value.item(0)
+            eps_q = objs_dict[eps].value.item()
             eps_s, eps_z = add1_in_edges[1][2]['tensor'].scale_zp
-            eps = float((eps_q - eps_z) * eps_s)
+            eps = float((eps_q - eps_z.item()) * eps_s.item())
         else:
-            eps = float(objs_dict[eps].value.item(0))
+            eps = float(objs_dict[eps].value.item())
 
         inp_out_attr = copy.deepcopy(mul1_in_edges[0][2])
         inp_out_attr.update({'dst_in_port': 0})
@@ -1023,7 +1023,7 @@ def convert_special_uni_seq_lstm(graph):
             else:
                 batch_size, time_steps = inp.shape[0], 1
                 reshape_dim = [inp.shape[0], 1,
-                               int(np.prod(inp.shape)) // inp.shape[0]]
+                               int(np.prod(inp.shape).item()) // inp.shape[0]]
                 input_size = reshape_dim[-1]
                 src, _, k, in_attr = in_edges[0]
                 insert_reshape(graph, src, lstm, in_attr, reshape_dim,
@@ -1201,15 +1201,17 @@ def convert_strided_slice(graph, op_type='TfStridedSlice'):
                 out_shape = []
 
                 from ....ops.tf_ops.array_ops import TfStridedSliceOp
-                begin, end, strides, out_shape, reshape_dim1, split_axis, splits_dim, reshape_dim2 = TfStridedSliceOp.set_attr_remove_mask_tf(shape,
-                                                                                                                                              begin,
-                                                                                                                                              end,
-                                                                                                                                              strides,
-                                                                                                                                              shrink_axis_mask,
-                                                                                                                                              new_axis_mask,
-                                                                                                                                              ellipsis_mask,
-                                                                                                                                              begin_mask,
-                                                                                                                                              end_mask)
+                begin, end, strides, out_shape, reshape_dim1, split_axis, splits_dim, reshape_dim2 = TfStridedSliceOp.set_attr_remove_mask_tf(
+                    shape,
+                    begin.tolist(),
+                    end.tolist(),
+                    strides.tolist(),
+                    shrink_axis_mask,
+                    new_axis_mask,
+                    ellipsis_mask,
+                    begin_mask,
+                    end_mask
+                )
 
                 if reshape_dim1 != None:
                     src, _, k, p_in_attr = in_edges[0]
@@ -3211,7 +3213,7 @@ def split_l2_norm(graph):
 
                 graph.add_node(pre_reshape)
                 reshape_dim = np.array(
-                    [1, 1, 1, int(np.prod(input_shapes[0]))], np.int64)
+                    [1, 1, 1, int(np.prod(input_shapes[0]).item())], np.int64)
                 reshape_attr = {'name': pre_reshape,
                                 'opset_version': reshape_version}
                 NodeWrap(graph, pre_reshape).replace_obj(

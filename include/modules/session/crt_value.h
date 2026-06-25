@@ -106,9 +106,29 @@ public:
         return static_cast<T *>(data_.get());
     }
 
-    size_t &size()
+    size_t &memsize()
     {
         return size_;
+    }
+
+    size_t size()
+    {
+        auto dims = tensor_info_.get_dims();
+        if (dims.size() == 0)
+            return 0;
+        size_t s = 1;
+        for (auto d : dims)
+        {
+            if (d == -1)
+            {
+                return 0;
+            }
+            else
+            {
+                s *= d;
+            }
+        }
+        return s;
     }
     struct CrtTensorInfo &tensor_info()
     {
@@ -121,6 +141,10 @@ public:
     aipubt::Tensor::Dtype &tensor_type()
     {
         return tensor_info_.tensor_type();
+    }
+    std::vector<int32_t> &dims()
+    {
+        return tensor_info_.get_dims();
     }
 
 private:

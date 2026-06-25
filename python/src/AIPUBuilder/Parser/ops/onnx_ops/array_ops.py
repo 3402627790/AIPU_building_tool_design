@@ -503,8 +503,8 @@ class FlattenOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
             inp = np.reshape(inp, (1, inp.size))
         else:
             inp = inputs[0]
-        new_shape = (int(np.prod(inp.shape[0:self.axis])),
-                     int(np.prod(inp.shape[self.axis:])))
+        new_shape = (int(np.prod(inp.shape[0:self.axis]).item()),
+                     int(np.prod(inp.shape[self.axis:]).item()))
         out_tensor = np.reshape(inp, new_shape)
         self.set_out_tensor(out_tensor)
 
@@ -939,7 +939,7 @@ class ReshapeOp(OpHasOneOutPort, OnnxOp):
                                     0].shape[idx]
                     if -1 in shape:
                         idx = shape.index(-1)
-                        shape[idx] = int(np.prod(self.get_input_shapes()[0]) // -np.prod(shape))
+                        shape[idx] = int(np.prod(self.get_input_shapes()[0]).item() // -np.prod(shape).item())
                 except:
                     ERROR(
                         '[Parser]: Meets exception when obtaining shape of Reshape(%s) for %s!' % self.name)
@@ -1977,13 +1977,23 @@ class TriluOp(OpHasOneOutPort, OnnxOp):
     def infer_shape(self):
         super(TriluOp, self).infer_shape()
         inputs = self.get_input_tensors()
-        k = inputs[1].item()
+        k = inputs[1].item() if len(inputs) > 1 else 0
         if self.upper:
             out_tensor = np.triu(inputs[0].astype(np.float32), k)
         else:
             out_tensor = np.tril(inputs[0].astype(np.float32), k)
         out_tensor = out_tensor.astype(inputs[0].dtype)
         self.set_out_tensor(out_tensor)
+
+    def convert_version(self):
+        from ...front_end.onnx.passes.common_passes import insert_constant
+        # max_ver = type(self).max_ver()
+        # cur_ver = self.cur_version
+
+        in_edges = self._graph.sorted_in_edges(self.name, keys=True, data=True)
+        if len(in_edges) < 2:
+            insert_constant(self._graph, self.name + '_k',
+                            np.array(0, np.int32), self.name, in_port=1)
 
 
 class UniqueOp(OpHasVariableOutPorts, OpHasAxis, DynamicShapeOp, OnnxOp):
@@ -2016,7 +2026,7 @@ class UniqueOp(OpHasVariableOutPorts, OpHasAxis, DynamicShapeOp, OnnxOp):
             inp = inputs[0]
         else:
             inp_shape = inputs[0].shape
-            inp = np.arange(int(np.prod(inp_shape)), dtype=inputs[0].dtype).reshape(inp_shape)
+            inp = np.arange(int(np.prod(inp_shape).item()), dtype=inputs[0].dtype).reshape(inp_shape)
         y, indices, inverse_indices, counts = np.unique(
             inp, True, True, True, axis=self.axis)
         if self.sorted is False:
@@ -2025,8 +2035,8 @@ class UniqueOp(OpHasVariableOutPorts, OpHasAxis, DynamicShapeOp, OnnxOp):
                 argsorted_indices, np.arange(len(argsorted_indices)))}
             indices = indices[argsorted_indices]
             y = np.take(inp, indices, axis=self.axis)
-            inverse_indices = np.asarray(
-                [inverse_indices_map[i] for i in inverse_indices], dtype=np.int64)
+            inverse_indices = np.array(
+                [inverse_indices_map[int(i)] for i in inverse_indices.ravel()], dtype=np.int64)
             counts = counts[argsorted_indices]
         out_ports = self.get_out_ports()
         out_dict = {

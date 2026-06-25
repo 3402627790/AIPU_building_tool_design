@@ -122,6 +122,8 @@ __all__ = [
     "heatmap_max_keypoint",
     "input",
     "in_topk",
+    "isinf",
+    "isnan",
     "If",
     "instance_norm",
     "l1pooling2d",

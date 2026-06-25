@@ -99,12 +99,12 @@ class AddOp(ArithmeticOp, OpHasAxis, OnnxOp):
 
     def infer_shape(self):
         super(AddOp, self).infer_shape()
-        inputs = self.get_input_tensors()
         cur_ver = self.cur_version
         if cur_ver <= 6:
             if not self.broadcast:
-                assert list(inputs[0].shape) == list(
-                    inputs[1].shape), 'The lengths of input0 and input1 are not the same in AddOp infer shape.'
+                input_shapes = self.get_input_shapes()
+                assert list(input_shapes[0]) == list(
+                    input_shapes[1]), 'The lengths of input0 and input1 are not the same in AddOp infer shape.'
 
 
 class ArgMaxOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
@@ -474,12 +474,12 @@ class DivOp(ArithmeticOp, OpHasDivisor, OnnxOp):
 
     def infer_shape(self):
         super(DivOp, self).infer_shape()
-        inputs = self.get_input_tensors()
         cur_ver = self.cur_version
         if cur_ver <= 6:
             if not self.broadcast:
-                assert list(inputs[0].shape) == list(
-                    inputs[1].shape), 'The lengths of input0 and input1 are not the same in DivOp infer shape.'
+                input_shapes = self.get_input_shapes()
+                assert list(input_shapes[0]) == list(
+                    input_shapes[1]), 'The lengths of input0 and input1 are not the same in DivOp infer shape.'
 
 
 class EinsumOp(OpHasOneOutPort, OnnxOp):
@@ -694,8 +694,8 @@ class HardmaxOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
         self.axis = OpHasAxis.make_axes_non_negative(
             self.axis, len(input_shape))
         if self.cur_version < 13:
-            pre_reshape_dim = [np.prod(input_shape[:self.axis], dtype=np.uint32),
-                               np.prod(input_shape[self.axis:], dtype=np.uint32)]
+            pre_reshape_dim = [np.prod(input_shape[:self.axis], dtype=np.uint32).item(),
+                               np.prod(input_shape[self.axis:], dtype=np.uint32).item()]
             indices = np.argmax(inputs[0].reshape(pre_reshape_dim), axis=1)
             out_tensor = tf.one_hot(indices,
                                     pre_reshape_dim[1],
@@ -729,7 +729,7 @@ class HardmaxOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
                         self.axis += len(input_shape)
                     pre_dim = [-1, 1] \
                         if self.axis == 0 \
-                        else [int(np.prod(input_shape[:self.axis])), int(np.prod(input_shape[self.axis:]))]
+                        else [int(np.prod(input_shape[:self.axis]).item()), int(np.prod(input_shape[self.axis:]).item())]
                     post_dim = list(input_shape)
                     if self.axis > 1:
                         self.axis = 1
@@ -842,7 +842,7 @@ class LogSoftmaxOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
             input_shape = inputs[0].shape
             inner_dim = [-1, 1] \
                 if self.axis == 0 \
-                else [int(np.prod(input_shape[:self.axis])), int(np.prod(input_shape[self.axis:]))]
+                else [int(np.prod(input_shape[:self.axis]).item()), int(np.prod(input_shape[self.axis:]).item())]
             inp = np.reshape(inputs[0], inner_dim)
             out_tensor = torch.log_softmax(
                 torch.from_numpy(inp.astype(np.float32)), dim=0 if self.axis == 0 else -1).numpy()
@@ -872,7 +872,7 @@ class LogSoftmaxOp(OpHasAxis, OpHasOneOutPort, OnnxOp):
                             insert_reshape_after
                         pre_dim = [-1, 1] \
                             if self.axis == 0 \
-                            else [int(np.prod(input_shape[:self.axis])), int(np.prod(input_shape[self.axis:]))]
+                            else [int(np.prod(input_shape[:self.axis]).item()), int(np.prod(input_shape[self.axis:]).item())]
                         post_dim = list(input_shape)
                         if self.axis > 1:
                             self.axis = 1
@@ -1175,12 +1175,12 @@ class MulOp(ArithmeticOp, OpHasAxis, OnnxOp):
 
     def infer_shape(self):
         super(MulOp, self).infer_shape()
-        inputs = self.get_input_tensors()
         cur_ver = self.cur_version
         if cur_ver <= 6:
             if not self.broadcast:
-                assert list(inputs[0].shape) == list(
-                    inputs[1].shape), 'The lengths of input0 and input1 are not the same in MulOp infer shape.'
+                input_shapes = self.get_input_shapes()
+                assert list(input_shapes[0]) == list(
+                    input_shapes[1]), 'The lengths of input0 and input1 are not the same in MulOp infer shape.'
 
     def __getattr__(self, item):
         ret = None
@@ -1744,7 +1744,7 @@ class ResizeOp(LayoutConcernedOp, OpHasOneOutPort, OnnxOp):
                                                 for idx in range(spatial_len)])
                 in_x = x_data[data_idx]
                 ret = ret + np.prod([init_dict[d_names[idx]][idx][ele_idx[idx + 2]]
-                                     for idx in range(spatial_len)]) * in_x
+                                     for idx in range(spatial_len)]).item() * in_x
             y_data[ele_idx] = ret
         if pre_perm is not None:
             y_data = np.transpose(y_data, Op.cal_inverse_perm(pre_perm))
@@ -2023,7 +2023,7 @@ class ResizeOp(LayoutConcernedOp, OpHasOneOutPort, OnnxOp):
         input_idx = 0
         for dim_idx in range(n_dim):
             input_idx = input_idx + input_mappings[dim_idx][0]
-        out_size = np.prod(output_shape)
+        out_size = np.prod(output_shape).item()
         for _ in range(0, out_size):
             ret = extrapolation_value if input_idx < 0 else x_data.flatten()[input_idx]
             flatten_output_data.append(ret)
@@ -2366,6 +2366,7 @@ class ResizeOp(LayoutConcernedOp, OpHasOneOutPort, OnnxOp):
             if in_attr.get('tensor', None) is None \
                     or in_attr['tensor'].value is None \
                     or 0 in in_attr['tensor'].value.shape \
+                    or sizes.size != in_attr['tensor'].value.size \
                     or np.any(np.array(in_attr['tensor'].value) != sizes):
                 self._graph.remove_edge(src, self.name, key=k)
                 insert_constant(self._graph, self.name + '_sizes', np.array(
@@ -2544,7 +2545,7 @@ class SoftmaxOp(SameShapeOp, OpHasAxis, OnnxOp):
             if self.cur_version < 13:
                 inner_dim = [-1, 1] \
                     if self.axis == 0 \
-                    else [int(np.prod(input_shape[:self.axis])), int(np.prod(input_shape[self.axis:]))]
+                    else [int(np.prod(input_shape[:self.axis]).item()), int(np.prod(input_shape[self.axis:]).item())]
                 inp = np.reshape(inputs[0], inner_dim).astype(np.float32)
                 out_tensor = _np_softmax(inp, axis=0 if self.axis == 0 else -1)
                 out_tensor = np.reshape(out_tensor, input_shape)
@@ -2575,7 +2576,7 @@ class SoftmaxOp(SameShapeOp, OpHasAxis, OnnxOp):
                 from ...front_end.onnx.passes.common_passes import insert_reshape, insert_reshape_after
                 pre_dim = [-1, 1] \
                     if self.axis == 0 \
-                    else [int(np.prod(input_shape[:self.axis])), int(np.prod(input_shape[self.axis:]))]
+                    else [int(np.prod(input_shape[:self.axis]).item()), int(np.prod(input_shape[self.axis:]).item())]
                 post_dim = list(input_shape)
                 if self.axis > 1:
                     self.axis = 1
@@ -2664,12 +2665,12 @@ class SubOp(ArithmeticOp, OpHasAxis, OnnxOp):
 
     def infer_shape(self):
         super(SubOp, self).infer_shape()
-        inputs = self.get_input_tensors()
         cur_ver = self.cur_version
         if cur_ver <= 6:
             if not self.broadcast:
-                assert list(inputs[0].shape) == list(
-                    inputs[1].shape), 'The lengths of input0 and input1 are not the same in SubOp infer shape.'
+                input_shapes = self.get_input_shapes()
+                assert list(input_shapes[0]) == list(
+                    input_shapes[1]), 'The lengths of input0 and input1 are not the same in SubOp infer shape.'
 
     def __getattr__(self, item):
         ret = None
@@ -2793,7 +2794,7 @@ class TopKOp(OpHasAxis, OpHasMultipleOutPorts, OnnxOp):
             k = self.k
         else:
             in_consts = self.sorted_in_consts()
-            k = int(in_consts[-1][2]) if in_consts else -1
+            k = int(in_consts[-1][2].item()) if in_consts else -1
         if k > 0:
             largest = bool(self.largest) if cur_ver >= 11 else True
             need_sorted = bool(self.sorted) if cur_ver >= 11 else True

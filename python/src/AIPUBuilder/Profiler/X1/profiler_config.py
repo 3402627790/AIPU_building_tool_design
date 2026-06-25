@@ -247,7 +247,7 @@ class SummaryAverageUtilizationGen(SummaryTableItemGen):
     def gen_content(self, node_infos, *args):
         def func(node_infos):
             sum_val = 0
-            cycles = int(node_infos[0]["summary_content"]["total cycles"])
+            cycles = int(float(node_infos[0]["summary_content"]["total cycles"]))
             for node_info in node_infos:
                 sum_val += int(node_info["content"][f"{self.unit} busy cycle"])
             if cycles == 0:
@@ -285,7 +285,7 @@ class SummaryFpsItem(SummaryTableItemGen):
 
     def gen_content(self, node_infos, *args):
         def func(node_infos):
-            cycles = int(node_infos[0]["summary_content"]["total cycles"])
+            cycles = int(float(node_infos[0]["summary_content"]["total cycles"]))
             global frequency
             if cycles == 0:
                 return "nan"
@@ -300,7 +300,7 @@ class SummaryCostTimeItem(SummaryTableItemGen):
 
     def gen_content(self, node_infos, *args):
         def func(node_infos):
-            cycles = int(node_infos[0]["summary_content"]["total cycles"])
+            cycles = int(float(node_infos[0]["summary_content"]["total cycles"]))
             global frequency
             ms = cycles / frequency / 1000
             return f"{ms}ms(@{frequency}MHz)"

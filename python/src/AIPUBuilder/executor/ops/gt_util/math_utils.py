@@ -458,7 +458,13 @@ def fexp_tpc(x):
         # y = np.round(x)
         # flag = np.abs(x - x.astype('int32')) == 0.5
         # y[flag] = x.astype('int32')[flag]
-        y = x.astype('int32')  # trunc in default
+        x_tmp = np.asarray(x, dtype=np.float64)
+        inf_mask = np.isinf(x_tmp)
+        if np.any(inf_mask):
+            x_tmp[inf_mask] = np.where(x_tmp[inf_mask] > 0, np.iinfo(np.int32).max, np.iinfo(np.int32).min)
+            y = x_tmp.astype('int32')
+        else:
+            y = x.astype('int32')  # trunc in default
         return y
 
     def convert_float8(x):

@@ -20,14 +20,13 @@
  * @Last Modified by: Kyle Huang
  * @Last Modified time: 2026-04-09 14:23:41
  */
-
 #include "builder/mqbuilder.h"
 #include "builder/assembler.h"
-#include "builder/builder.h"
 #include "builder/code_generator.h"
 #include "builder/gop_plugin.h"
 #include "builder/kernel_adapter.h"
 #include "builder/load_balancer.h"
+#include "builder/lowering/lowering.h"
 #include "builder/mq_ir_cache.h"
 #include "builder/object_generator.h"
 #include "builder/optimizer.h"
@@ -40,9 +39,6 @@
 
 namespace aipubt
 {
-
-GraphPtr load_mq_ir_cache(const std::string &dir);
-void save_mq_ir_cache(GraphPtr graph, const std::string &dir);
 
 MqBuilder::MqBuilder(GraphPtr graph) : m_graph(graph)
 {
@@ -99,7 +95,13 @@ bool MqBuilder::build()
     TensorPtr stream3 = std::make_shared<Tensor>("stream3", TensorShape({0}), Tensor::UINT8);
     m_graph->global_tensors()["stream3"] = stream3;
 
-    config_dynamic_shape(m_graph);
+    if (loaded_from_cache)
+    {
+        if (!load_mq_ir_cache_attributes(m_graph, mq_load_ir))
+        {
+            WARN() << "mq_load_ir: failed to load attributes, continuing without them";
+        }
+    }
 
     if (!loaded_from_cache)
     {
@@ -120,8 +122,11 @@ bool MqBuilder::build()
     PerfEstimator perf;
     perf(m_graph);
 
-    aipubt::BuilderConfig::set(Constants::single_core_opt, true);
     LoadBalancer load_balancer;
+    BuilderConfig::set(Constants::load_balance_strategy, 0);
+    BuilderConfig::set(Constants::disable_dependency, true);
+    int mq_num = BuilderConfig::get<int>(Constants::set_mq_num);
+    load_balancer.set_core(mq_num);
     load_balancer.set_graph(m_graph);
     load_balancer.schedule();
     auto levels = load_balancer.get_levels();
@@ -169,7 +174,6 @@ bool MqBuilder::build()
             auto sgn = SubGraphNode::from_node(s);
             if (sgn)
             {
-
                 auto sg = sgn->subgraph();
                 for (auto n : sg->nodes())
                 {
@@ -210,8 +214,9 @@ bool MqBuilder::build()
     Assembler assembler;
     assembler.set_graph(m_graph);
     assembler.set_elf(m_elf);
+    assembler.set_level(levels);
     assembler.assembly();
-    auto streams = assembler.get_streams();
+    auto &streams = assembler.get_streams();
     auto param_offset_table = assembler.get_param_offset_table();
     auto &params = assembler.get_params();
     m_tensor_index_map = assembler.get_tensor_index_map();

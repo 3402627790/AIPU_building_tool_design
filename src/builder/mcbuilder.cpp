@@ -845,13 +845,11 @@ static void generate_call(std::stringstream &m_stream, const std::string &func, 
              << "{brrl r" << reg << ";}\n";
 }
 
-inline void generate_tec_sync(std::stringstream &m_stream, size_t reg = 21)
+inline void generate_tec_sync(std::stringstream &m_stream)
 {
-    // m_stream << "{mov r" << reg << ",0;}\n"; // wait all internal events
-    m_stream << "{mov r" << reg << ",-33;}\n"; // 0xffffffdf: only wait lsu idle
-
-    m_stream << "{wfe r" << reg << ",0;}\n"
-             << "{wfe r" << reg << ",2;}\n";
+    m_stream << "{mov r20,-33; bfs r21,r31,0,30;}\n" // 0xffffffdf: only wait lsu idle
+             << "{wfe r20,0;}\n"
+             << "{wfe r21,2;}\n";
 }
 
 void GraphELFBuilder::prefetch_cache(std::stringstream &m_stream, const std::string &symbol, const std::vector<uint32_t> prefetch_desc_len)

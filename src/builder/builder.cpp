@@ -192,6 +192,10 @@ static std::vector<MemoryObjectPtr> allocate_constant_data(size_t weight_offset,
             }
         }
 
+        if (BuilderConfig::get<bool>(Constants::enable_weight_align) && root_const->align < 256)
+        {
+            root_const->align = 256;
+        }
         weight_offset = aligned(weight_offset, root_const->align);
 
         MemoryObjectPtr s = std::make_shared<MemoryObject>(0);
@@ -919,55 +923,6 @@ static bool check_graph_weights(GraphPtr m_graph, bool error = true)
     return true;
 }
 
-// allocate output shape memory for data-aware nodes
-void allocate_output_shape(GraphPtr g)
-{
-    if (BuilderConfig::get<bool>(Constants::enable_ds))
-    {
-        uint32_t shape_offset = 0;
-        for (auto out : g->get_output_tensors())
-        {
-            shape_offset += 4 * out->shape().dim();
-        }
-        g->walk_on_node([&shape_offset](NodePtr n) {
-            uint32_t shape_size = 0;
-            if (n->type() == OpType_NonZero || n->type() == OpType_CacheUpdate)
-            {
-                shape_size = 4;
-            }
-            else if (n->type() == OpType_ConstantOfShape)
-            {
-                shape_size = 4 * n->inputs()[0]->shape().size();
-            }
-            else if (n->type() == OpType_Slice && n->inputs().size() == 5)
-            {
-                shape_size = 4 * n->inputs()[0]->shape().dim();
-            }
-            else if (n->type() == OpType_ForRangeEnder)
-            {
-                shape_size = 4 * n->inputs()[2]->shape().size();
-            }
-            else if (n->type() == OpType_IfEnder)
-            {
-                for (auto out : n->outputs())
-                {
-                    shape_size += 4 * out->shape().dim();
-                }
-            }
-            else if (n->type() == OpType_TopK && n->inputs().size() == 2)
-            {
-                shape_size = 4 * n->inputs()[1]->shape().size();
-            }
-            if (shape_size > 0)
-            {
-                n->set_attr(Constants::output_shape_offset, shape_offset);
-                n->set_attr(Constants::output_shape_size, shape_size);
-                shape_offset += shape_size;
-            }
-        });
-    }
-}
-
 std::vector<std::vector<int>> parse_input_shape(GraphPtr g, const std::string &opt)
 {
     std::vector<std::vector<int>> input_shapes;
@@ -1215,7 +1170,6 @@ GraphPtr GraphBuilder::build_graph(const std::vector<TensorPtr> &inputs_,
             n->set_attr("error_code", error_code);
         }
     }
-    allocate_output_shape(m_graph);
     BuilderOptimizer *optimizer = new BuilderOptimizer();
     optimizer->optimize(m_graph);
     if (!m_graph->check_valid_name())
@@ -1249,6 +1203,8 @@ GraphPtr GraphBuilder::build_graph(const std::vector<TensorPtr> &inputs_,
     else
     {
         LoadBalancer *load_balancer = new LoadBalancer();
+        int core_num = BuilderConfig::get<bool>(Constants::single_core_opt) ? 1 : Target::get_the_target()->core_num();
+        load_balancer->set_core(core_num);
         load_balancer->set_graph(m_graph);
         load_balancer->schedule();
         m_levels = load_balancer->get_levels();
@@ -1383,69 +1339,6 @@ static bool restore_node_output_for_dynamic_gm(GraphPtr g, std::map<NodePtr, Ten
         n->add_output(t, idx);
     }
     return true;
-}
-
-static void check_graph_input_shape(GraphPtr g)
-{
-    auto in_tensors = g->get_input_tensors();
-    for (auto &&opt : {Constants::input_shape, Constants::max_input_shape, Constants::default_input_shape})
-    {
-        if (!BuilderConfig::exist(opt))
-        {
-            continue;
-        }
-        bool check_result = true;
-        auto in_shapes = parse_input_shape(g, opt);
-        if (in_tensors.size() != in_shapes.size())
-        {
-            WARN() << "Failed to check option --" << opt << ": "
-                   << "number of input tensors is not equal to the given input shape!";
-            check_result = false;
-        }
-        if (check_result)
-        {
-            for (uint32_t i = 0; i < in_tensors.size(); ++i)
-            {
-                auto shape = get_base_shape(in_tensors[i]->shape());
-                if (shape.dim() != static_cast<int>(in_shapes[i].size()))
-                {
-                    WARN() << "Failed to check option --" << opt << ": "
-                           << "dimension of input tensor " << i << " is not equal to the given input shape!";
-                    check_result = false;
-                    break;
-                }
-            }
-        }
-        if (check_result)
-        {
-            std::vector<int> max_shape;
-            for (uint32_t i = 0; i < in_shapes.size(); ++i)
-            {
-                if (opt == Constants::max_input_shape)
-                {
-                    max_shape = in_shapes[i];
-                }
-                else
-                {
-                    max_shape = get_base_shape(in_tensors[i]->shape());
-                }
-                for (uint32_t j = 0; j < in_shapes[i].size(); ++j)
-                {
-                    if (in_shapes[i][j] < 0 || in_shapes[i][j] > max_shape[j])
-                    {
-                        WARN() << "Failed to check option --" << opt << ": "
-                               << "the given input shape exceeds the valid range of values!";
-                        check_result = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if (!check_result)
-        {
-            BuilderConfig::erase(opt);
-        }
-    }
 }
 
 static void reduce_constant(const std::vector<std::vector<NodePtr>> &levels)
@@ -1586,7 +1479,7 @@ static void check_symbol_shape(GraphPtr graph)
     }
 }
 
-static void update_params(GraphPtr graph, BuilderParams &params)
+void eval_expr_params(GraphPtr graph, BuilderParams &params)
 {
     auto &symbols = graph->symbols();
     auto enable_ds = BuilderConfig::get<bool>(Constants::enable_ds);
@@ -1790,99 +1683,6 @@ bool GraphBuilder::build_aipu(const std::vector<TensorPtr> &inputs_,
         return false;
     }
 
-    if (BuilderConfig::get<bool>(Constants::enable_ds))
-    {
-        // set default ds_output_shape if some input nodes don't have
-        bool has_ds_output_shape = false;
-        for (auto t : m_origin_graph->get_input_tensors())
-        {
-            auto n = t->node();
-            if (n->params().count("ds_output_shape"))
-            {
-                has_ds_output_shape = true;
-                break;
-            }
-        }
-        if (has_ds_output_shape)
-        {
-            for (auto t : m_origin_graph->get_input_tensors())
-            {
-                auto n = t->node();
-                if (!n->params().count("ds_output_shape"))
-                {
-                    std::vector<Expr> s = t->shape().symbol();
-                    n->params()["ds_output_shape"] = std::vector<std::vector<Expr>>{s};
-                }
-            }
-        }
-        check_graph_input_shape(m_origin_graph);
-        if (!BuilderConfig::exist(Constants::default_input_shape))
-        {
-            std::vector<std::vector<int>> max_shape;
-            if (BuilderConfig::exist(Constants::max_input_shape))
-            {
-                max_shape = parse_input_shape(m_origin_graph, Constants::max_input_shape);
-            }
-            else
-            {
-                for (auto t : m_origin_graph->get_input_tensors())
-                {
-                    max_shape.push_back(get_base_shape(t->shape()));
-                }
-            }
-            std::ostringstream oss;
-            oss << "[";
-            for (size_t i = 0; i < max_shape.size(); ++i)
-            {
-                oss << TensorShape(max_shape[i]);
-                if (i != max_shape.size() - 1)
-                {
-                    oss << ",";
-                }
-            }
-            oss << "]";
-            BuilderConfig::set(Constants::default_input_shape, oss.str());
-        }
-        // all input dimensions are dynamic by default
-        // otherwise parse its ds_output_shape
-        if (!BuilderConfig::exist(Constants::dynamic_input_dim))
-        {
-            std::set<std::string> dims;
-            uint32_t index = 0;
-            for (auto t : m_origin_graph->get_input_tensors())
-            {
-                auto n = t->node();
-                auto shape = get_base_shape(t->shape());
-                if (n->params().count("ds_output_shape"))
-                {
-                    std::vector<std::vector<Expr>> ds_output_shape = n->params()["ds_output_shape"];
-                    if (ds_output_shape.size() == 1 && (int)ds_output_shape[0].size() == shape.dim())
-                    {
-                        for (auto expr : ds_output_shape[0])
-                        {
-                            if (expr->op() == ExprImpl::Op::Constant)
-                            {
-                                dims.insert(expr->symbol().name());
-                            }
-                        }
-                    }
-                    else
-                    {
-                        FATAL() << "Unknown ds_output_shape param from Input: " << n->name();
-                    }
-                    index += shape.dim();
-                }
-                else
-                {
-                    for (int i = 0; i < shape.dim(); ++i)
-                    {
-                        dims.insert("d" + std::to_string(index++));
-                    }
-                }
-            }
-            BuilderConfig::set(Constants::dynamic_input_dim, dims);
-        }
-    }
     m_graph = build_graph(inputs, outputs);
     INFO() << "peak mem (build graph) " << getPeakMemory() << " MB";
     // update to the new graph's tensor
@@ -2074,7 +1874,7 @@ bool GraphBuilder::build_aipu(const std::vector<TensorPtr> &inputs_,
             }
             return total_act_size;
         };
-        uint64_t max_size = max_wt_size ? max_wt_size : max_act_size;
+        uint64_t max_size = max_act_size ? max_act_size : max_wt_size;
         uint64_t original_total_size = 0;
         uint64_t total_size = 0;
         for (size_t i = 0; i < m_levels.size(); ++i)
@@ -2518,8 +2318,8 @@ bool GraphBuilder::build_aipu(const std::vector<TensorPtr> &inputs_,
     // evaluate exprs in ro and desc if necessary
     // if (get_target()->isainfo().type >= ISA_ZYv5)
     {
-        update_params(m_graph, m_ro);
-        update_params(m_graph, m_descriptor);
+        eval_expr_params(m_graph, m_ro);
+        eval_expr_params(m_graph, m_descriptor);
     }
 
     // build remap table

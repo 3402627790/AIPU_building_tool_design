@@ -118,13 +118,7 @@ def register_app():
 
 
 def register_engine(name):
-    def wrapper(cls):
-        if name.lower() not in ENGINES:
-            ENGINES[name.lower()] = cls
-        else:
-            INFO(f"{name} app has alread registered in ENGINES")
-        return cls
-    return wrapper
+    return _register(name, 'ENGINES')
 
 
 def register_chat_template(names):

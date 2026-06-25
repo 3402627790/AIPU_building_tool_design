@@ -40,7 +40,6 @@ namespace Constants
     constexpr const char *AIPUOCC = "AIPUOCC";
 
     constexpr const char *CPSLD = "CPSLD";
-    constexpr const char *CPSCC = "CPSCC";
 
     // switch keys/global config
     constexpr const char *random_init = "random-init";
@@ -114,6 +113,7 @@ namespace Constants
     constexpr const char *max_input_shape = "max_input_shape";
     constexpr const char *default_input_shape = "default_input_shape";
     constexpr const char *dynamic_input_dim = "dynamic_input_dim";
+    constexpr const char *show_divided_graph = "show_divided_graph";
     constexpr const char *skip_simulator = "skip_simulator";
     constexpr const char *native_float_simulator = "native_float_simulator";
     constexpr const char *dump_schedule_cfg = "dump_schedule_cfg";

@@ -213,6 +213,15 @@ class ExecuTorch(object):
             from .executorch_flatbuffer.OptionalTensorList import OptionalTensorList
             t_list = OptionalTensorList()
             t_list.Init(val.Bytes, val.Pos)
+            t_id_list = t_list.ItemsAsNumpy().tolist()
+            value_info_list = []
+            for t_id in t_id_list:
+                if t_id != -1:
+                    _value_info = self.parse_value(t_id)
+                    value_info_list.append(_value_info)
+                else:
+                    value_info_list.append(None)
+            return value_info_list
         elif val_type == KernelTypes.Null:
             value_info['data'] = None
             value_info['dtype'] = None
@@ -244,7 +253,7 @@ class ExecuTorch(object):
             value_info['shape'] = []
             value_info['is_const'] = True
         elif val_type == KernelTypes.String:
-            pass
+            raise NotImplementedError('Still not support parse string value!')
         elif val_type == KernelTypes.IntList:
             from .executorch_flatbuffer.IntList import IntList
             parsed_value = IntList()
@@ -315,7 +324,7 @@ class ExecuTorch(object):
                     delegate_nodes = self.parse_delegate(instr_id, delegate, args)
                     nodes.extend(delegate_nodes)
                 elif instrargs_type == InstructionArguments.MoveCall:
-                    pass
+                    raise NotImplementedError('Still not support parse MoveCall!')
                 elif instrargs_type == InstructionArguments.JumpFalseCall:
                     pass
                 else:
@@ -377,8 +386,13 @@ class ExecuTorch(object):
         for i in output_ids:
             self.all_output_ids.add(i)
             out_info = args_info[i]
-            out_info['is_const'] = False
-            outputs.append(out_info)
+            if isinstance(out_info, (list, tuple)):
+                for o_info in out_info:
+                    o_info['is_const'] = False
+                    outputs.append(o_info)
+            else:
+                out_info['is_const'] = False
+                outputs.append(out_info)
         node_attr['inputs'] = inputs
         node_attr['outputs'] = outputs
         node_attr['op_attr'] = {}
@@ -430,7 +444,9 @@ class ExecuTorch(object):
 
         if buf_idx > 0:
             tensor_info['is_const'] = True
-            data = np.frombuffer(self.parse_const(buf_idx, alloc_info), dtype=dtype).reshape(shape)
+            raw_bytes = self.parse_const(buf_idx, alloc_info)
+            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize if shape else np.dtype(dtype).itemsize
+            data = np.frombuffer(bytes(raw_bytes[:nbytes]), dtype=dtype).reshape(shape)
         else:
             tensor_info['is_const'] = False
             data = None
@@ -646,6 +662,10 @@ class XnnPack(object):
                 output_ids = [n.OutputId()]
             else:
                 ERROR(f'Unexpected node type: {node_type}!')
+
+            output_min_max = node.OutputMinMax()
+            if output_min_max is not None:
+                op_attr.update(get_obj_attribute(output_min_max))
 
             node_attr['name'] = f'{op_type}_{args[-1]}_{output_ids[-1]}'
             for _id in input_ids:

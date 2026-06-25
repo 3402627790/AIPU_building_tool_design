@@ -18,7 +18,7 @@
  * @Author: Neo Wang
  * @Date: 2020-02-09 12:14:57
  * @Last Modified by: Neo Wang
- * @Last Modified time: 2026-05-18 16:24:18
+ * @Last Modified time: 2026-05-19 15:05:38
  */
 #ifndef UTILS_LOGGER_H
 #define UTILS_LOGGER_H
@@ -74,16 +74,6 @@ namespace GCompilerLogger
         }
         static int get_logger_level() { return GCompilerLogger::get_logger_level(); }
         static void print_backtrace() { utils::print_backtrace(2); }
-        static inline bool without_color()
-        {
-            static bool r = isatty(fileno(stdout)) || get_logger_file();
-            return r;
-        }
-        static inline bool without_color_err()
-        {
-            static bool r = isatty(fileno(stderr)) || get_logger_err_file();
-            return r;
-        }
     };
 }; // namespace GCompilerLogger
 }; // namespace aipubt

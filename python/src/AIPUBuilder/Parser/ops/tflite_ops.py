@@ -1061,7 +1061,7 @@ class LiteFULLY_CONNECTEDOp(BaseActivationOp, BaseLinearOp, TfliteOp):
                 assert inputs[0].shape[-1] == filter_shape[-1], 'input0 shape[-1] MUST be equal to filter shape[-1].'
                 out_shape = list(inputs[0].shape[:-1]) + [filter_shape[-2]]
             else:
-                out_shape = [int(np.prod(inputs[0].shape)) // filter_shape[-1], filter_shape[-2]]
+                out_shape = [int(np.prod(inputs[0].shape).item()) // filter_shape[-1], filter_shape[-2]]
             out_tensor = np.random.ranf(tuple(out_shape)).astype(inputs[0].dtype)
         self.set_out_tensor(out_tensor)
 
@@ -3181,7 +3181,7 @@ class LiteUNIQUEOp(OpHasVariableOutPorts, DynamicShapeOp, TfliteOp):
             inp = inputs[0]
         else:
             inp_shape = inputs[0].shape
-            inp = np.arange(int(np.prod(inp_shape)), dtype=inputs[0].dtype).reshape(inp_shape)
+            inp = np.arange(int(np.prod(inp_shape).item()), dtype=inputs[0].dtype).reshape(inp_shape)
         x, out_idx = tf.unique(inp, out_idx=tf.dtypes.as_dtype(self.out_idx))
         out_ports = self.get_out_ports()
         out_dict = {

@@ -258,9 +258,12 @@ def main():
                             weight_block_size=-1, if in [32, 64, 128, 256], will enable aipu blockwise quantization. \
                             weight_only_quantization_op=[fullyconnected], if use quant_type=w4, only fc layer is configurated to weight only quantization.\
                                                   if want to add other layer, please set like weight_only_quantization=[fullyconnected, convolution]")
+    args.add_argument('--gsim_config', type=str, default='',
+                      help="set graph simiplier config feilds, when want to set more gsim commands, \
+                            using gsim_config=--key1='value1_1,value1_2',--key2=value2,--key3=value3 to set.")
     args.add_argument('--builder_config', type=str, default='',
                       help="set aipugb compile feilds, when want to set more aipugb commands, \
-                            using builder_config=key1=value1,key2=value2,key3=value3 to set.")
+                            using builder_config=--key1='value1_1,value1_2',--key2=value2,--key3=value3 to set.")
     args.add_argument('--aipu_binary_path', type=str, default='',
                       help="if setted aipu_binary_path, the process of building fpIR/QIR/aipubin all skips, \
                             directly run this aipubin")

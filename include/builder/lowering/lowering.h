@@ -321,6 +321,7 @@ STATIC_PASS_FUNCTION(lower_d2s_d2s_eltwise);
 STATIC_PASS_FUNCTION(split_global_pool2D);
 PASS_FUNCTION(remove_pad);
 PASS_FUNCTION(unify_transpose_layout);
+STATIC_PASS_FUNCTION(fuse_tile_reshape);
 } // namespace aipubt
 
 #endif //! BUILDER_LOWERING_H

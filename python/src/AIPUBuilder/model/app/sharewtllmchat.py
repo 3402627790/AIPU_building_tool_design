@@ -11,7 +11,7 @@ from AIPUBuilder.tools.zipper.zip import *
 class ShareWtLLMChat(PDModeLLMChat):
     """ShareWtLLMChat is used for LLM model chat based on share weight prefill + decoder mode."""
 
-    def __init__(self, prompt: str = '', sys_prompt: str = '', sampling: str = "NONE", sampling_params: str = "", dump: bool = False):
+    def __init__(self, prompt: str = '', sys_prompt: str = '', sampling: str = "NONE", sampling_params: str = "", max_new_tokens: str = "", dump: bool = False):
         """ShareWtLLMChat constructor.
 
         Parameters
@@ -33,7 +33,7 @@ class ShareWtLLMChat(PDModeLLMChat):
             whether dump the input/output tensors of graph when running.
 
         """
-        super().__init__(prompt, sys_prompt, sampling, sampling_params, dump)
+        super().__init__(prompt, sys_prompt, sampling, sampling_params, max_new_tokens, dump)
 
     @classmethod
     def engines(cls):

@@ -29,7 +29,6 @@
 #include "core/node.h"
 #include "core/plugin.h"
 #include "core/subgraph.h"
-#include <vector>
 
 namespace aipubt
 {
@@ -38,17 +37,19 @@ class KernelAdapter
 public:
     bool set_graph(GraphPtr g);
     void kernel_adapt();
-    std::set<ConstTensorPtr> get_const_tensors();
-    std::map<TensorPtr, NodePtr> get_ws_tensors();
+    std::vector<ConstTensorPtr> get_const_tensors();
+    std::map<NodePtr, std::set<TensorPtr>> get_ws_map();
     std::map<TensorPtr, NodePtr> get_surface_tensors();
     std::map<std::string, std::string> get_kernel_lib();
-    // get_kernel_map();
+
 private:
+    void record_tensors(NodePtr n, const BuilderParams &params);
+
     GraphPtr m_graph;
-    std::set<ConstTensorPtr> m_const_tensors;
-    std::map<TensorPtr, NodePtr> m_ws_tensors;
+    std::vector<ConstTensorPtr> m_const_tensors;
+    std::map<NodePtr, std::set<TensorPtr>> m_ws_map;
     std::map<TensorPtr, NodePtr> m_surface_tensors;
     std::map<std::string, std::string> m_kernel_lib;
 };
-};     // namespace aipubt
+} // namespace aipubt
 #endif //!BUILDER_KERNEL_ADAPTOR_H

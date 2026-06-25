@@ -328,6 +328,7 @@ class BgeM3CausalLM(BaseModel):
 
     def forward(self):
         seq_len = self.config.get('seq_len')
+        batch = self.config.get('batch', 1)
         model_name = 'bge_m3'
         with Graph(model_name) as self.aipu_g:
             hidden_states = ops.input(

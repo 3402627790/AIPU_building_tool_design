@@ -199,7 +199,7 @@ def convert_lstm(graph):
             graph.remove_edges_from(in_edges[1:])
 
             if len(input_shapes[0]) > 3:
-                dim = input_shapes[0][:2] + [int(np.prod(input_shapes[0][2:]))]
+                dim = input_shapes[0][:2] + [int(np.prod(input_shapes[0][2:]).item())]
                 src = insert_reshape(graph, src, lstm, in_attr, dim)
                 time_steps, batch_size, input_size = dim
             else:
@@ -706,7 +706,7 @@ def split_argmax(graph):
 
                 if argmax_obj.axis is None:
                     new_attr.update({'axis': 1})
-                    reshape_dim = [in_shape[0], int(np.prod(in_shape[1:])), 1]
+                    reshape_dim = [in_shape[0], int(np.prod(in_shape[1:]).item()), 1]
                     _ = insert_reshape(graph, src, argmax,
                                        in_attr, reshape_dim)
                 post_shape = output_shapes[0]
@@ -897,10 +897,10 @@ def split_inner_product(graph):
             axis = ip_obj.axis
             if axis < 0:
                 axis += len(inp_shape)
-            assert(axis >= 0 and axis <= len(
+            assert (axis >= 0 and axis <= len(
                 inp_shape)), 'The axis value of the CaffeINNER_PRODUCT op is invalid in split_inner_product.'
-            sqz = [int(np.prod(inp_shape[:axis])),
-                   int(np.prod(inp_shape[axis:]))]
+            sqz = [int(np.prod(inp_shape[:axis]).item()),
+                   int(np.prod(inp_shape[axis:]).item())]
             src, _, in_attr = in_edges[0]
             insert_reshape(graph, src, ip, in_attr, sqz, data_format='NCHW')
             out_reshape = insert_reshape_after(
@@ -1216,8 +1216,8 @@ def remove_detection_postprocess(graph):
             inputs = detection_obj.get_input_tensors()
             batch = input_shapes[0][0]
             class_num = detection_obj.num_classes
-            in_shape1 = int(np.prod(input_shapes[0][1:]))
-            in_shape2 = int(np.prod(input_shapes[1][1:]))
+            in_shape1 = int(np.prod(input_shapes[0][1:]).item())
+            in_shape2 = int(np.prod(input_shapes[1][1:]).item())
             if in_shape1 // 4 == in_shape2 // class_num:
                 box_predict, conf_predict = in_edges[0][0], in_edges[1][0]
                 box_in_port, conf_in_port = 0, 1
@@ -1298,7 +1298,7 @@ def refinedet_postprocess(graph, params):
 
                 batch = input_shapes[0][0]
                 class_num = detection_obj.num_classes
-                in_shape2 = int(np.prod(input_shapes[1][1:]))
+                in_shape2 = int(np.prod(input_shapes[1][1:]).item())
                 odm_loc, odm_conf = in_edges[0][0], in_edges[1][0]
                 arm_loc, arm_conf = in_edges[4][0], in_edges[3][0]
                 box_num = in_shape2 // class_num

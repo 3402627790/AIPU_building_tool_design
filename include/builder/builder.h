@@ -257,8 +257,7 @@ protected:
     std::vector<std::vector<uint64_t>> m_const_offsets;
 };
 
+void allocate_output_shape(GraphPtr g);
 std::vector<std::vector<int>> parse_input_shape(GraphPtr g, const std::string &opt);
-void config_dynamic_shape(GraphPtr graph);
-void eval_expr_params(GraphPtr graph, BuilderParams &params);
 } // namespace aipubt
 #endif //!BUILDER_BUILDER_H

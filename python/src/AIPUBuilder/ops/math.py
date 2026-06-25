@@ -798,6 +798,37 @@ def floor(input: Tensor, quantization: Quantization = None) -> Tensor:
 @wrap_numpy_to_tensor
 @check_rterrors
 @check_input_op
+def isinf(input: Tensor, out_dtype=Dtype.UINT8) -> Tensor:
+    """
+    Test element-wise for positive or negative infinity.
+    Returns a boolean array of the same shape as x, True where x == +/-inf, otherwise False.
+
+    :param input: A Tensor,specifying input tensor.
+    :param out_dtype: output tensor data type.
+    :return: A Tensor with the same shape as the tensors in `input`.
+    """
+    return _ops.isinf(input, out_dtype)
+
+
+@eager_mode
+@wrap_numpy_to_tensor
+@check_rterrors
+@check_input_op
+def isnan(input: Tensor, out_dtype=Dtype.UINT8) -> Tensor:
+    """
+    Test element-wise for NaN and return result as a boolean array.
+
+    :param input: A Tensor,specifying input tensor.
+    :param out_dtype: output tensor data type.
+    :return: A Tensor with the same shape as the tensors in `input`.
+    """
+    return _ops.isnan(input, out_dtype)
+
+
+@eager_mode
+@wrap_numpy_to_tensor
+@check_rterrors
+@check_input_op
 def log(input: Tensor, quantization: Quantization = None) -> Tensor:
     """
     Computes natural logarithm of x element-wise.
@@ -834,7 +865,9 @@ def matmul(
     :param quantization: A Quantization class ,include scale and zero point.
     :return: A Tensor,with the same type as the tensors `a`.
     """
-    return _ops.matmul(a, b, adj_a, adj_b, fused_multiplier, convert_quantization(quantization))
+    return _ops.matmul(
+        a, b, adj_a, adj_b, fused_multiplier, convert_quantization(quantization)
+    )
 
 
 @eager_mode

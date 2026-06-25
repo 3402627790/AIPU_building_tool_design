@@ -25,6 +25,7 @@
     - [4.2 量化](#42-量化)
     - [4.3 测试](#43-测试)
   - [5. 一些使用小技巧](#5-一些使用小技巧)
+  - [6. 模型列表](#6-模型列表)
 
 # <center>AIPULLM 使用说明
 
@@ -42,16 +43,91 @@ aipullm的工作流程图如下：
 ### 2.1 build IR
 
 在aipullm中使用NN-Compiler的OpsAPI构造与transformers库图结构等价的Compass IR。
+编写test.py用于构造含有加法和fc层的图：
 
-```
+``` test.py
 # 导入OpsAPI module
 from AIPUBuilder import ops
 from AIPUBuilder.core import *
 import numpy as np
 with Graph("test") as g:
-    t0 = Tensor(np.random.rand([1, 128]).astype(np.float32))
-    t1 = Tensor(np.random.rand([1, 128]).astype(np.float32))
+    t0 = Tensor(np.random.rand(1, 128).astype(np.float32))
+    t1 = Tensor(np.random.rand(1, 128).astype(np.float32))
     t2 = t0 + t1
+    w = Tensor(np.random.rand(256, 128).astype(np.float32))
+    b = Tensor(np.random.rand(256).astype(np.float32))
+    fc = ops.fully_connected(t2, w, b)
+    print(fc.shape)
+    print(fc.op)
+g.serialize('./test_ir.txt', './test_ir.bin')
+```
+**python3 test.py** 查看test_ir.txt
+```
+$ cat test_ir.txt
+model_name=test
+layer_number=4
+input_tensors=[_t6,_t7]
+output_tensors=[fully_connected]
+model_bin=./test_ir.bin
+
+layer_id=0
+layer_name=input
+layer_type=Input
+layer_bottom=[]
+layer_bottom_shape=[]
+layer_bottom_type=[]
+layer_top=[_t6]
+layer_top_shape=[[1,128]]
+layer_top_type=[float32]
+layer_top_scale=[1.0]
+layer_top_zp=[0]
+
+layer_id=1
+layer_name=input_0
+layer_type=Input
+layer_bottom=[]
+layer_bottom_shape=[]
+layer_bottom_type=[]
+layer_top=[_t7]
+layer_top_shape=[[1,128]]
+layer_top_type=[float32]
+layer_top_scale=[1.0]
+layer_top_zp=[0]
+
+layer_id=2
+layer_name=Add
+layer_type=Add
+layer_bottom=[_t6,_t7]
+layer_bottom_shape=[[1,128],[1,128]]
+layer_bottom_type=[float32,float32]
+layer_top=[Add]
+layer_top_shape=[[1,128]]
+layer_top_type=[float32]
+layer_top_scale=[1.0]
+layer_top_zp=[0]
+with_activation=NONE
+
+layer_id=3
+layer_name=fully_connected
+layer_type=FullyConnected
+layer_bottom=[Add]
+layer_bottom_shape=[[1,128]]
+layer_bottom_type=[float32]
+layer_top=[fully_connected]
+layer_top_shape=[[1,256]]
+layer_top_type=[float32]
+layer_top_scale=[1.0]
+layer_top_zp=[0]
+biases_type=float32
+biases_offset=0
+biases_size=1024
+biases_shape=[256]
+weights_type=float32
+weights_offset=1024
+weights_size=131072
+weights_shape=[256,128]
+num_output=256
+with_activation=NONE
 ```
 
 针对某个模型的构图，需要遵从两点：
@@ -113,8 +189,29 @@ class Qwen2EmbCausalLM(BaseEmbedding):
 在完成上述构图后，可以选择调用量化策略对float IR进行量化。目前aipullm中支持量化方式包括：
 1. 原始模型为QAT的模型，例如常见的AWQ，GPTQ量化完成的模型，如：[Qwen1.5-1.8B-Chat-AWQ](https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-AWQ)。aipullm会保持量化weight和scale/zp不变。
 2. 原始模型为float32/bfloat16/float16未量化模型，进行weight-only-quantization, 例如wint4 *afp16, wint4* abf16, wfp4 *afp16, wfp4* abf16等。wint4 支持per-group 和per-channel-asymmetric量化， wfp4 支持per-group量化（wfp4目前只支持symmtric量化）。在per-group时，需要在cfg中设置 weight_block_size的字段，并且 block_size 只支持[32, 64, 128, 256]。
-3. 原始模型进行带校准的量化，例如wfp8 *afp8，目前该量化方式需要配置更多的optimizer的配置，支持模型有限，建议采用Optimizer进行wfp8* afp8的量化调优
-4. 支持编写定制化量化配置，此时遵从以下规则：
+3. 原始模型进行带校准的量化，例如w4 \* afp8, wfp4 \* afp8, wfp8 \* afp8，目前该量化方式需要配置更多的optimizer的配置，支持模型有限，建议采用Optimizer进行带校准的量化调优。目前aipullm中支持的wfp4 \* afp8的量化，可以参见qwen2的实现，主要涉及update_wfp4fp8_scales.py和qwen2_wfp4afp8e4m3_qinfo.json。其中update_wfp4fp8_scales.py用于量化方式的注册，见下面[4](#register_model_quantize)的描述；qwen2_wfp4afp8e4m3_qinfo.json用于设置Optimizer的配置参数，如下：
+````
+{
+  "cast_dtypes_for_lib": "True",
+  "calibration_prompt" : ["Which country did football first originate from?", "Please introduce the cuisine of Shanghai, China.", "What is 1+1? Please explain.", "Who is the current President of the United States?"],
+  "calibration_prompt_max_gen_length" : 5,
+   "running_statistic_momentum" : 0.93,
+  "quant_type" : "fp16 & <{fully_connected_0}:fp16> <{(fully_connected*)}:wfp4afp8e4m3>",
+  "global_calibration" : "svd_quant[0, 0.7, 1.768, 20, 0.0812][fullyconnected]",
+  "min_compatible_zhouyi_target" : "X3",
+  "quantize_method_for_weight" : "per_tensor_symmetric_restricted_range & <{fully_connected_0}:per_tensor_symmetric_restricted_range> < {(fully_connected*)}:per_block_symmetric_restricted_range>",
+  "weight_block_size" : 32
+}
+````
+其中：
+ - calibration_prompt：用于作为设定LLM模型校准统计阶段的输入数据，如上述是一个list，每一个是单独的prompt
+ - calibration_prompt_max_gen_length: 表示每一个prompt的forward的次数，如上述配置是5，即forwar 5用于校准统计。
+ - quant_type: 用于指定算子的量化方式，上述是定制化的设置，配置规则可参见Optimizer的定制化配置的说明。
+ - global_calibration: 用于指定全局校准方法，具体可查看Optimizer的使用说明。
+ - quantize_method_for_weight：用于指定weight的量化方式，例如，per-tensor, per-axis， or per-block，以及对称， 非对称等。
+ - weight_block_size: 用于指定per-block量化的block_size。
+
+4. <a id="register_model_quantize"></a>支持编写定制化量化配置，此时遵从以下规则：
     1. 需要继承class ModelQuantize
     2. 需要实现update_qinfo函数
     3. 通过register_model_quantize注册该模型的量化方式。
@@ -191,7 +288,7 @@ class PyLLMChat(LLMChat):
         """
 ```
 
-在使用pyllmchat时，需要配置engine字段:
+在使用pyllmchat时，需要配置engine字段
 
   1. engine=opt，那么会将对应的IR运行在OptForward()上。
   2. engine=exe，那么会将其对应的aipugb编译后的图运行在Executor()上
@@ -523,6 +620,24 @@ past_len = 255
 
 ['Add', 'BatchNorm', 'Concat', 'Constant', 'Conv2d', 'Conv3d', 'Crop', 'Embedding', 'Gather', 'GroupNorm', 'KVCacheModule', 'LayerNorm', 'Linear', 'MatMul',  'Mul', 'NewGELUActivation',  'QuickGELUActivation', 'RMSNorm', 'Reshape', 'Softmax', 'Tile', 'Transpose', 'Where', 'gelu', 'gelu_new', 'gelu_pytorch_tanh', 'leaky_relu','mish', 'relu', 'relu1', 'relu6', 'sigmoid', 'silu', 'swish', 'tanh']
 
+举个例子
+````
+from AIPUBuilder import nn
+from AIPUBuilder.core import *
+import numpy as np
+
+fc = nn.Linear(in_features=128, out_features=256)
+with Graph('test') as g:
+    t = Tensor(np.random.rand(1, 128).astype(np.float32))
+    w = np.random.rand(256, 128).astype(np.float32)
+    b = np.random.rand(256).astype(np.float32)
+    fc.weights.set_data(w)
+    fc.biases.set_data(b)
+    fc_out = fc(t)
+    g.serialize('./test_nn_ir.txt', './test_nn_ir.bin')
+
+````
+
 >后续会持续扩展AIPUBuilder.nn的Module实现。
 
 #### 4.1.3 QAT量化信息更新
@@ -548,30 +663,90 @@ aipullm通常是在opsapi构图的时候把weight根据weight name 从safetensor
 1. 编写一个cfg（见cfg的使用），跑cfg，看出词。
 2. 是源码调用的方式编写测试脚本：
 
-```
+````
 from AIPUBuilder.model import AIPULLM, AppPipeLine
- config_fields = {
-        "model_path": "/project/ai/scratch01/Model_Resource/huggingface/Qwen/Qwen1.5-1.8B-Chat",
-        "model_type": "qwen2",
-        "seq_len": 256,
-        "past_len": 256,
-        "quant_type": "w4",
-        "target": "X3P_1304",
-        "app": "pyllmchat(prompt="where is·the·capital.of.china?")",
-        "engine": "exe",
-        "output_dir": "./",
-    }
-    llm = AIPULLM.from_config(config_fields)
-    llm.load_huggingface()
-    ret = llm.build(quantization_type=config_fields['quant_type'], target=config_fields['target'])
-    app = AppPipeLine([llm.config])
-    app.forward()
-```
+config_fields = {
+    'model_path': '/project/ai/scratch01/Model_Resource/huggingface/Qwen/Qwen2.5-0.5B-Instruct',
+    'model_type': 'qwen2',
+    'seq_len': 256,
+    'past_len': 256,
+    'quant_type': 'w4',
+    'target': 'X3S_1304',
+    'app': 'pyllmchat(prompt="where is·the·capital.of.china?")',
+    'engine': 'exe',
+    'output_dir': './',
+}
+llm = AIPULLM.from_config(config_fields)
+llm.load_huggingface()
+ret = llm.build(quantization_type=config_fields['quant_type'], target=config_fields['target'])
+app = AppPipeLine([llm.config])
+app.forward()
+````
 
 ## 5. 一些使用小技巧
 
-|no.   |   使用场景        |  配置方式 | 说明|
-|:--- | :--------------       |:----------|-----|
+|no.  |   使用场景        |  配置方式 | 说明|
+|:--- | :--------------  |:----------|-----|
 |1    |不保存float IR     |serialize_fp_ir=false|若是模型比较大，往往serialize时间较长，那么可以将序列化float IR的过程跳过。目前不支持跳过quantized IR，因为往往quantized IR 会用来跑opt或者exe的forward|
 |2    |已经有quantized IR |aipu_binary_path=/pth/to/quantized.txt|快速跳过构图过程，进入编译或者app阶段|
 |3    |已经有aipu binary  |aipu_binary_path=/pth/to/aipu.bin|快速跳过构图和编译过程，进入app阶段|
+
+## 6. 模型列表
+
+| model_name |
+|--------------|
+|autoencoderkl|
+|autoencoderkl_wan_decoder|
+|autoencoderkl_wan_encoder|
+|baichuan2|
+|bevformer_decoder|
+|bevformer_tiny|
+|bge_m3|
+|chatglm|
+|chatglm3|
+|deepseek_moe|
+|ds671b_before_mlp|
+|ds671b_blk0_2|
+|ds671b_experts|
+|ds671b_lm|
+|ds671b_share_experts|
+|ernie4_5|
+|gemma2|
+|gpt_oss|
+|gr00t_alternatevldit|
+|gr00t_siglip2_vision|
+|gr00t_state_encoder|
+|gr00t_vla_languagemodel_qwen3|
+|image_encoder|
+|llama|
+|llama2|
+|llama2_chn|
+|llama2_tiny|
+|llama3|
+|minicpm2_6_head|
+|minicpm2_6_llm|
+|minicpm2_6_vpm|
+|minicpm4|
+|phi3_v|
+|phi3_v_clip|
+|qwen-vl|
+|qwen-vl-vit|
+|qwen1.5|
+|qwen2|
+|qwen2.5thinker|
+|qwen2.5thinker_vision|
+|qwen2_5_vl_llm|
+|qwen2_5_vl_vision|
+|qwen3|
+|resnet18|
+|resnet34|
+|resnet50|
+|siglip_text|
+|siglip_vision|
+|text_encoder|
+|umt5|
+|vpm_encoder|
+|wantransformer3d|
+|whisper__decoder|
+|whisper__encoder|
+|zimagetransformer|

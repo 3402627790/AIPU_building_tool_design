@@ -21,6 +21,8 @@
  * @Last Modified time: 2026-04-24 14:27:33
  */
 #include "builder/kernel_adapter.h"
+#include "builder/ds_code_generator_cx.h"
+#include "core/config.h"
 
 namespace aipubt
 {
@@ -30,12 +32,56 @@ bool KernelAdapter::set_graph(GraphPtr g)
     m_graph = g;
     if (!g)
     {
-        return true;
+        return false;
     }
-    return false;
+    return true;
 }
+
+void KernelAdapter::record_tensors(NodePtr n, const BuilderParams &params)
+{
+    for (auto &p : params)
+    {
+        if (p.const_tensor && !contains(m_const_tensors, p.const_tensor)) //is constant
+        {
+            m_const_tensors.push_back(p.const_tensor);
+        }
+        else if (p.tensor && p.tensor->attrs().count(Constants::is_workspace_tensor)) //is workspace
+        {
+            m_ws_map[n].insert(p.tensor);
+        }
+        else if (p.surface)
+        {
+            m_surface_tensors[p.surface] = n;
+        }
+    }
+}
+
 void KernelAdapter::kernel_adapt()
 {
+    m_graph->walk_on_node([](NodePtr n) {
+        if (n->attrs().count(Constants::plugin_impl))
+        {
+            auto impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
+            auto infos = impl->kernel_infos();
+            std::vector<PlaceholderPtr> param_bases;
+            std::vector<PlaceholderPtr> stream_bases;
+            for (size_t i = 0; i < infos.size(); ++i)
+            {
+                param_bases.push_back(std::make_shared<Placeholder>());
+                stream_bases.push_back(std::make_shared<Placeholder>());
+            }
+            n->set_attr(Constants::kernel_infos, infos);
+            n->set_attr(Constants::param_bases, param_bases);
+            n->set_attr(Constants::stream_bases, stream_bases);
+        }
+    });
+
+    if (BuilderConfig::get<bool>(Constants::enable_ds))
+    {
+        DSCodeGeneratorCPS code_gen;
+        code_gen.generate(m_graph);
+    }
+
     for (auto s : m_graph->nodes())
     {
         auto sgn = SubGraphNode::from_node(s);
@@ -48,11 +94,11 @@ void KernelAdapter::kernel_adapt()
                 {
                     continue;
                 }
+
                 if (n->attrs().count(Constants::plugin_impl))
                 {
                     auto plugin_impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
-                    auto kernel_infos = plugin_impl->kernel_infos();
-                    n->set_attr(Constants::kernel_infos, kernel_infos);
+                    auto kernel_infos = n->get_attr<KernelInfos>(Constants::kernel_infos);
                     auto lib_name = plugin_impl->kernel_cpsbin();
                     if (lib_name == "GB_DEFAULT_PATH")
                     {
@@ -65,21 +111,22 @@ void KernelAdapter::kernel_adapt()
                     for (auto info : kernel_infos)
                     {
                         INFO() << "kernel for " << n << " " << info.kernel_name;
-                        // kernel_names.insert(info.kernel_name);
                         m_kernel_lib[info.kernel_name] = lib_name;
-                        for (auto arg : info.args)
+                        record_tensors(n, info.args);
+
+                        for (auto &arg : info.args)
                         {
-                            if (arg.const_tensor) //is constant
+                            if (arg.param_list)
                             {
-                                m_const_tensors.insert(arg.const_tensor);
-                            }
-                            else if (arg.tensor && arg.tensor->attrs().count(Constants::is_workspace_tensor)) //is workspace
-                            {
-                                m_ws_tensors[arg.tensor] = n;
-                            }
-                            else if (arg.surface)
-                            {
-                                m_surface_tensors[arg.surface] = n;
+                                auto &params = arg.param_list->params();
+                                for (auto &p : params)
+                                {
+                                    if (p.param_list || p.surface)
+                                    {
+                                        ERROR() << "paramlist cannot contain paramlist or surface";
+                                    }
+                                }
+                                record_tensors(n, params);
                             }
                         }
                     }
@@ -92,14 +139,15 @@ void KernelAdapter::kernel_adapt()
         }
     }
 }
-std::set<ConstTensorPtr> KernelAdapter::get_const_tensors()
+
+std::vector<ConstTensorPtr> KernelAdapter::get_const_tensors()
 {
     return m_const_tensors;
 }
 
-std::map<TensorPtr, NodePtr> KernelAdapter::get_ws_tensors()
+std::map<NodePtr, std::set<TensorPtr>> KernelAdapter::get_ws_map()
 {
-    return m_ws_tensors;
+    return m_ws_map;
 }
 
 std::map<TensorPtr, NodePtr> KernelAdapter::get_surface_tensors()
@@ -112,4 +160,4 @@ std::map<std::string, std::string> KernelAdapter::get_kernel_lib()
     return m_kernel_lib;
 }
 
-}; // namespace aipubt
+} // namespace aipubt

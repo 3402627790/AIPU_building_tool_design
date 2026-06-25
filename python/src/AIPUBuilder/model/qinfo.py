@@ -255,7 +255,7 @@ class AIPUQuantizeStrategy(object):
             elif quant_method.lower() == 'compressed-tensors':
                 if QuantType.is_keep_unquantized(self.quantization_type):
                     self._fp_quantization()
-                elif self.quantization_type in ['wfp8afp8', 'wfp8']:
+                elif self.quantization_type in ['wfp8afp8', 'wfp8', 'wfp4']:
                     self._compressed_tensors_quantization()
                 else:
                     self._aipu_weight_only_quantization()
@@ -538,8 +538,8 @@ class AIPUQuantizeStrategy(object):
                     n.constants[ck] = Tensor.new(weight_data.astype(aipu_weight_type.np))
                     n.constants[ck].sync_betensor()
                     # n.constants[ck].quantization.scales = np.clip(cv.quantization.scales, 0., 448.0)
-                    n.constants[ck].quantization.scales = cv.quantization.scales
-                    n.constants[ck].quantization.offsets = cv.quantization.offsets
+                    n.constants[ck].quantization.qscales = cv.quantization.qscales
+                    n.constants[ck].quantization.qoffsets = cv.quantization.qoffsets
                     n.constants[ck].dtype = aipu_weight_type
                     flag = None
             self._configure_activation_qinfo(n, flag)

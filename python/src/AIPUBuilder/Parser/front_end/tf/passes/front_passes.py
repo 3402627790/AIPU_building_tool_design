@@ -160,6 +160,46 @@ def convert_d2s_or_s2d(graph):
         clear_redundant_nodes(graph)
 
 
+def convert_erfc(graph):
+    '''Convert tf erfc to 1 - erf
+    '''
+    matches = single_node_matcher(graph, 'TfErfc')
+    for m in matches:
+        node = m['target']
+        node_obj = NodeWrap(graph, node)['object']
+        if node_obj is None:
+            ERROR('[Parser]: Meets invalid Op (%s) in convert_erfc!' % node)
+            continue
+
+        new_node_attr = node_obj.copied_attr()
+        new_node_attr['opset_version'] = 13
+        NodeWrap(graph, node).replace_obj('Erf', new_node_attr)
+
+        out_edges = graph.sorted_out_edges(node, data=True)
+        out_dtype = out_edges[0][-1]['tensor'].dtype
+        graph.remove_edges_from(out_edges)
+
+        sub = get_valid_node_name(graph, node + '_sub')
+        graph.add_node(sub)
+
+        insert_constant(graph, node + '_one', np.array(1, dtype=out_dtype),
+                        sub, 0)
+        erf_out_attr = copy.deepcopy(out_edges[0][-1])
+        erf_out_attr['dst_in_port'] = 1
+        graph.add_edge(node, sub, **erf_out_attr)
+
+        sub_attr = {'name': sub, 'opset_version': 7}
+        NodeWrap(graph, sub).replace_obj('Sub', sub_attr)
+
+        for _, dst, out_attr in out_edges:
+            new_out_attr = copy.deepcopy(out_attr)
+            graph.add_edge(sub, dst, **new_out_attr)
+
+        if node in graph._attr['output_names']:
+            index = graph._attr['output_names'].index(node)
+            graph._attr['output_names'][index] = sub
+
+
 def convert_floordiv(graph, op_type='TfFloorDiv'):
     '''Convert tf/tflite floordiv to (int) Div if both inputs are int type, otherwise
     convert to Div+Floor.
@@ -679,8 +719,8 @@ def convert_reverse(graph, op_type='TfReverseV2'):
             pre_perm = rev_axes + non_rev_axes
             pre_trans = insert_transpose(graph, src, rev, in_attr, pre_perm)
             # Insert pre reshape after pre transpose to convert input to 2d
-            non_rev_size = np.prod([input_shape[axis] for axis in non_rev_axes])
-            rev_size = np.prod([input_shape[axis] for axis in rev_axes])
+            non_rev_size = np.prod([input_shape[axis] for axis in non_rev_axes]).item()
+            rev_size = np.prod([input_shape[axis] for axis in rev_axes]).item()
             pre_trans_out_attr = copy.deepcopy(in_attr)
             pre_trans_out_attr.update({'src_out_port': 0})
             if in_attr['tensor'] is not None and in_attr['tensor'].value is not None:
@@ -1166,7 +1206,7 @@ def split_s2b(graph, op_type='TfSpaceToBatchND'):
                 trans_perm.append(len(dim1) - 1)  # position of remaining_shape in dim1
                 # 3) reshape to [batch * prod(block_shape)] + [padded_shape[1] / block_shape[0], ...,
                 #    padded_shape[M] / block_shape[M-1]] + remaining_shape
-                dim2 = [padded_in_shape[0] * np.prod(block_shape)]
+                dim2 = [padded_in_shape[0] * np.prod(block_shape).item()]
                 for idx, shape in enumerate(block_shape):
                     dim2.append(padded_in_shape[idx + 1] // shape)
                 dim2.append(padded_in_shape[-1])
@@ -2946,7 +2986,7 @@ def merge_zero_fraction(graph):
             continue
         sli_in_edges = graph.sorted_in_edges(m['statelessif'], data=True)
         input_shape = node_objs['input'].get_output_shapes()[0]
-        if node_objs['size'].value != np.prod(input_shape) or \
+        if node_objs['size'].value != np.prod(input_shape).item() or \
                 node_objs['le_const'].value != True or \
                 node_objs['cast'].DstT != 'float32' or \
                 not FLOAT_EQUAL(node_objs['div_operand'].value, node_objs['size'].value):

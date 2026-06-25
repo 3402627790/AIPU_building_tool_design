@@ -2,7 +2,7 @@
 # -*- coding: UTF-8 -*-
 import os
 __VERSION__ = "6.1"
-__build_number__='dev20390'
+__build_number__='dev20490'
 if __build_number__ is not None:
     __VERSION__ = __VERSION__+"."+str(__build_number__)
 

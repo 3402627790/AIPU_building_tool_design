@@ -154,11 +154,7 @@ bool Tensor::is_signed(Tensor::Dtype dt)
     return dt & 0b1;
 }
 
-bool Tensor::is_float(Tensor::Dtype dt)
-{
-    return (dt >= Tensor::FP16 && dt <= Tensor::FP8E5M2) ||
-           (dt == Tensor::FP4E2M1FN || dt == Tensor::COMPACT_FP4E2M1FN);
-}
+
 bool Tensor::is_int(Tensor::Dtype dt)
 {
     return (dt >= Tensor::UINT8 && dt <= Tensor::INT64) || (dt >= Tensor::ALIGNED_UINT4 && dt <= Tensor::ALIGNED_INT12) || (dt >= Tensor::COMPACT_UINT4 && dt <= Tensor::COMPACT_INT12);
@@ -168,10 +164,7 @@ bool Tensor::is_aligned(Tensor::Dtype dt)
 {
     return dt >= Tensor::ALIGNED_UINT4 && dt <= Tensor::FP4E2M1FN;
 }
-bool Tensor::is_compact(Tensor::Dtype dt)
-{
-    return dt >= Tensor::COMPACT_UINT4 && dt <= Tensor::COMPACT_FP4E2M1FN;
-}
+
 Tensor::Dtype Tensor::dtype_to_signed(Tensor::Dtype dt)
 {
     if (is_float(dt) || dt <= Tensor::BOOL)
@@ -219,47 +212,6 @@ Tensor::Dtype Tensor::get_type(const int bits, const bool is_sign)
     default:
         return Tensor::VOID;
     }
-}
-
-size_t Tensor::dtype_size(Tensor::Dtype dt)
-{
-    return dtype_bits(dt) / 8.0f + 0.5f;
-}
-size_t Tensor::dtype_bits(Tensor::Dtype dt)
-{
-    if (dt <= 1)
-    {
-        return 8;
-    }
-    if (is_float(dt))
-    {
-        if (dt == BFP16)
-        {
-            return 16;
-        }
-        else if (dt == FP8E4M3FN)
-        {
-            return 8;
-        }
-        else if (dt == FP8E5M2)
-        {
-            return 8;
-        }
-        else if (dt == FP4E2M1FN)
-        {
-            return 8;
-        }
-        else if (dt == COMPACT_FP4E2M1FN)
-        {
-            return 4;
-        }
-        return (1 << (dt - Tensor::FP16)) * 16;
-    }
-    if (is_compact(dt))
-    {
-        return (1 << ((dt & 0xe) >> 1)) * 8 - 4;
-    }
-    return 8 << (((dt & 0xe) >> 1) - 1);
 }
 
 TensorPtr Tensor::workspace(size_t size)
@@ -564,7 +516,7 @@ size_t Tensor::mem_size() const
 
 size_t Tensor::buffer_size() const
 {
-    if (m_shape.dim() > 0)
+    if (!m_shape.is_continuous())
     {
         size_t bytes = m_shape.strides().at(0) * m_shape[0] * dtype_bits(m_type) / 8.0 + 0.5;
         return bytes;

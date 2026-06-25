@@ -10,7 +10,7 @@ def DetectionOutput(self, *args, **kwargs):
         out_score, out_box, box_num_perClass, class_label, class_num = detection_output_fp(self)
     else:
         box_class_score = self.inputs[0].betensor.cpu().numpy().astype(str(self.inputs[0].dtype))
-        box_encoding = self.inputs[1].betensor.cpu().numpy().astype(str(self.inputs[1].dtype))
+        box_encoding = self.inputs[1].betensor.cpu().numpy().astype('int16')
         proposals_boxs = self.inputs[2].betensor.cpu().numpy().astype(str(self.inputs[2].dtype))
 
         tw_lut = self.constants['tw_lut'].betensor.cpu().numpy()

@@ -1,3 +1,6 @@
 from .qwen2_5omni_thinker import  Qwen2_5OmniThinkerForConditionalGeneration
 from .qwen2_5omni_vision_encoder import Qwen2_5OmniThinkerVision
-# from .update_quantization import *
+from .qwen2_5omni_audio_encoder import Qwen2_5OmniThinkerAudio
+from .qwen2_5omni_talker import Qwen2_5OmniTalker
+from .qwen2_5omni_token2wav_dit import Qwen2_5OmniToken2WaveDit
+from .qwen2_5omni_token2wav_bigvgan import Qwen2_5OmniToken2WaveBigVGAN

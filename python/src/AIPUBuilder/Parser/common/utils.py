@@ -329,7 +329,7 @@ def unpack_u8_to_4bit(data, dims, dst_dtype, high_first=False):
     else:
         result[0::2] = array_low
         result[1::2] = array_high
-    if result.size == np.prod(dims) + 1:
+    if result.size == np.prod(dims).item() + 1:
         # handle single-element padding due to odd number of elements
         result = result[:-1]
     if dst_dtype.lower() == 'int4':

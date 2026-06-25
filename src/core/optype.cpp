@@ -317,6 +317,9 @@ OPTYPE_REGISTER(OpType_Switch);
 OPTYPE_REGISTER(OpType_Empty);
 OPTYPE_REGISTER(OpType_FlashDecoding);
 OPTYPE_REGISTER(OpType_ScaledDotProductAttention);
+OPTYPE_REGISTER(OpType_Trilu);
+OPTYPE_REGISTER(OpType_ParamUpdate);
+OPTYPE_REGISTER(OpType_FusedMoELoop);
 
 OPTYPE_REGISTER(OpType_BatchToDepth);
 OPTYPE_REGISTER(OpType_DepthToBatch);

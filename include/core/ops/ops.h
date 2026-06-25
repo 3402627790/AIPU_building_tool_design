@@ -2779,6 +2779,23 @@ namespace ops
                                      const Quantization &quant = {});
 
     /**
+     * @brief Test element-wise for positive or negative infinity.
+              Returns a boolean array of the same shape as x, True where x == +/-inf, otherwise False.
+     * @param[in] input A "TensorPtr", specifying the input tensor.
+     * @param[in] out_type output tensor data type.
+     * @return A "TensorPtr", specifying the output tensor, which has the same shape with @p input.
+     */
+    TensorPtr isinf(TensorPtr input, Tensor::Dtype out_dtype = Tensor::UINT8);
+
+    /**
+     * @brief Test element-wise for NaN and return result as a boolean array.
+     * @param[in] input A "TensorPtr", specifying the input tensor.
+     * @param[in] out_type output tensor data type.
+     * @return A "TensorPtr", specifying the output tensor, which has the same shape with @p input.
+     */
+    TensorPtr isnan(TensorPtr input, Tensor::Dtype out_dtype = Tensor::UINT8);
+
+    /**
      * @brief If conditional.
      * @param[in] inputs Include condition tensor, 'then' branch inputs, 'else' branch inputs.
      * @param[in] then_branch GraphPtr to run if condition is true.
@@ -4896,6 +4913,41 @@ namespace ops
                                        int block_index,
                                        int axis = 2);
 
+    TensorPtr rotary_embedding(
+        TensorPtr input,
+        TensorPtr cos_cache,
+        TensorPtr sin_cache,
+        int num_heads,
+        int interleaved,
+        int rotary_embedding_dim);
+
+    TensorPtr rotary_embedding(
+        TensorPtr input,
+        TensorPtr cos_cache,
+        TensorPtr sin_cache,
+        TensorPtr position_ids,
+        int num_heads,
+        int interleaved,
+        int rotary_embedding_dim);
+
+    /**
+     * @brief Returns the output of the fused MoE loop.
+     *
+     * @param[in] sorted_tokens A "TensorPtr", specifying the sorted tokens for each activated expert. Its shape is 2-D.
+     * @param[in] tokens_per_expert A "TensorPtr", specifying the number of tokens for each expert. Its shape is 1-D.
+     * @param[in] weights A "TensorPtr" list, specifying the weights of each expert. The shape of each weight is 3-D.
+     * @param[in] biases A "TensorPtr" list, specifying the biases of each expert. The shape of each biase is 2-D.
+     * @param[in] moe_type A string, specifying the type of MoE module. E.g. "deepseek_v2_lite".
+     * @param[in] quant A Quantization, including the scale and zeropoint.
+     * @return A "TensorPtr", specifying the output tensor.
+     */
+    TensorPtr fused_moe_loop(TensorPtr sorted_tokens,
+                             TensorPtr tokens_per_expert,
+                             const std::vector<TensorPtr> &weights,
+                             const std::vector<TensorPtr> &biases,
+                             const std::string &moe_type,
+                             const Quantization &quant = {});
+
     /**
      * @brief            Create a weight tensor pointer.
      *                   It is used by interfaces with the parameter "weight".
@@ -4915,23 +4967,6 @@ namespace ops
      *                   Optional parameter, the default value is 1.0/0;
      * @return A "TensorPtr", specifying the weight tensor.
      */
-
-    TensorPtr rotary_embedding(
-        TensorPtr input,
-        TensorPtr cos_cache,
-        TensorPtr sin_cache,
-        int num_heads,
-        int interleaved,
-        int rotary_embedding_dim);
-
-    TensorPtr rotary_embedding(
-        TensorPtr input,
-        TensorPtr cos_cache,
-        TensorPtr sin_cache,
-        TensorPtr position_ids,
-        int num_heads,
-        int interleaved,
-        int rotary_embedding_dim);
 
     TensorPtr make_weight(GraphPtr g,
                           const void *data,

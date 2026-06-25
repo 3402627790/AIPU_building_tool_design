@@ -27,7 +27,7 @@ class AccidentalHitsOp(OpHasMultipleOutPorts, CommonOp):
     def infer_shape(self):
         super(AccidentalHitsOp, self).infer_shape()
         input_shape = self.get_input_shapes()[0]
-        num_hits = min(np.prod(input_shape), 32768)
+        num_hits = min(np.prod(input_shape).item(), 32768)
         output_indices = get_random_array([num_hits], 'int32')
         output_ids = get_random_array([num_hits], 'int32')
         output_effective_len = get_random_array([1], 'int32')
@@ -935,7 +935,7 @@ class PluginOp(OpHasVariableOutPorts, CommonOp):
                     assert start == offset, 'constants offset not match! layer name: %s, %d' % (self.name, offset)
                     value.tofile(bin_file)
                     end = bin_file.tell()
-                    assert (value.dtype.itemsize * int(np.prod(value.shape))) == (end - start), \
+                    assert (value.dtype.itemsize * int(np.prod(value.shape).item())) == (end - start), \
                         'Node(%s) has error in writing constants (%s) to bin in write_constants!' % (self.name, key)
                     start = end
         else:
@@ -1366,8 +1366,11 @@ class UndefinedOp(OpHasVariableOutPorts, CommonOp):
         ret = super(UndefinedOp, self).write_attrs(txt_file)
         if ret:
             for k, v in self._attr.items():
-                if v.type == AttrType.UNDEFINED:
-                    txt_file.write('%s=%s\n' % (k, str(v.value)))
+                if isinstance(v, Attribute):
+                    if v.type == AttrType.UNDEFINED:
+                        txt_file.write('%s=%s\n' % (k, str(v.value)))
+                elif k not in ('name', 'type', 'data_format'):
+                    txt_file.write('%s=%s\n' % (k, str(v)))
         return ret
 
 

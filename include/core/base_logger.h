@@ -255,7 +255,7 @@ private:
             {
                 my_cout_ << _BEGIN_ERROR_;
             }
-            my_cout_ << "[W] ";
+            my_cout_ << "[E] ";
         }
         else
         {

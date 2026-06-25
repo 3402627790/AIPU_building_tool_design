@@ -39,6 +39,7 @@ GraphPtr aipugb(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map);
 
 bool run_simulator(std::string dump_file, std::map<std::string, aipubt::Any> &arg_map);
 bool aipudumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map);
+bool cpsdumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map);
 bool elfdumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map, GraphELFBuilder *builder = nullptr);
 bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retcode);
 void actions_after_build(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map);

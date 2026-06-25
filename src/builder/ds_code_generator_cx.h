@@ -21,6 +21,7 @@
  * @Last Modified time: 2026-05-07 10:00:06
  */
 #pragma once
+#include "builder/plugin/ds_code_wrapper.h"
 #include "ds_code_generator.h"
 
 namespace aipubt
@@ -39,7 +40,8 @@ struct DSParamDesc
         DESC = 1,
         DESC_PARAM = 2,
         DESC_ACT = 3,
-        PACKET = 4,
+        STREAM = 4,
+        PARAM_LIST = 5,
     };
 
     enum UpdateMode : int
@@ -88,6 +90,10 @@ struct DSParamDesc
             {
                 return false;
             }
+            if (index != o.index)
+            {
+                return false;
+            }
             if (mode != o.mode)
             {
                 return false;
@@ -101,6 +107,7 @@ struct DSParamDesc
 
         ParamType type = PARAM;
         size_t offset = 0;
+        int index = -1; // param list
         UpdateMode mode = FILL;
     };
 
@@ -351,10 +358,13 @@ struct DSKernelDesc
     }
 
     NodePtr node;
+    std::shared_ptr<GopDSCodeImpl> impl;
     KernelType type = KERNEL;
     size_t offset = 0;
-    int param_index = -1; // data aware
+    int index = -1; // data aware
     std::string name;
+    PlaceholderPtr param_base;
+    PlaceholderPtr stream_base;
     std::vector<DSParamDesc> params;
     std::vector<DSRemapTable> tables;
 };
@@ -383,11 +393,6 @@ public:
     void generate(std::map<int, DSCodePkg> &code_map);
 
 protected:
-    void parse_params(GraphPtr graph,
-                      const std::vector<ReadOnlyParam> &params,
-                      DSParamDesc::ParamType type,
-                      DSKernelDesc &res);
-
     void build_remap_tables(GraphPtr graph,
                             NodePtr node,
                             size_t index,
@@ -418,9 +423,15 @@ class DSCodeGeneratorCPS : public DSCodeOptimizer
 public:
     DSCodeGeneratorCPS() {}
 
+    void generate(GraphPtr graph);
+
+protected:
     void parse(GraphPtr graph);
 
-    void generate();
+    void generate_kernel_code(std::stringstream &oss,
+                              const DSKernelDesc &kernel);
+
+    PlaceholderPtr m_param_base;
 };
 
 const std::string get_ds_code();

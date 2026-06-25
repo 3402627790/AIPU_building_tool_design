@@ -54,7 +54,7 @@ def full_simplify(g: Graph, debug=False):
                 )
                 return
     except KeyboardInterrupt:
-        simplify(g, debbug)
+        simplify(g, debug)
         return
 
 

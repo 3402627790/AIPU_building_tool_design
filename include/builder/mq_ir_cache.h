@@ -25,6 +25,7 @@ namespace aipubt
 {
 
 GraphPtr load_mq_ir_cache(const std::string &dir);
+bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir);
 void save_mq_ir_cache(GraphPtr graph, const std::string &dir);
 
 } // namespace aipubt

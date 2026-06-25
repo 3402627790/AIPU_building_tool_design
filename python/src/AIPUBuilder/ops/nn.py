@@ -611,7 +611,7 @@ def conv2d_transpose(
     """
     check_tensor_shape(input)
     weights = convert_to_constant(weights, "weights")
-    bias = convert_to_constant(bias, "biases", weights.shape[0])
+    bias = convert_to_constant(bias, "biases", weights.shape[0]*group)
     strides = convert_to_strides(strides)
     dilations = convert_to_dilations(dilations)
     activation = convert_activation(activation)

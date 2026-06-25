@@ -43,6 +43,49 @@ def cast_from_NodeParamValue_string(v):
     from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
     import re
 
+    def split_list_items(sv):
+        items = []
+        depth_stack = []
+        quote = None
+        escape = False
+        start = 0
+
+        pairs = {
+            '[': ']',
+            '(': ')',
+            '{': '}',
+        }
+
+        for idx, char in enumerate(sv):
+            if escape:
+                escape = False
+                continue
+
+            if quote is not None:
+                if char == '\\':
+                    escape = True
+                elif char == quote:
+                    quote = None
+                continue
+
+            if char in ('\'', '"'):
+                quote = char
+            elif char in pairs:
+                depth_stack.append(pairs[char])
+            elif char in pairs.values():
+                if len(depth_stack) > 0 and char == depth_stack[-1]:
+                    depth_stack.pop()
+            elif char == ',' and len(depth_stack) == 0:
+                item = sv[start:idx].strip(" '")
+                if len(item) > 0:
+                    items.append(item)
+                start = idx + 1
+
+        tail = sv[start:].strip(" '")
+        if len(tail) > 0:
+            items.append(tail)
+        return items
+
     def is_valid_list_string(sv):
         if (len(sv) > 1) and (sv[0] == '[') and (sv[-1] == ']'):
             stk = []
@@ -70,22 +113,8 @@ def cast_from_NodeParamValue_string(v):
     if is_valid_list_string(sv):
         # list
         lt = []
-        ts = sv[1:-1] + ','
-        cntl = 0
-        cntr = 0
-        pos = 0
-        for i in range(len(ts)):
-            c = ts[i]
-            if '[' == c:
-                cntl += 1
-            elif ']' == c:
-                cntr += 1
-            elif ',' == c:
-                if cntl == cntr:
-                    sub_str = ts[pos:i].strip(' \'')
-                    if len(sub_str) > 0:
-                        lt.append(cast_from_NodeParamValue_string(sub_str))
-                    pos = i+1
+        for sub_str in split_list_items(sv[1:-1]):
+            lt.append(cast_from_NodeParamValue_string(sub_str))
         return lt
     elif re.match('^('+dt_s[:-1]+')$', sv.lower()):
         return str2dtype(sv)

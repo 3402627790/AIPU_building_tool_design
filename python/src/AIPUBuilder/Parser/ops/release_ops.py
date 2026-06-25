@@ -39,7 +39,7 @@ class ArmAccidentalHitsOp(OpHasMultipleOutPorts, ArmOp):
     def infer_shape(self):
         super(ArmAccidentalHitsOp, self).infer_shape()
         input_shape = self.get_input_shapes()[0]
-        num_hits = min(np.prod(input_shape), 32768)
+        num_hits = min(np.prod(input_shape).item(), 32768)
         output_indices = get_random_array([num_hits], 'int32')
         output_ids = get_random_array([num_hits], 'int32')
         output_effective_len = get_random_array([1], 'int32')
@@ -890,7 +890,7 @@ class ArmCol2ImOp(OpHasPaddingStrides, OpHasOneOutPort, ArmOp):
         batch = input_shape[0]
         image_shape = inputs[1].tolist()
         block_shape = inputs[2].tolist()
-        channels = input_shape[1] // int(np.prod(block_shape))
+        channels = input_shape[1] // int(np.prod(block_shape).item())
         out_shape = [batch, channels] + image_shape
         out_tensor = np.random.ranf(size=out_shape).astype(inputs[0].dtype)
         self.set_out_tensor(out_tensor)
@@ -3681,7 +3681,7 @@ class ArmNonZeroOp(OpHasMultipleOutPorts, DynamicShapeOp, ArmOp):
         inputs = self.get_input_tensors()
         inp = np.ones_like(inputs[0])
         out_tensor = np.array(np.nonzero(inp), dtype=np.int32)
-        count = int(np.prod(inp.shape))
+        count = int(np.prod(inp.shape).item())
         valid_count = np.random.randint(0, high=count + 1, size=(1,), dtype=np.uint32)
         self.set_out_tensor([out_tensor, valid_count])
 
@@ -4117,7 +4117,7 @@ class ArmPowOp(LayoutUnawareOp, OpHasOneOutPort, ArmOp):
     def infer_shape(self):
         super(ArmPowOp, self).infer_shape()
         inputs = self.get_input_tensors()
-        out_tensor = np.power(*inputs)
+        out_tensor = np.power(*inputs).astype(inputs[0].dtype)
         self.set_out_tensor(out_tensor)
 
 
@@ -5550,6 +5550,10 @@ class ArmTransposeOp(OpHasOneOutPort, ArmOp):
 
 class ArmTriluOp(OpHasOneOutPort, ArmOp):
     @classmethod
+    def num_in_ports(cls):
+        return 2
+
+    @classmethod
     def attributes(cls):
         return {
             'upper': {'type': AttrType.BOOL, 'required': True},
@@ -5595,7 +5599,7 @@ class ArmUniqueOp(OpHasVariableOutPorts, OpHasAxis, DynamicShapeOp, ArmOp):
         super(ArmUniqueOp, self).infer_shape()
         inputs = self.get_input_tensors()
         inp_shape = inputs[0].shape
-        inp = np.arange(int(np.prod(inp_shape)), dtype=inputs[0].dtype).reshape(inp_shape)
+        inp = np.arange(int(np.prod(inp_shape).item()), dtype=inputs[0].dtype).reshape(inp_shape)
         y, indices, inverse_indices, counts = np.unique(
             inp, True, True, True, axis=self.axis)
         if self.sorted is False:

@@ -58,13 +58,13 @@ struct GPattern
     GPattern() {}
     GPattern(OpType optype)
     {
-        nodes.push_back(std::make_pair("0", optype));
+        nodes.emplace_back(std::make_pair("0", optype));
     }
     GPattern(OpType op1, OpType op2)
     {
-        nodes.push_back(std::make_pair("0", op1));
-        nodes.push_back(std::make_pair("1", op2));
-        edges.push_back(std::make_pair("0", "1"));
+        nodes.emplace_back(std::make_pair("0", op1));
+        nodes.emplace_back(std::make_pair("1", op2));
+        edges.emplace_back(std::make_pair("0", "1"));
     }
     GPattern(const std::vector<std::pair<std::string, int>> &n, const std::vector<std::pair<std::string, std::string>> &e) : nodes(n), edges(e) {}
     GPattern(const GraphMatcherPattern &pattern) : nodes(pattern.first), edges(pattern.second) {}
@@ -101,6 +101,15 @@ public:
     // optional: use for turning performance
     virtual void update_prefer_cfg(const std::string &key, const Any &value)
     {
+    }
+    virtual const Any &get_cfg(const std::string &key)
+    {
+        static const Any key_not_found;
+        return key_not_found;
+    }
+    virtual const Any &get_cfg(const std::string &key, const Any &default_value)
+    {
+        return default_value;
     }
     // optional: implement score
     virtual uint32_t score() const

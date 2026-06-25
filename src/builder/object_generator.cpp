@@ -29,12 +29,17 @@ void ObjectGenerator::set_streams(const std::vector<std::vector<task_t>> &stream
 {
     for (size_t i = 0; i < streams.size(); ++i)
     {
+        if (streams[i].empty())
+        {
+            continue;
+        }
         stream_t stream;
         stream.id = i;
         stream.tasks = streams[i];
         m_streams.push_back(stream);
     }
 }
+
 void ObjectGenerator::set_slots(const std::vector<MemoryObjectPtr> &slots)
 {
     m_slots = slots;
@@ -49,10 +54,17 @@ void ObjectGenerator::set_param_offset_table(const std::map<uint32_t, uint32_t> 
 {
     m_param_offset_table = param_offset_table;
 }
-void ObjectGenerator::set_params(const std::vector<uint32_t> &params)
+
+void ObjectGenerator::set_params(const BuilderParams &params)
 {
-    m_params = params;
+    m_params.clear();
+    m_params.reserve(params.size());
+    for (auto &p : params)
+    {
+        m_params.push_back(p);
+    }
 }
+
 void ObjectGenerator::set_tensor_index_map(const std::map<TensorPtr, uint32_t> &tensor_index_map)
 {
     m_tensor_index_map = tensor_index_map;
@@ -76,7 +88,7 @@ tensor_info_t ObjectGenerator::gen_info_from_global_tensor(const std::string &te
     info.dtype = tensor->type();
     info.shape = tensor->shape();
     return info;
-};
+}
 
 bool ObjectGenerator::gen(CpsElfPtr &elf) const
 {
@@ -101,7 +113,7 @@ bool ObjectGenerator::gen(CpsElfPtr &elf) const
             WARN() << "tensor " << tensor->name() << " is not assigned";
         }
 
-        DEBUG() << "tensor: " << tensor_idx << " " << tensor->name() << " is assigned slot " << slot->buffer_id << " offset " << offset;
+        DEBUG() << "tensor: " << tensor_idx << " " << tensor->name() << " is assigned slot " << slot->buffer_id << " offset 0x" << std::hex << offset << " size: 0x" << tensor->mem_size();
         mp.tso[tensor_idx] = std::make_pair(slot_index[slot], offset);
         index_tensor_map[tensor_idx] = tensor;
     }
@@ -110,7 +122,28 @@ bool ObjectGenerator::gen(CpsElfPtr &elf) const
 
     for (auto pair : m_param_offset_table)
     {
-        DEBUG() << "param offset: " << pair.first << " is tensor: " << pair.second << " " << index_tensor_map[pair.second];
+        if (index_tensor_map.count(pair.second))
+        {
+            DEBUG() << "param offset: " << pair.first << " is tensor: " << pair.second << " " << index_tensor_map[pair.second];
+        }
+        else
+        {
+            std::string name;
+            TensorPtr tensor;
+            for (const auto &[t, index] : m_tensor_index_map)
+            {
+                if (index == pair.second)
+                {
+                    tensor = t;
+                    break;
+                }
+            }
+            if (tensor)
+            {
+                name = tensor->name();
+            }
+            ERROR() << "param offset: " << pair.first << " is tensor: " << name << " doesn't exist in graph tensor map";
+        }
     }
 
     elf->set_param_tab(m_param_offset_table);
@@ -137,7 +170,7 @@ bool ObjectGenerator::gen(CpsElfPtr &elf) const
     {
         if (!m_tensor_index_map.count(t))
         {
-            ERROR() << t->name() << "not exist in index map";
+            WARN() << t->name() << " not exist in index map";
             continue;
         }
         tensor_info_t info;
@@ -150,7 +183,7 @@ bool ObjectGenerator::gen(CpsElfPtr &elf) const
     {
         if (!m_tensor_index_map.count(t))
         {
-            ERROR() << t->name() << "not exist in index map";
+            WARN() << t->name() << " not exist in index map";
             continue;
         }
         tensor_info_t info;
@@ -214,4 +247,4 @@ bool ObjectGenerator::gen(CpsElfPtr &elf) const
 
     return true;
 }
-}; // namespace aipubt
+} // namespace aipubt

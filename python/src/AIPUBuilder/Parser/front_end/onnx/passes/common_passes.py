@@ -404,7 +404,7 @@ def remove_useless_op(graph, op_type_list):
                 if len(input_shapes) > 0 \
                         and input_shapes[0] is not None \
                         and None not in input_shapes[0] \
-                        and np.prod(np.array(input_shapes[0])[np.array(node_obj.axes, np.int32)]) == 1:
+                        and np.prod(np.array(input_shapes[0])[np.array(node_obj.axes, np.int32)]).item() == 1:
                     in_edges = graph.sorted_in_edges(node_name)
                     removing_nodes.append(node_name)
                     if node_name in graph._attr['output_names']:
@@ -521,7 +521,7 @@ def remove_useless_op(graph, op_type_list):
                 elif trans_in_tensor_shape is not None:
                     no_change_perm = list(range(len(trans_in_tensor_shape)))
                     if (no_change_perm == perm or
-                            int(np.prod(trans_in_tensor_shape)) == 1):
+                            int(np.prod(trans_in_tensor_shape).item()) == 1):
                         removing_nodes.append(node_name)
                     else:
                         diff_values = [v1 for i, (v1, v2) in enumerate(zip(perm, no_change_perm)) if v1 != v2]
@@ -589,55 +589,55 @@ def remove_redundant_bn(graph, max_branches=6):
                 ERROR('[Parser]: Meets invalid BatchNorm Op in remove_redundant_bn!')
 
 
-def remove_redundant_slice(graph, max_try=2):
-    for j in range(max_try):
-        matched = False
-        matches = matched_patterns(graph,
-                                   nodes=[
-                                       ('s1', {'op': 'ArmSlice'}), ('s2', {'op': 'ArmSlice'})],
-                                   edges=[('s1', 's2')]
-                                   )
-        for m in matches:
-            s1, s2 = m['s1'], m['s2']
-            s1_obj = NodeWrap(graph, s1)['object']
-            s2_obj = NodeWrap(graph, s2)['object']
-            inp_shape = s1_obj.get_input_shapes()[0]
-            if s1_obj is None or not inp_shape:
-                ERROR(
-                    '[Parser]: Meets invalid Slice Op (%s) in remove_redundant_slice!' % s1)
-                continue
-            if s2_obj is None:
-                ERROR(
-                    '[Parser]: Meets invalid Slice Op (%s) in remove_redundant_slice!' % s2)
-                continue
-            s1_out_edges = graph.sorted_out_edges(s1, data=True)
-            if len(s1_out_edges) != 1:
-                continue
-            matched = True
-            s1_in_edges = graph.sorted_in_edges(s1, data=True)
-            new_starts = []
-            new_ends = []
-            new_steps = []
-            for i in range(len(s1_obj.starts)):
-                new_start = s1_obj.starts[i] + s2_obj.starts[i] * s1_obj.steps[i]
-                new_step = s1_obj.steps[i] * s2_obj.steps[i]
-                new_end = s1_obj.starts[i] + s2_obj.ends[i] * s1_obj.steps[i]
-                new_start, new_end = SliceOp.trim_start_end(inp_shape[i], new_start, new_end, new_step)
-                new_starts.append(new_start)
-                new_steps.append(new_step)
-                new_ends.append(new_end)
+def remove_redundant_slice(graph):
+    matched = False
+    matches = matched_patterns(graph,
+                               nodes=[
+                                   ('s1', {'op': 'ArmSlice'}), ('s2', {'op': 'ArmSlice'})],
+                               edges=[('s1', 's2')]
+                               )
+    for m in matches:
+        s1, s2 = m['s1'], m['s2']
+        s1_obj = NodeWrap(graph, s1)['object']
+        s2_obj = NodeWrap(graph, s2)['object']
+        inp_shape = s1_obj.get_input_shapes()[0]
+        if s1_obj is None or not inp_shape:
+            ERROR(
+                '[Parser]: Meets invalid Slice Op (%s) in remove_redundant_slice!' % s1)
+            continue
+        if s2_obj is None:
+            ERROR(
+                '[Parser]: Meets invalid Slice Op (%s) in remove_redundant_slice!' % s2)
+            continue
+        s1_out_edges = graph.sorted_out_edges(s1, data=True)
+        if len(s1_out_edges) != 1:
+            continue
+        matched = True
+        s1_in_edges = graph.sorted_in_edges(s1, data=True)
+        new_starts = []
+        new_ends = []
+        new_steps = []
+        for i in range(len(s1_obj.starts)):
+            new_start = s1_obj.starts[i] + s2_obj.starts[i] * s1_obj.steps[i]
+            new_step = s1_obj.steps[i] * s2_obj.steps[i]
+            new_end = s1_obj.starts[i] + s2_obj.ends[i] * s1_obj.steps[i]
+            new_start, new_end = SliceOp.trim_start_end(inp_shape[i], new_start, new_end, new_step)
+            new_starts.append(new_start)
+            new_steps.append(new_step)
+            new_ends.append(new_end)
 
-            s2_obj.starts = new_starts
-            s2_obj.ends = new_ends
-            s2_obj.steps = new_steps
+        s2_obj.starts = new_starts
+        s2_obj.ends = new_ends
+        s2_obj.steps = new_steps
 
-            graph.remove_edges_from(s1_in_edges)
-            graph.remove_edges_from(s1_out_edges)
-            src, _, in_attr = s1_in_edges[0]
-            graph.add_edge(src, s2, **in_attr)
+        graph.remove_edges_from(s1_in_edges)
+        graph.remove_edges_from(s1_out_edges)
+        src, _, in_attr = s1_in_edges[0]
+        graph.add_edge(src, s2, **in_attr)
 
-        if matched:
-            clear_redundant_nodes(graph)
+    if matched:
+        clear_redundant_nodes(graph)
+    return matched
 
 
 def remove_redundant_reshape(graph, type='Reshape'):
@@ -840,7 +840,7 @@ def remove_redundant_transpose2(graph):
 
 
 def remove_redundant_transpose_unaware(graph):
-    '''Remove Transpose nodes from the following patterns if their perm are inversed.
+    r'''Remove Transpose nodes from the following patterns if their perm are inversed.
     sink_single_transpose won't work for this case because the first Transpose has more than 1 children.
         x -> Transpose -> Quantize(or others) -> Transpose
                      \--> (other children)

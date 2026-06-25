@@ -32,6 +32,7 @@ class Qwen2_5ThinkerEmbCausalLM(BaseEmbedding):
 @register_update_config(['qwen2.5thinker'])
 def qwen2_5_omni_text_update_config(config):
     model_type = config.get('model_type', {})
+    use_cache = config.get('use_cache', {})
     thinker_config = config.get('thinker_config', {})
     if len(thinker_config) == 0:
         return
@@ -53,6 +54,7 @@ def qwen2_5_omni_text_update_config(config):
     config.update({'vision_config': vision_config})
     config.pop('text_config')
     config.update({'model_type': model_type})
+    config.update({'use_cache': use_cache})
     config.update({'image_token_id': 151655})
     config.update({'video_token_id': 151656})
     config.update({'vision_start_token_id': 151652})
@@ -105,14 +107,14 @@ class Qwen2_5ThinkerRotaryEmbedding(nn.Module):
             _, s1, s2, s3 = sin_s.shape.symbol
             sins = ops.crop(sin_s, crops=[[i % 3, i % 3+1], [0, s1], [0, s2], [0, s3]])
             sl.append(sins)
-        sin_concat = ops.concat(sl, axis=-1).transpose([0, 2, 1, 3])
+        sin_concat = ops.concat(sl, axis=-1)#.transpose([0, 2, 1, 3])
         cl = []
         for i, cos_s in enumerate(cos_split):
             s0, _, _, _ = cos_s.shape
             _, s1, s2, s3 = cos_s.shape.symbol
             coss = ops.crop(cos_s, crops=[[i % 3, i % 3+1], [0, s1], [0, s2], [0, s3]])
             cl.append(coss)
-        cos_concat = ops.concat(cl, axis=-1).transpose([0, 2, 1, 3])
+        cos_concat = ops.concat(cl, axis=-1)#.transpose([0, 2, 1, 3])
         return cos_concat, sin_concat
 
 
@@ -149,7 +151,7 @@ class Qwen2_5ThinkerAttention(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size//self.num_heads  # config.thinker_config['text_config']['head_dim']
+        self.head_dim = config.thinker_config['text_config'].get("head_dim", self.hidden_size // self.num_heads)
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings if not hasattr(
@@ -157,6 +159,7 @@ class Qwen2_5ThinkerAttention(nn.Module):
         self.rope_theta = config.rope_theta
         self.is_causal = True
         self.attention_dropout = config.attention_dropout
+        self.swap_matmul_input = config.get('swap_matmul_input', False)
         # if (self.head_dim * self.num_heads) != self.hidden_size:
         #     ERROR(f"hidden_size must be divisible by num_heads (got `hidden_size`: "
         #           f"{self.hidden_size} and `num_heads`: {self.num_heads}).")
@@ -188,105 +191,161 @@ class Qwen2_5ThinkerAttention(nn.Module):
 
         scales = 1./np.sqrt(np.array(self.head_dim)).astype('float32')
         self.kq_matmul = nn.MatMul(trans_a=False, trans_b=True, fused_multiplier=scales)
+        self.kq_matmul_swap = nn.MatMul(trans_a=False, trans_b=True, fused_multiplier=scales)
         self.kqv_matmul = nn.MatMul()
         self.matmul_name = f"{prefix}layers.{layer_id}.self_attn"
         self.softmax = nn.Softmax(axis=3)
 
     def forward(self, hidden_states, attention_mask, position_ids, k_cache=None, v_cache=None, use_cache=False):
+        bs, seq_len, hidden_size = hidden_states.shape.symbol
+        bs_symbol, seq_len_symbol, _ = hidden_states.shape.symbol
+        hidden_states = ops.reshape(hidden_states, [bs_symbol * seq_len_symbol, hidden_size])
 
+        # bs = 1 optimization.: swap bs and num_heads to reduce LayoutCVTs in attention (for static prefill only)
+        #     before this opt.: gb inserts Reshapes to swap bs and num_heads before Matmuls, which results in LayoutCVTs
+        #                         before/after Reshapes
+        #     after this opt.:  swap during Transpose therefore no Reshapes before Matmuls, and less LayoutCVTs
+        en_bs_1_opt = 0
+        if bs == 1 and not use_cache:
+            en_bs_1_opt = 1
+            self.qkv_transpose = nn.Transpose([2, 0, 1, 3])
+            # prefill k, v cache shape is [num_key_value_heads, 1, seq_len, head_dim]
+            # in pdmodellmchat, need to transpose prefill's output kv cache
+            self.config.update({'prefill_batch_opt': True})
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
         self.rotary_emb = Qwen2_5ThinkerRotaryEmbedding(self.config,
-                                                        self.head_dim,
-                                                        repeat_kv=self.num_key_value_groups > 1,
-                                                        max_position_embeddings=self.max_position_embeddings,
-                                                        base=self.rope_theta,
-                                                        name=f'{self.prefix}layers.{self.layer_id}.self_attn')
+                                               self.head_dim,
+                                               repeat_kv=self.num_key_value_groups > 1,
+                                               max_position_embeddings=self.max_position_embeddings,
+                                               base=self.rope_theta,
+                                               name=f'{self.prefix}layers.{self.layer_id}.self_attn')
         cos_emb, sin_emb = self.rotary_emb(position_ids)
 
-        bs_symb, seq_len_symb, hidden_size_symb = hidden_states.shape.symbol
-        hidden_states = ops.reshape(hidden_states, [bs_symb * seq_len_symb, hidden_size_symb])
+        self.q_reshape = nn.Reshape([bs_symbol, seq_len_symbol, self.num_heads, self.head_dim])
+        self.kv_reshape = nn.Reshape([bs_symbol, seq_len_symbol, self.num_key_value_heads, self.head_dim])
+        reshaped_trans_query = self.qkv_transpose(self.q_reshape(query_states))
+        reshaped_trans_key = self.qkv_transpose(self.kv_reshape(key_states))
 
-        query = self.q_proj(hidden_states)
-        key = self.k_proj(hidden_states)
-        value = self.v_proj(hidden_states)
-
-        self.q_reshape = nn.Reshape([bs_symb, seq_len_symb, self.num_heads, self.head_dim])
-        self.kv_reshape = nn.Reshape([bs_symb, seq_len_symb, self.num_key_value_heads, self.head_dim])
-        query = self.q_reshape(query)
-        key = self.kv_reshape(key)
-        value = self.kv_reshape(value)
-
-        # query
-        rtq_symbol0, rtq_symbol1, rtq_symbol2, _ = query.shape.symbol
+        rtq_symbol0, rtq_symbol1, rtq_symbol2, _ = reshaped_trans_query.shape.symbol
         crop0 = nn.Crop([[0, rtq_symbol0], [0, rtq_symbol1], [0, rtq_symbol2], [self.head_dim//2, self.head_dim]])
         crop1 = nn.Crop([[0, rtq_symbol0], [0, rtq_symbol1], [0, rtq_symbol2], [0, self.head_dim//2]])
-
-        q_crop_out0 = crop0(query)
-        q_crop_out1 = crop1(query)
+        # query
+        q_crop_out0 = crop0(reshaped_trans_query)
+        q_crop_out1 = crop1(reshaped_trans_query)
         neg_q_crop_out0 = ops.negative(q_crop_out0)
         rope_query = nn.Concat(-1)([neg_q_crop_out0, q_crop_out1])
 
-        # key
-        rtk_symbol0, rtk_symbol1, rtk_symbol2, _ = key.shape.symbol
+        rtk_symbol0, rtk_symbol1, rtk_symbol2, _ = reshaped_trans_key.shape.symbol
         crop0 = nn.Crop([[0, rtk_symbol0], [0, rtk_symbol1], [0, rtk_symbol2], [self.head_dim//2, self.head_dim]])
         crop1 = nn.Crop([[0, rtk_symbol0], [0, rtk_symbol1], [0, rtk_symbol2], [0, self.head_dim//2]])
-
-        k_crop_out0 = crop0(key)
-        k_crop_out1 = crop1(key)
+        # key
+        k_crop_out0 = crop0(reshaped_trans_key)
+        k_crop_out1 = crop1(reshaped_trans_key)
         neg_k_crop_out0 = ops.negative(k_crop_out0)
         rope_key = nn.Concat(-1)([neg_k_crop_out0, k_crop_out1])
 
-        # cos_emb, sin_emb = position_emb
-        q_cosine = query * cos_emb
-        k_cosine = key * cos_emb
+        neg_q_crop_out0.op.name = f"{self.matmul_name}.negative_0"
+        neg_k_crop_out0.op.name = f"{self.matmul_name}.negative_1"
+
+        q_cosine = reshaped_trans_query * cos_emb
+        k_cosine = reshaped_trans_key * cos_emb
         q_r_sine = rope_query * sin_emb
         k_r_sine = rope_key * sin_emb
-        query = q_cosine + q_r_sine
-        key = k_cosine + k_r_sine
 
-        query = self.qkv_transpose(query)
-        key = self.qkv_transpose(key)
-        value = self.qkv_transpose(value)
+        q_add_out = q_cosine + q_r_sine
+        k_add_out = k_cosine + k_r_sine
 
-        k_cache_out = k_cache(key, position_ids=position_ids, block_idx=self.layer_id,
+        k_cache_out = k_cache(k_add_out, position_ids=position_ids, block_idx=self.layer_id,
                               name=f"past_key_value.{self.layer_id}.key")
-        v_cache_out = v_cache(value, position_ids=position_ids,
-                              block_idx=self.layer_id, name=f"past_key_value.{self.layer_id}.value")
-        value = v_cache_out[0]
-        key = k_cache_out[0]
+        k_cache_out = k_cache_out[0]
 
-        if self.num_key_value_groups > 1:
-            batch, num_key_value_heads, slen, head_dim = key.shape.symbol
-            key_reshape = key.reshape([batch, num_key_value_heads, 1, slen, head_dim])
-            key_tile = ops.tile(key_reshape, [1, 1, self.num_key_value_groups, 1, 1])
-            key = key_tile.reshape([batch, num_key_value_heads * self.num_key_value_groups, slen, head_dim])
+        # if self.num_key_value_groups > 1 and self.config.get('split_GQA', False):
+        #     pass
+        if self.num_key_value_groups > 1 and en_bs_1_opt == 0:
+            batch, num_key_value_heads, slen, head_dim = k_cache_out.shape.symbol
+            if not self.config.get('broadcast_matmul', False):
+                k_cache_out = k_cache_out.reshape([batch, num_key_value_heads, 1, slen, head_dim])
+                k_cache_out = ops.tile(k_cache_out, [1, 1, self.num_key_value_groups, 1, 1])
+                k_cache_out = k_cache_out.reshape(
+                    [batch, num_key_value_heads * self.num_key_value_groups, slen, head_dim])
+            else:
+                # [CP-23956]: insert reshape to use kq_matmul's broadcast feature to eliminate tile op for k_out, kq_matmul will broadcast k_out's second dim to num_key_value_groups
+                k_cache_out = k_cache_out.reshape([batch * num_key_value_heads, 1, slen, head_dim])
+                batch, _, slen, head_dim = q_add_out.shape.symbol
+                q_add_out = q_add_out.reshape([batch * self.num_key_value_heads,
+                                              self.num_key_value_groups, slen, head_dim])
+        elif self.num_key_value_groups > 1 and en_bs_1_opt == 1:
+            num_key_value_heads, batch, slen, head_dim = k_cache_out.shape.symbol
+            if not self.config.get('broadcast_matmul', False):
+                k_cache_out = k_cache_out.reshape([num_key_value_heads, 1, batch, slen, head_dim])
+                k_cache_out = ops.tile(k_cache_out, [1, self.num_key_value_groups, 1, 1, 1])
+                k_cache_out = k_cache_out.reshape(
+                    [num_key_value_heads * self.num_key_value_groups, batch, slen, head_dim])
+            else:
+                k_cache_out = k_cache_out.reshape([batch * num_key_value_heads, 1, slen, head_dim])
+                _, batch, slen, head_dim = q_add_out.shape.symbol
+                q_add_out = q_add_out.reshape([batch * self.num_key_value_heads,
+                                              self.num_key_value_groups, slen, head_dim])
 
-        if False and use_cache:
+        if self.swap_matmul_input and seq_len == 1:
             # [CP-19313]C=A*B=(B^T*A^T)^T, when B size >> A size, swap input can improve wtram reuse
-            kq_matmul = nn.Transpose([0, 1, 3, 2])(self.kq_matmul(key, query))
+            kq_matmul = nn.Transpose([0, 1, 3, 2])(self.kq_matmul_swap(k_cache_out, q_add_out))
         else:
-            kq_matmul = self.kq_matmul(query, key)
+            kq_matmul = self.kq_matmul(q_add_out, k_cache_out)
         kq_matmul.op.name = f"{self.matmul_name}_matmul_kq"
+
         '''
         matmul has added params['fused_multiplier'] for scale,
         scale = 1.0 / np.sqrt(np.array(head_dim)).astype(np.float32) has merged to matmul
         '''
         softmax_masked = self.softmax(kq_matmul + attention_mask)
 
-        if self.num_key_value_groups > 1:
-            batch, num_key_value_heads, slen, head_dim = value.shape.symbol
-            value0 = value.reshape([batch, num_key_value_heads, 1, slen, head_dim])
-            value1 = ops.tile(value0, [1, 1, self.num_key_value_groups, 1, 1])  # [16,1, seq, 128]
-            value = value1.reshape([batch, num_key_value_heads * self.num_key_value_groups, slen, head_dim])
+        reshaped_trans_value = self.qkv_transpose(self.kv_reshape(value_states))
 
-        attn_output = self.kqv_matmul(softmax_masked, value)
-        attn_output.op.name = f"{self.matmul_name}_matmul_kqv"
+        v_cache_out = v_cache(reshaped_trans_value, position_ids=position_ids,
+                              block_idx=self.layer_id, name=f"past_key_value.{self.layer_id}.value")
+        v_cache_out = v_cache_out[0]
 
-        # attn_output = nn.Transpose([1, 2, 0, 3])(attn_output)
-        attn_output = nn.Transpose([0, 2, 1, 3])(attn_output)
-        context_layer = ops.reshape(attn_output, [bs_symb * seq_len_symb, self.hidden_size])
-        attn_output = self.o_proj(context_layer)
+        if self.num_key_value_groups > 1 and en_bs_1_opt == 0:
+            if not self.config.get('broadcast_matmul', False):
+                batch, num_key_value_heads, slen, head_dim = v_cache_out.shape.symbol
+                v_cache_out = v_cache_out.reshape([batch, num_key_value_heads, 1, slen, head_dim])
+                v_cache_out = ops.tile(v_cache_out, [1, 1, self.num_key_value_groups, 1, 1])
+                v_cache_out = v_cache_out.reshape(
+                    [batch, num_key_value_heads * self.num_key_value_groups, slen, head_dim])
+            else:
+                # [CP-23956]: insert reshape to use kqv_matmul's broadcast feature to eliminate tile op for reshaped_trans_value
+                batch, num_key_value_heads, slen, head_dim = v_cache_out.shape.symbol
+                v_cache_out = v_cache_out.reshape([batch * num_key_value_heads, 1, slen, head_dim])
+        elif self.num_key_value_groups > 1 and en_bs_1_opt == 1:
+            if not self.config.get('broadcast_matmul', False):
+                num_key_value_heads, batch, slen, head_dim = v_cache_out.shape.symbol
+                v_cache_out = v_cache_out.reshape([num_key_value_heads, 1, batch, slen, head_dim])
+                v_cache_out = ops.tile(v_cache_out, [1, self.num_key_value_groups, 1, 1, 1])
+                v_cache_out = v_cache_out.reshape(
+                    [num_key_value_heads * self.num_key_value_groups, batch, slen, head_dim])
+            else:
+                num_key_value_heads, batch, slen, head_dim = v_cache_out.shape.symbol
+                v_cache_out = v_cache_out.reshape([batch * num_key_value_heads, 1, slen, head_dim])
 
-        return attn_output
+        kqv_out = self.kqv_matmul(softmax_masked, v_cache_out)
+        kqv_out.op.name = f"{self.matmul_name}_matmul_kqv"
+
+        self.qkv_reshape = nn.Reshape([bs_symbol * seq_len_symbol, self.num_heads * self.head_dim])
+        if en_bs_1_opt == 1:
+            reshaped_trans = self.qkv_reshape(nn.Transpose([1, 2, 0, 3])(kqv_out))
+        else:
+            # [CP-23956]: recover batch dim
+            kqv_out = kqv_out.reshape(bs_symbol, self.num_key_value_heads *
+                                      self.num_key_value_groups, seq_len_symbol, self.head_dim)
+            reshaped_trans = self.qkv_reshape(self.qkv_transpose(kqv_out))
+
+        o_t = self.o_proj(reshaped_trans)
+
+        return o_t
 
 
 class Qwen2_5ThinkerDecoder(nn.Module):
@@ -448,17 +507,22 @@ class Qwen2_5OmniThinkerForConditionalGeneration(BaseModel):
         self.aipu_g = None
         self.prefix = prefix
 
-    def forward(self, seq_len=None, use_cache=None, with_embed=False, past_len=None):  # prefix='thinker.model.' with_embed=True is prev graph
-        seq_len = self.config.seq_len
-        past_len = self.config.past_len
+
+    def forward(self):  # prefix='thinker.model.' with_embed=True is prev graph
+        
+        seq_len = self.config.get('seq_len')
+        past_len = self.config.get('past_len')
+        with_embed = self.config.get('with_embed', False)
         use_cache = self.config.get('use_cache', True) and (past_len > 0)
         batch = self.config.get('batch', 1)
-
+        # block_num = self.config.num_hidden_layers
+        # num_key_value_heads = self.config.num_key_value_heads
         num_heads = self.config.num_attention_heads
         hidden_size = self.config.hidden_size
-        # self.config.thinker_config['text_config']['head_dim']
-        head_dim = hidden_size//num_heads
+        head_dim = hidden_size//num_heads #self.config.thinker_config['text_config']['head_dim']
+        self.use_cache = use_cache if use_cache is not None else self.config.use_cache
 
+        batch = self.config.get('batch', 1)
         with Graph('qwen') as self.aipu_g:
 
             hidden_states = ops.input([batch, seq_len, self.config.hidden_size],
@@ -474,9 +538,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(BaseModel):
                                      name='position_ids',
                                      exprs=[3, 'batch', 'seq_len'])
 
-            scale = nn.Constant(
-                np.array(1./np.sqrt(np.array(head_dim))).astype('float32').reshape([1]))()
-            scale.op.constants['weights'].name = f"scale_for_normalization"
+
+
+
             kcache_module = nn.KVCacheModule(self.config, name='kcache')
             vcache_module = nn.KVCacheModule(self.config, name='vcache')
             hidden_states = self.model(hidden_states,

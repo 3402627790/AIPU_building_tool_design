@@ -23,12 +23,32 @@ __all__ = [
     'DEFAULT_TARGET',
     'AIPU_BLOCK_SIZE',
     'AIPU_DEFAULT_BLOCK_SIZE',
+    'parse_config_with_double_dash',
 ]
 
 
 DEFAULT_TARGET = 'X3P_1304'
 AIPU_BLOCK_SIZE = [32, 64, 128, 256]
 AIPU_DEFAULT_BLOCK_SIZE = 128
+
+
+def parse_config_with_double_dash(bc):
+    if (bc.startswith('"') and bc.endswith('"')) or (bc.startswith("'") and bc.endswith("'")):
+        bc = bc[1:-1]
+    pattern = r"--([a-zA-Z_][a-zA-Z0-9_-]*)=('(?:[^']|\\')*'|" + r'"(?:[^"]|\\")*"|[^,\s]+)'
+    matches = re.findall(pattern, bc)
+    bc_map = {}
+    for match in matches:
+        k = match[0]
+        v = match[1]
+        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+            v = v[1:-1]
+        v = string_to_base_type(v)
+        if k not in bc_map:
+            bc_map[k] = [v]
+        else:
+            bc_map[k].append(v)
+    return bc_map
 
 
 def parse_string_to_pairs(text):
@@ -210,6 +230,8 @@ def update_tensor_data(t, data, name='', dtype=np.float32):
                     t._attrs[QInfoParam.GIDX] = data[QInfoParam.GIDX]
                 elif QInfoParam.BITS == key:
                     t.quantization.bits = data[QInfoParam.BITS]
+                elif key == 'weight_global_scale':
+                    t.quantization.qscales.quantization.scales = data[key].contiguous().flatten().cpu().numpy()
                 else:
                     d = data[key]
                     if isinstance(d, torch.Tensor):
@@ -231,6 +253,7 @@ def update_tensor_data(t, data, name='', dtype=np.float32):
         weight = weight.astype(dtype)
         t.set_data(weight)
         t.dtype = Dtype.from_np(dtype)
+        t._attrs['data_updated'] = True
         if name != '':
             t.name = name
 

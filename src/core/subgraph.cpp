@@ -23,6 +23,7 @@
 #include "builder/lowering/lowering.h"
 #include "builder/profiler.h"
 #include "core.h"
+#include "core/config.h"
 #include "core/constants.h"
 #include "core/core.h"
 #include "core/ifnode.h"
@@ -423,7 +424,12 @@ void SubGraph::to_node(SubGraphPtr sg, SubGraphNodePtr node, bool add_sg_input, 
 
 SubGraphNodePtr SubGraphNode::create(SubGraphPtr subg, const std::string &name)
 {
-    return SubGraphNodePtr(new SubGraphNode(subg, name));
+    auto node = SubGraphNodePtr(new SubGraphNode(subg, name));
+    if (subg)
+    {
+        subg->m_sgn = SubGraphNodeRef(node);
+    }
+    return node;
 }
 
 SubGraphNode::SubGraphNode(SubGraphPtr subg, const std::string &name_) : m_sg(subg)

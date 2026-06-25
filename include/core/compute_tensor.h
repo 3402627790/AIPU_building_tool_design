@@ -302,6 +302,8 @@ public:
         return s;
     }
 
+    bool contain_quant() const;
+
     template <typename T, typename = std::enable_if_t<is_supported_tensor_type<T>::value>>
     operator std::vector<T>() const
     {
@@ -394,12 +396,27 @@ public:
     {
         using traits = function_traits<std::decay_t<F>>;
         using T = typename traits::template arg<0>::type;
-        T *data = m_tensor->data<T>();
-        for (auto i = 0u; i < size(); ++i)
+        if (tensor_type<T>::value() != m_tensor->m_type)
         {
-            if (!pred(data[i]))
+            ComputeTensor nt = (this->astype(tensor_type<T>::value()));
+            T *data = nt->data<T>();
+            for (auto i = 0u; i < nt.size(); ++i)
             {
-                return false;
+                if (!pred(data[i]))
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            T *data = m_tensor->data<T>();
+            for (auto i = 0u; i < size(); ++i)
+            {
+                if (!pred(data[i]))
+                {
+                    return false;
+                }
             }
         }
         return true;

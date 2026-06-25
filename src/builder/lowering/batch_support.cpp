@@ -67,7 +67,8 @@ static std::set<OpType> SUPPORT_CUT_BATCH_OPS =
     OpType_TopK,
     OpType_Gather,
     OpType_ArgMinMax,
-    OpType_RMSNorm
+    OpType_RMSNorm,
+    OpType_Negative
 };
 
 static void add_spliter(NodePtr node, TensorPtr inp, NodePtrList &split_nodes)
@@ -113,10 +114,18 @@ static NodePtrList apply_split(NodePtr node, std::vector<int> batches)
     }
     else if (node->type() == OpType_Gather)
     {
-        // gather's input1 are indices, they are independent in batch dim, so add spliter for input1
-        split_nodes.push_back(nullptr);
-        add_spliter(node, node->inputs()[1], split_nodes);
-        batch_axis = node->params()["axis"];
+        auto batch_dims = node->params()["batch_dims"];
+        // no batch, but dim0 for input0 and output_tensor can be treated as batch
+        if (batch_dims == 0){
+            add_spliter(node, node->inputs()[0], split_nodes);
+            split_nodes.push_back(nullptr);
+        }
+        // exists batch dim, just cut both inputs
+        else
+        {
+            add_spliter(node, node->inputs()[0], split_nodes);
+            add_spliter(node, node->inputs()[1], split_nodes);
+        }
     }
     else
     {
@@ -300,21 +309,9 @@ bool check_manual_tile_n(NodePtr n)
         }
     }
 
-    // if (type == OpType_Transpose)
-    // {
-    //     if (n->params().count("perm"))
-    //     {
-    //         std::vector<int> perm = n->params()["perm"];
-    //         if (perm[0] != 0)
-    //         {
-    //             return false;
-    //         }
-    //     }
-    // }
-
     if (type == OpType_Gather)
     {
-        if (n->params().count("batch_dims") && n->params()["batch_dims"])
+        if (n->params().count("batch_dims") && n->params()["batch_dims"] > 1)
         {
             return false;
         }
@@ -354,7 +351,7 @@ bool check_auto_tile_n(NodePtr n)
 
     if (type == OpType_Gather)
     {
-        if (n->inputs()[1]->shape().n() == 1)
+        if (n->inputs()[0]->shape().n() == 1)
         {
             return false;
         }
@@ -391,7 +388,17 @@ bool check_batched_graph_tile_n(GraphPtr g)
                 return false;
             }
         }
-
+        if (n->type() == OpType_Transpose)
+        {
+            if (n->params().count("perm"))
+            {
+                std::vector<int> perm = n->params()["perm"];
+                if (perm[0] != 0)
+                {
+                    return false;
+                }
+            }
+        }
         for (auto t : n->outputs())
         {
             auto local_batch = t->shape().n();

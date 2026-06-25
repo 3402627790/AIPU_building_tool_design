@@ -678,7 +678,7 @@ class CaffeFLATTENOp(OpHasAxis, OpHasOneOutPort, CaffeOp):
             for i in range(len(input_shape)):
                 if i < axis:
                     ret.append(input_shape[i])
-            ret.append(int(np.prod(input_shape[axis: end_axis + 1])))
+            ret.append(int(np.prod(input_shape[axis: end_axis + 1]).item()))
             for i in range(len(input_shape)):
                 if i > end_axis:
                     ret.append(input_shape[i])
@@ -1474,12 +1474,12 @@ class CaffeRESHAPEOp(OpHasOneOutPort, CaffeOp):
                       copy_axis_index] = in_shape[start_axis + copy_axis_index]
         if self.inferred_axis >= 0:
             explicit_count = self.constant_count
-            explicit_count *= int(np.prod(in_shape[0:start_axis]))
-            explicit_count *= int(np.prod(in_shape[end_axis:]))
+            explicit_count *= int(np.prod(in_shape[0:start_axis]).item())
+            explicit_count *= int(np.prod(in_shape[end_axis:]).item())
             for i in range(len(self.copy_axes)):
                 copy_axis_index = self.copy_axes[i]
                 explicit_count *= top_shape[start_axis + copy_axis_index]
-            inferred_dim = int(np.prod(in_shape)) // explicit_count
+            inferred_dim = int(np.prod(in_shape).item()) // explicit_count
             top_shape[start_axis + self.inferred_axis] = inferred_dim
         self.shape = top_shape
         out_tensor = np.reshape(inputs[0], shape=self.shape)
@@ -1517,7 +1517,7 @@ class CaffeRNNOp(OpHasVariableOutPorts, OpHasWeights, CaffeOp):
         for i, d in enumerate(base_dim):
             if d == -1:
                 base_dim[i] = int(
-                    np.abs(int(np.prod(in_shape)) // int(np.prod(base_dim))))
+                    np.abs(int(np.prod(in_shape).item()) // int(np.prod(base_dim).item())))
                 break
         self.shape = base_dim
         out_tensor = np.reshape(inputs[0], shape=self.shape)

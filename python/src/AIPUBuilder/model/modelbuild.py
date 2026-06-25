@@ -3,7 +3,7 @@ import re
 import torch
 from AIPUBuilder.core import aipugb, AIPUELF, LlmInfo, BuilderConfig
 from AIPUBuilder.logger import INFO, ERROR, DEBUG, WARN
-from AIPUBuilder.model.utils import string_to_base_type
+from AIPUBuilder.model.utils import parse_config_with_double_dash
 from AIPUBuilder.model.loadweight import LoadWeight
 
 
@@ -47,21 +47,7 @@ class ModelBuild(object):
 
         if self.config.get('builder_config', '') != '':
             bc = self.config.builder_config
-            if (bc.startswith('"') and bc.endswith('"')) or (bc.startswith("'") and bc.endswith("'")):
-                bc = bc[1:-1]
-            pattern = r"--([a-zA-Z_][a-zA-Z0-9_-]*)=('(?:[^']|\\')*'|" + r'"(?:[^"]|\\")*"|[^,\s]+)'
-            matches = re.findall(pattern, bc)
-            bc_map = {}
-            for match in matches:
-                k = match[0]
-                v = match[1]
-                if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-                    v = v[1:-1]
-                v = string_to_base_type(v)
-                if k not in bc_map:
-                    bc_map[k] = [v]
-                else:
-                    bc_map[k].append(v)
+            bc_map = parse_config_with_double_dash(bc)
             for bck, bcv in bc_map.items():
                 if len(bcv) == 1:
                     if bck in args_map:

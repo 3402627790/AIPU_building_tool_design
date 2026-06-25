@@ -33,14 +33,20 @@ def x1_gen_report(graph_json, binary, args):
     graph_name = graph_json["graph_name"]
     verbose = int(args.verbose)
     verbose = max(min(verbose, 2), 0)
-    custom_record = fetch_custom_record_from_binary(graph_json, binary)
+    
     nodes_info = get_perf_data_x1(graph_json, binary, args)
-    if verbose >= 2 and len(custom_record) > 0:
+    
+    if args.method == "html":
         report_name = args.output if args.output else graph_name + "_perf.html"
-        TickGraphGenerator().gen(graph_json, nodes_info, report_name, custom_record)
-    elif args.method == "html":
-        report_name = args.output if args.output else graph_name + "_perf.html"
-        HtmlGenerator().gen(graph_json, nodes_info, report_name, verbose)
+        if verbose >= 2:
+            custom_record = fetch_custom_record_from_binary(graph_json, binary)
+        else:
+            custom_record = []
+
+        if len(custom_record) > 0:
+            TickGraphGenerator().gen(graph_json, nodes_info, report_name, custom_record)    
+        else:
+            HtmlGenerator().gen(graph_json, nodes_info, report_name, verbose)
     elif args.method in ["csv", "xlsx"]:
         postfix = "xlsx"
         if args.method == "csv":

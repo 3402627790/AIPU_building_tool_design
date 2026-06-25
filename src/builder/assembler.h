@@ -59,9 +59,10 @@ class Assembler
 {
 public:
     bool set_graph(GraphPtr g);
+    void set_level(const std::vector<std::vector<NodePtr>> &levels);
     void set_elf(const CpsElfPtr &elf);
     void assembly();
-    std::vector<std::vector<task_t>> get_streams();
+    const std::vector<std::vector<task_t>> &get_streams() const;
     const BuilderParams &get_params() const;
     std::map<uint32_t, uint32_t> get_param_offset_table();
     std::map<TensorPtr, uint32_t> get_tensor_index_map();
@@ -76,11 +77,14 @@ private:
     std::map<ConstTensorPtr, uint32_t> m_const_index_map;
     CpsElfPtr m_elf;
     uint32_t m_tensor_index = 1;
-    uint32_t m_const_index = 1;
     uint32_t m_task_id = 0;
+    std::vector<std::vector<NodePtr>> m_levels;
+    std::map<NodePtr, int> m_node_last_kernel_map;
+    std::set<NodePtr> m_empty_kernel_node;
     uint32_t get_tensor_index(const TensorPtr t);
     uint32_t get_const_index(const ConstTensorPtr t);
     uint32_t get_task_id();
+    void setup_stream_sync(size_t first_kernel, NodePtr sgn, std::vector<task_t> &stream, size_t stream_id);
 };
 
 BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info);

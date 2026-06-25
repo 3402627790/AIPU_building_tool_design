@@ -32,6 +32,16 @@ def build_ir_postprocess(model, config):
                         input_t = n.inputs[0]
                         input_t.quantization.scales = input_scale
                         input_t.quantization.offsets = torch.zeros_like(input_scale)
+                        n.params['input_scale'] = input_scale.item()
+                    elif 'input_global_scale' in w._attrs:
+                        input_scale = w._attrs['input_global_scale']
+                        input_t = n.inputs[0]
+                        input_t.quantization.scales = input_scale
+                        input_t.quantization.offsets = torch.zeros_like(input_scale)
+                        n.params['input_global_scale'] = input_scale.item()
+                    # elif 'weight_global_scale' in w._attrs:
+                    #     weight_global_scale = w._attrs['weight_global_scale']
+                    #     n.params['weight_global_scale'] = weight_global_scale.item()
 
 
 def gen_layer_ids(num_layers):

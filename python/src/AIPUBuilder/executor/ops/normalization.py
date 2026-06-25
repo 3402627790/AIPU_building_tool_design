@@ -228,7 +228,7 @@ def gen_random_weight(self):
 @register_op_metric(OpType.Normalization)
 @check_fp_data
 def metric(self, outputs, index=None):
-    # note: aiff's metric maybe called in layoutconvertor
+    # note: aiff's metric maybe called in layoutconvertor/crop
     def aiff_call(r, u, c, t):
         if "float" in t:
             return np.all(u <= 1)

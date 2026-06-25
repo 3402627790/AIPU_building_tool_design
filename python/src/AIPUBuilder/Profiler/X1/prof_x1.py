@@ -141,6 +141,11 @@ def fetch_custom_record_from_binary(graph_json, binary):
     header = binary[:24]
     header.dtype = np.uint32
     custom_buffer.dtype = np.uint32
+
+    if header[2] < custom_buffer_offset:
+        FATAL(
+            f"[Profiler] the default profile buffer maybe overflow(uint32) {custom_buffer_offset} -> {header[2]}, please close some events and run buildtool again")
+
     record_num = (header[2] - custom_buffer_offset) // 12
 
     if header[2] >= max_perf_offset:
@@ -174,7 +179,9 @@ def get_perf_data_x1(graph_json, binary, args):
     nodes_info = fetch_info_from_binary(graph_json, binary)
     nodes = dict()
     tensors = graph_json["tensors"]
-    custom_record = fetch_custom_record_from_binary(graph_json, binary)
+
+    if verbose >= 2:
+        fetch_custom_record_from_binary(graph_json, binary)
 
     all_actuals = []
     for node in graph_json["nodes"]:

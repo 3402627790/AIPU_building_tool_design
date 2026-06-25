@@ -20,7 +20,7 @@ def register_pre_pass(p):
                     return p(g)
             GLOBAL_PREGSIM_PASS.append(WrappedPass())
     else:
-        GLOBAL_PREGSIM_PASS.append(p)
+        GLOBAL_PREGSIM_PASS.append(p())
 
 
 def register_post_pass(p):
@@ -36,7 +36,7 @@ def register_post_pass(p):
                     return p(g)
             GLOBAL_POSTGSIM_PASS.append(WrappedPass())
     else:
-        GLOBAL_POSTGSIM_PASS.append(p)
+        GLOBAL_POSTGSIM_PASS.append(p())
 
 
 def clear_pre_pass():

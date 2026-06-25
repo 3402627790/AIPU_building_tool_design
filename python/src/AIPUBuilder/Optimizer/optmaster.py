@@ -490,6 +490,7 @@ class OptMaster(object):
         g.current_batch_idx = 0
         for inp, d in zip(g.input_tensors, inputs):
             inp.betensor = PyTensor('tmp', d).betensor
+        g.update_dynamic_symbols()
         for n in g.nodes:
             n.forward()
             # # cp-13888 when nonzero has [0] shape, the following ops like reshape may be crash.

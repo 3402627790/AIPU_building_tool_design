@@ -327,8 +327,7 @@ bool Graph::replace_symbols(const std::vector<TensorPtr> &upper_inputs)
     }
     if (symbols.size())
     {
-        walk_on_node([&symbols](NodePtr n)
-                     { n->replace_symbols(symbols); });
+        walk_on_node([&symbols](NodePtr n) { n->replace_symbols(symbols); });
         refresh_symbols();
     }
     return true;
@@ -581,8 +580,7 @@ const std::string Graph::json()
 uint32_t Graph::get_total_nodes_num() const
 {
     bool dump_debug_IR = BuilderConfig::get("dump_debug_IR");
-    auto check_subgraph = [&](NodePtr n)
-    {
+    auto check_subgraph = [&](NodePtr n) {
         if (dump_debug_IR)
         {
             return SubGraphNode::is_subgraph_node(n);
@@ -670,6 +668,10 @@ void Graph::serialize(std::ostream &oss, std::ostream &wt_oss, bool sg_fmt)
     int batch = -1;
     for (auto t : in_tensors)
     {
+        if (!t)
+        {
+            continue;
+        }
         int shape_d0 = t->shape().dim() == 0 ? 1 : t->shape()[0];
         if (batch == -1)
         {
@@ -686,9 +688,13 @@ void Graph::serialize(std::ostream &oss, std::ostream &wt_oss, bool sg_fmt)
     std::map<std::string, Expr> m;
     for (auto t : in_tensors)
     {
+        if (!t)
+        {
+            continue;
+        }
         auto n = t->node();
         std::vector<Expr> exprs;
-        if (n->params().count("ds_output_shape"))
+        if (n && n->params().count("ds_output_shape"))
         {
             std::vector<std::vector<Expr>> ds_output_shape = n->params()["ds_output_shape"];
             if (ds_output_shape.size() > 0)
@@ -719,8 +725,7 @@ void Graph::serialize(std::ostream &oss, std::ostream &wt_oss, bool sg_fmt)
 
     std::map<char *, uint32_t> data_map;
     bool noid = false;
-    walk_on_node([&noid](NodePtr n)
-                 {
+    walk_on_node([&noid](NodePtr n) {
         if (noid)
         {
             return;
@@ -1037,8 +1042,7 @@ std::vector<NodePtr> Graph::topological_sort(const std::vector<NodePtr> &begin_n
     sorted.push_back(root);
     ran_nodes.insert(root);
     inodes.pop_back();
-    auto is_ready_for_run = [&ran_nodes](NodePtr n) -> bool
-    {
+    auto is_ready_for_run = [&ran_nodes](NodePtr n) -> bool {
         bool is_ready = true;
         for (auto p : n->parents())
         {
@@ -1057,8 +1061,7 @@ std::vector<NodePtr> Graph::topological_sort(const std::vector<NodePtr> &begin_n
     // 0: normal,
     // 1: continue,
     // 2: break,
-    auto update_root_child = [&ran_nodes, &root, &inodes, &sorted, &is_ready_for_run]() -> unsigned int
-    {
+    auto update_root_child = [&ran_nodes, &root, &inodes, &sorted, &is_ready_for_run]() -> unsigned int {
         if (root->children().size() == 0)
         {
             if (inodes.size())
@@ -1205,8 +1208,7 @@ bool Graph::sort_by_ordered(const std::vector<NodePtr> &ordered_nodes)
 void Graph::reset_layer_id()
 {
     int id = 0;
-    walk_on_node([&](NodePtr n)
-                 {
+    walk_on_node([&](NodePtr n) {
         n->set_attr("layer_id", id);
         if (!SubGraphNode::is_subgraph_node(n) && n->type() != OpType_SubGraphInput)
         {
@@ -1351,8 +1353,7 @@ static std::string get_valid_name(const std::string &name, const std::map<std::s
         if (pos != std::string::npos)
         {
             size_t count = std::count_if(new_name.begin() + pos, new_name.end(),
-                                         [](unsigned char c)
-                                         { return std::isdigit(c); } // correct
+                                         [](unsigned char c) { return std::isdigit(c); } // correct
             );
             if (count == new_name.length() - pos - 1)
             {
@@ -1524,8 +1525,7 @@ void Graph::walk_on_node(std::function<void(NodePtr)> f, bool recursive, bool to
     {
         if (top2down)
         {
-            wf = [&](NodePtr n)
-            {
+            wf = [&](NodePtr n) {
                 f(n);
                 auto sgn = SubGraphNode::from_node(n);
                 if (sgn)
@@ -1539,8 +1539,7 @@ void Graph::walk_on_node(std::function<void(NodePtr)> f, bool recursive, bool to
         }
         else
         {
-            wf = [&](NodePtr n)
-            {
+            wf = [&](NodePtr n) {
                 auto sgn = SubGraphNode::from_node(n);
                 if (sgn)
                 {
@@ -2000,39 +1999,141 @@ void Graph::load_weight(std::istream &infile)
                         }
                     }
                 }
-                if (utils::endswith(kv.first, "_zp"))
-                {
-                    auto key = kv.first;
-                    key = utils::replace(key, "_zp", "");
-                    if (constants.count(key + "_scale") && constants.count(key + "_zp"))
-                    {
-                        TensorPtr w;
-                        if (constants.count(key))
-                        {
-                            w = constants[key];
-                        }
-                        else
-                        {
-                            for (auto o : n->outputs())
-                            {
-                                if (key == o->name())
-                                {
-                                    w = o;
-                                    break;
-                                }
-                            }
-                        }
-                        if (w)
-                        {
-                            removed_constants.insert(key + "_scale");
-                            removed_constants.insert(key + "_zp");
-                            ComputeTensor s = constants[key + "_scale"];
-                            ComputeTensor z = constants[key + "_zp"];
 
+                auto do_set_quant_info = [&](TensorPtr w, std::string key, std::string suffix = "") {
+                    std::string scale_name = key;
+                    std::string zp_name = key;
+                    if (key.empty())
+                    {
+                        scale_name += "scale";
+                        zp_name += "zp";
+                    }
+                    else
+                    {
+                        scale_name += "_scale";
+                        zp_name += "_zp";
+                    }
+                    scale_name += suffix;
+                    zp_name += suffix;
+                    if (suffix == "0" && !constants.count(scale_name))
+                        return;
+
+                    if (w)
+                    {
+                        if (constants.count(scale_name))
+                        {
+                            ComputeTensor s = constants[scale_name];
                             w->quantization().set_scales(s);
+                            removed_constants.insert(scale_name);
+                        }
+                        else if (params.count(scale_name))
+                        {
+                            float scale = params[scale_name];
+                            w->quantization().set_scales(std::vector<float>{scale});
+                            removed_params.insert(scale_name);
+                        }
+
+                        if (constants.count(zp_name))
+                        {
+                            ComputeTensor z = constants[zp_name];
                             w->quantization().set_offsets(z);
+                            removed_constants.insert(zp_name);
+                        }
+                        else if (params.count(zp_name))
+                        {
+                            int32_t zp = params[zp_name];
+                            w->quantization().set_offsets(ComputeTensor(zp).astype(kv.second->type()));
+                            removed_params.insert(zp_name);
                         }
                     }
+                };
+
+                if (utils::endswith(kv.first, "_scale0"))
+                {
+                    // weights_scale0_offset/weights_scale1_offset,...
+                    int q_level = 0;
+                    std::string key = kv.first;
+                    key = utils::replace(key, "_scale0", "");
+                    TensorPtr w = nullptr;
+                    if (constants.count(key))
+                    {
+                        w = constants[key];
+                    }
+                    else
+                    {
+                        for (auto o : n->outputs())
+                        {
+                            if (key == o->name())
+                            {
+                                w = o;
+                                break;
+                            }
+                        }
+                    }
+                    while (w && constants.count(key + "_scale" + std::to_string(q_level)))
+                    {
+                        do_set_quant_info(w, key, std::to_string(q_level));
+                        if (w->quantization().empty())
+                        {
+                            break;
+                        }
+                        w = w->quantization().scales();
+                        ++q_level;
+                    }
+                }
+                else if (kv.first == "scale0")
+                {
+                    // constants['scale0']/.constants['scale1'] set to 'weights' quantization
+                    int q_level = 0;
+                    std::string key = "weights";
+                    TensorPtr w = nullptr;
+                    if (constants.count(key))
+                    {
+                        w = constants[key];
+                    }
+                    else
+                    {
+                        for (auto o : n->outputs())
+                        {
+                            if (key == o->name())
+                            {
+                                w = o;
+                                break;
+                            }
+                        }
+                    }
+                    while (w && constants.count("scale" + std::to_string(q_level)))
+                    {
+                        do_set_quant_info(w, "", std::to_string(q_level));
+                        if (w->quantization().empty())
+                        {
+                            break;
+                        }
+                        w = w->quantization().scales();
+                        ++q_level;
+                    }
+                }
+                else if (utils::endswith(kv.first, "_zp"))
+                {
+                    std::string key = kv.first;
+                    key = utils::replace(key, "_zp", "");
+                    TensorPtr w = nullptr;
+                    if (constants.count(key))
+                    {
+                        w = constants[key];
+                    }
+                    else
+                    {
+                        for (auto o : n->outputs())
+                        {
+                            if (key == o->name())
+                            {
+                                w = o;
+                                break;
+                            }
+                        }
+                    }
+                    do_set_quant_info(w, key);
                 }
 
                 if (params.count(kv.first + "_zp") && params.count(kv.first + "_scale"))
@@ -2041,8 +2142,28 @@ void Graph::load_weight(std::istream &infile)
                     float scale = params[kv.first + "_scale"];
                     removed_params.insert(kv.first + "_scale");
                     removed_params.insert(kv.first + "_zp");
-                    kv.second->quantization().set_offsets(std::vector<int32_t>{zp});
+                    kv.second->quantization().set_offsets(ComputeTensor(zp).astype(kv.second->type()));
                     kv.second->quantization().set_scales(std::vector<float>{scale});
+                }
+                else if (params.count(kv.first + "_zp0") && params.count(kv.first + "_scale0"))
+                {
+                    // weights_scale0/weights_scale1
+                    int q_level = 0;
+                    TensorPtr w = kv.second;
+                    while (params.count(kv.first + "_zp" + std::to_string(q_level)) &&
+                           params.count(kv.first + "_scale" + std::to_string(q_level)))
+                    {
+                        std::string scale_name = kv.first + "_scale" + std::to_string(q_level);
+                        std::string zp_name = kv.first + "_zp" + std::to_string(q_level);
+                        int32_t zp = params[zp_name];
+                        float scale = params[scale_name];
+                        w->quantization().set_offsets(ComputeTensor(zp).astype(kv.second->type()));
+                        w->quantization().set_scales(std::vector<float>{scale});
+                        w = w->quantization().scales();
+                        removed_params.insert(scale_name);
+                        removed_params.insert(zp_name);
+                        q_level++;
+                    }
                 }
                 if (params.count(kv.first + "_range"))
                 {
@@ -2054,6 +2175,10 @@ void Graph::load_weight(std::istream &infile)
             }
             for (auto k : removed_constants)
             {
+                if (k == "scale0" || k == "scale1" || k == "zp0")
+                {
+                    continue;
+                }
                 constants.erase(k);
             }
             for (auto k : removed_params)

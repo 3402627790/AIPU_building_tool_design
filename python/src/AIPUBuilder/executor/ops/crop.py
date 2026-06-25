@@ -28,6 +28,11 @@ def metric(self, outputs, index=None, real_parent_node_type=None):
             return np.all(u <= 2)  # aiff fp <=2
         return np.all(r <= 1)
 
+    def noramalization_call(r, u, t):
+        if "float" in t:
+            return np.all(u <= 1)
+        return np.all(r == 0)
+
     if index is None:
         groundtruths = [torch_to_numpy(g.betensor, g.dtype.np).flatten() for g in self.outputs]
     else:
@@ -37,11 +42,14 @@ def metric(self, outputs, index=None, real_parent_node_type=None):
 
     parent_op = real_parent_node_type if real_parent_node_type else 'Crop'
 
-    if parent_op in ["Softmax"]:
+    if parent_op in ["Softmax", 'Normalization']:
         rel_diffs = relative_diff(outputs, groundtruths)
         ulp_diffs = ulp_diff(outputs, groundtruths)
         cos_dists = cos_distance(outputs, groundtruths)
         parent_op = real_parent_node_type if real_parent_node_type else parent_op
         if parent_op == "Softmax":  # softmax -> xx+softmax+layout+crop
             return all(softmax_call(r, u, t) for r, u, t in zip(rel_diffs, ulp_diffs, layer_dtypes))
+        elif parent_op == "Normalization":
+            return all(noramalization_call(r, u, t) for r, u, t in zip(rel_diffs, ulp_diffs, layer_dtypes))
+
     return _OP_METRICS['_all'](self, outputs, index)

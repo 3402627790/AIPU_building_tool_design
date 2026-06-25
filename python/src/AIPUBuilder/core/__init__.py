@@ -61,6 +61,7 @@ __all__ = [
     "get_disable_passes",
     "get_dtypes",
     "MemPtr",
+    "BackupPassmgr",
 ]
 
 __all__ += quantization_all

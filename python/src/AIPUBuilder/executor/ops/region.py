@@ -118,11 +118,11 @@ def get_box_score(node, netout, xy_sigmoid, wh_exp, anchors_q):
                     temp_row = row << row_shift
                     temp = temp_y + temp_row
                     temp_y = np.int32(temp * grid_h_scale) >> grid_h_shift
-                    temp1 = np.int32(anchors_q[2 * b + 0] * grid_w_scale) >> grid_w_shift
-                    temp2 = np.int32(wh_exp[w_x + 128] * wh_exp_scale >> wh_exp_shift)
+                    temp1 = np.int32(np.int32(anchors_q[2 * b + 0]) * grid_w_scale) >> grid_w_shift
+                    temp2 = np.int32(np.int32(wh_exp[w_x + 128]) * wh_exp_scale >> wh_exp_shift)
                     temp_w = np.int32(temp1 * temp2) >> anchors_exp_w_shift
-                    temp1 = np.int32(anchors_q[2 * b + 1] * grid_h_scale) >> grid_h_shift
-                    temp2 = np.int32(wh_exp[h_x + 128] * wh_exp_scale >> wh_exp_shift)
+                    temp1 = np.int32(np.int32(anchors_q[2 * b + 1]) * grid_h_scale) >> grid_h_shift
+                    temp2 = np.int32(np.int32(wh_exp[h_x + 128]) * wh_exp_scale >> wh_exp_shift)
                     temp_h = np.int32(temp1 * temp2) >> anchors_exp_h_shift
                     confidence = 0
                     # if abs(temp_x - (temp_w >> 1)) > 32767 or abs(temp_y - (temp_h >> 1)) > 32767 \

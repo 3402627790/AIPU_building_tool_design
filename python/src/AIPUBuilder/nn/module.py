@@ -3,6 +3,7 @@ from AIPUBuilder.core import *  # noqa
 from AIPUBuilder.core.tensor import Expr, Symbol
 import torch
 import numpy as np
+from functools import reduce
 from typing import Union, Tuple, Any, Callable, Iterator, Set, Optional, overload, TypeVar, Mapping, Dict, List
 
 
@@ -94,6 +95,85 @@ class Conv3d(Module):
     def forward(self, inp):
         return ops.conv3d(inp, self.weights, self.biases, self.strides, self.padding, self.dilations, self.activation)
 
+class Deconv2d(Module):
+    in_channels: int
+    out_channels: int
+    weight: Tensor
+    biases: Tensor
+
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernels: list,
+                 strides: list = [1, 1],
+                 padding: list = [0, 0, 0, 0],
+                 group: int = 1,
+                 dilations: list = [1, 1],
+                 activation: str = "None",
+                 dtype: Dtype = Dtype.FP32, name=''):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.name = name
+        kernel_y, kernel_x = (kernels[0], kernels[1])
+        self.strides = strides
+        self.padding = padding
+        self.dilations = dilations
+        self.group = group
+        self.activation = activation
+        self.weights = Tensor(np.zeros((out_channels, kernel_y, kernel_x, in_channels), dtype.np))
+        self.biases = Tensor(np.zeros((out_channels*group,), dtype=dtype.np))
+        self.weights.name = f"{name}_weight" if name != '' else self.weights.name
+        self.biases.name = f"{name}_bias" if name != '' else self.biases.name
+
+    def forward(self, inp):
+        if isinstance(inp, np.ndarray):
+            inp = Tensor(inp)
+        out = ops.conv2d_transpose(inp, self.weights, self.biases, self.strides, self.padding, self.group, self.dilations, self.activation)
+        return out
+
+# def depthwise_conv2d(
+#     input: Tensor,
+#     weights: Tensor,
+#     bias: Tensor = None,
+#     strides: list or int = 1,
+#     padding: list or str = 0,
+#     dilations: list or int = 1,
+#     activation: str or Activation = "None",
+#     quantization: Quantization = None,
+#     quantization_dim=0,
+# ) -> Tensor:
+
+class DepthwiseConv2d(Module):
+    in_channels: int
+    out_channels: int
+    weight: Tensor
+    biases: Tensor
+
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernels: list,
+                 strides: list = [1, 1],
+                 padding: list = [0, 0, 0, 0],
+                 dilations: list = [1, 1],
+                 activation: str = "None",
+                 dtype: Dtype = Dtype.FP32, name=''):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.name = name
+        kernel_y, kernel_x = (kernels[0], kernels[1])
+        self.strides = strides
+        self.padding = padding
+        self.dilations = dilations
+        self.activation = activation
+        self.weights = Tensor(np.zeros((out_channels, kernel_y, kernel_x, 1), dtype.np))
+        self.biases = Tensor(np.zeros((out_channels,), dtype=dtype.np))
+        self.weights.name = f"{name}_weight" if name != '' else self.weights.name
+        self.biases.name = f"{name}_bias" if name != '' else self.biases.name
+
+    def forward(self, inp):
+        if isinstance(inp, np.ndarray):
+            inp = Tensor(inp)
+        out = ops.depthwise_conv2d(inp, self.weights, self.biases, self.strides, self.padding, self.dilations, self.activation)
+        return out
 
 class Linear(Module):
     in_features: int
@@ -286,6 +366,25 @@ class MaxPool(Module):
     def forward(self, x):
         return ops.max_pool(x, kernel=self.kernels, strides=self.strides, dilations=self.dilations, padding=self.padding, ceil_mode=self.ceil_mode)
 
+class AvgPooling(Module):
+
+    def __init__(self,
+                 kernels: list,
+                 strides: list = [1],
+                 padding: list = [0, 0],
+                 dilations: list = [1],
+                 ceil_mode: bool = False,
+                 dtype: Dtype = Dtype.FP32,
+                 name=''):
+        self.kernels = kernels
+        self.padding = padding
+        self.dilations = dilations
+        self.strides = strides
+        self.ceil_mode = ceil_mode
+        self.name = name
+
+    def forward(self, x):
+        return ops.avg_pool(x, kernel=self.kernels, strides=self.strides, dilations=self.dilations, padding=self.padding, ceil_mode=self.ceil_mode)
 
 class AdaptiveAvgPool2d(Module):
     def __init__(self, output_size):
@@ -345,7 +444,14 @@ class LayerNorm(Module):
         self.axis = axis
 
     def forward(self, inp):
-        return ops.layer_norm(inp, self.weights, self.biases, axis=-1, epsilon=self.epsilon)
+        is_2d = False
+        if len(inp.shape) == 2:
+            inp = inp.unsqueeze(0)
+            is_2d = True
+        ln = ops.layer_norm(inp, self.weights, self.biases, axis=-1, epsilon=self.epsilon)
+        if is_2d:
+            ln = ln.squeeze(0)
+        return ln
 
 
 class BatchNorm(Module):
@@ -446,6 +552,24 @@ class QuickGELUActivation(Module):
         scale = (np.zeros(inp.shape) + 1.702).astype(np.float32)
         x = ops.constant(scale, inp.shape)
         return inp*ops.sigmoid(inp*x)
+
+
+class Logit(Module):
+
+    def __init__(self, eps=1e-05):
+        self.eps = eps
+
+    def forward(self, x):
+        is_float = x.dtype.is_float
+        max_value = torch.finfo(torch.float32).max if is_float else torch.iinfo(torch.int32).max
+        y = ops.clip(x, 0., 1.)
+        y1 = ops.clip(x, self.eps, max_value)
+        # y2 = (1.0 - y) ==>y2.dtype==float64
+        y2 = ops.constant(np.array([1.0]).astype(np.float32)) - y
+        y2 = ops.clip(y2, self.eps, max_value)
+        y1_y2 = ops.div(y1, y2)
+        o = ops.log(y1_y2)
+        return o
 
 
 ACT2FN = {

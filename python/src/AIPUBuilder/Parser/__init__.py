@@ -7,7 +7,7 @@
 # -*- coding: UTF-8 -*-
 
 __VERSION__ = '1.3'
-__build_number__='dev20390'
+__build_number__='dev20490'
 if __build_number__ is not None:
     __VERSION__ = __VERSION__ + '.' + str(__build_number__)
 

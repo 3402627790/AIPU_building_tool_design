@@ -110,8 +110,8 @@ class OptForward(object):
                     # o_data = o.betensor.to(dtype2torch_type(o.ir_dtype))
                     # if tensor_type == 'np':
                     #     o_data = o_data.cpu().numpy()
-                if len(o.ir_shape) <= 1:
-                    o_data = o_data.reshape(o.ir_shape)
+                # if len(o.ir_shape) <= 1:
+                #     o_data = o_data.reshape(o.ir_shape)
                 output_data.append(o_data)
             if dump_dir is not None:
                 for n in self.optimizer.g.nodes:

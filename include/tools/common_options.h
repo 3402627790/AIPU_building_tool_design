@@ -264,6 +264,8 @@ inline void get_common_argparser(ArgParser &args)
                              " Use comma to separate if there are multiple dimensions,"
                              " and use \"none\" if there is no dynamic input dimension.",
                              true, false);
+    args.add_hidden_argument("", "--show_divided_graph",
+                             "Show divided graph before lowering in dynamic shape mode", true, true);
     args.add_hidden_argument("", "--disable_separate_gm", "disable average separate gm in cores.", true, true);
     args.add_hidden_argument("", "--enable_separate_gm", "enable average separate gm in cores.", true, true);
     args.add_hidden_argument("", "--max_wt_size", "split wt into two half, unit in MByte", true, false);
