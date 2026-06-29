@@ -700,12 +700,11 @@ static std::set<TensorPtr> collect_output_tensors(GraphPtr g, NodePtr node)
     return ret;
 }
 
-static std::vector<NodePtr> init_nodes(GraphPtr g, std::vector<NodePtr> nodes)
+static std::vector<NodePtr> init_nodes(GraphPtr g, std::vector<NodePtr> nodes, int core)
 {
     std::vector<NodePtr> ret;
     // for single core optimization, we only generate one subgraph
-    if ((BuilderConfig::get<bool>(Constants::single_core_opt) ||
-         Target::get_the_target()->core_num() == 1 ||
+    if (((core == 1) ||
          BuilderConfig::get<uint32_t>(Constants::multi_batch)) &&
         !BuilderConfig::get<bool>("disable_schedule_optimization"))
     {
@@ -1247,11 +1246,11 @@ static std::vector<NodePtrList> get_balanced_groups(const NodePtrList &nodes, si
     for (size_t i = 0; i < groups.size(); ++i)
     {
         auto group = groups[i];
-        int64_t sum_load = 0;
-        for (size_t j = 0; j < group.size(); ++j)
-        {
-            sum_load += load_map[group[j]];
-        }
+        // int64_t sum_load = 0;
+        // for (size_t j = 0; j < group.size(); ++j)
+        // {
+        //     sum_load += load_map[group[j]];
+        // }
         // DEBUG() << "core" << i << ", load: " << sum_load;
     }
 
@@ -1751,6 +1750,7 @@ static void passes_after_apply_plugin(GraphPtr g)
     static auto passes = make_pass_tuple<
         FPass_calculate_node_ops_count,
         DataLayoutSchedule,
+        FPass_virtual_core_adaptor,
         FPass_remove_split,
         FPass_remove_concat,
         FPass_adapt_concat_strides,
@@ -2277,7 +2277,7 @@ uint32_t split_load(GraphPtr g, size_t core_num, int32_t idx, uint32_t split_loa
                 auto node_bak = sg_node->clone();
                 // nodes_bak.push_back(node_bak);
                 auto nodes = split_sg(g, sg_node, core_num);
-                auto inited_nodes = init_nodes(g, nodes);
+                auto inited_nodes = init_nodes(g, nodes, core_num);
                 auto new_levels = nodes_to_levels(g, inited_nodes);
                 // std::vector<int> skip_levels;
                 // reduce_level(g, new_levels, core_num, skip_levels);
@@ -3101,7 +3101,7 @@ std::vector<std::vector<NodePtr>> lb_split(GraphPtr g, const std::vector<NodePtr
     }
 
     auto nodes = split_sg(g, split_node, cut_num, split_way);
-    auto inited_nodes = init_nodes(g, nodes);
+    auto inited_nodes = init_nodes(g, nodes, core_num);
     // std::vector<NodePtr> all_nodes = inited_nodes;
     for (auto n : res_nodes)
     {
@@ -3593,7 +3593,7 @@ bool LoadBalancer::schedule()
 
     // connect_same_w_node(m_graph->nodes());
 
-    init_nodes(m_graph, m_graph->nodes());
+    init_nodes(m_graph, m_graph->nodes(), m_core);
 
     // DEBUG() << "after graph init";
     // m_graph->show_graph();
@@ -3609,7 +3609,7 @@ bool LoadBalancer::schedule()
     // m_graph->show_graph();
     if (!BuilderConfig::get<bool>("disable_schedule_optimization") &&
         !BuilderConfig::get<uint32_t>(Constants::multi_batch) &&
-        !BuilderConfig::get<bool>(Constants::single_core_opt))
+        (m_core > 1))
     {
         // INFO() << "enable multicore schedule optimization for load balance strategy " << aipubt::BuilderConfig::get<int32_t>(Constants::load_balance_strategy) << " it may degrade performance on single core targets.";
         std::vector<int> top_skip_levels;
@@ -3622,7 +3622,7 @@ bool LoadBalancer::schedule()
             skip_levels_by_tiling(top_skip_levels, m_levels);
         }
 
-        // remove_extra_level(m_graph, m_levels, Target::get_the_target()->core_num());
+        // remove_extra_level(m_graph, m_levels, m_core);
         // show_level("after remove level");
         if (aipubt::BuilderConfig::get<bool>(Constants::enable_gm_enhance))
         {
@@ -3637,22 +3637,22 @@ bool LoadBalancer::schedule()
         // show_level(m_levels, "before vertical");
         vertical_merge(m_graph, m_levels, top_skip_levels);
         // show_level(m_levels, "before reduce");
-        reduce_level(m_graph, m_levels, Target::get_the_target()->core_num(), top_skip_levels);
+        reduce_level(m_graph, m_levels, m_core, top_skip_levels);
         // show_level(m_levels, "after reduce");
         if (strategy != -1)
         {
             if (contains(enable_passes, "tnode_to_sg"))
             {
                 auto merge_strategy = m_load_balance_strategy[aipubt::BuilderConfig::get<int32_t>(Constants::load_balance_strategy)][0];
-                load_balance_merge(m_graph, m_levels, Target::get_the_target()->core_num(), merge_strategy);
+                load_balance_merge(m_graph, m_levels, m_core, merge_strategy);
                 auto split_strategy = m_load_balance_strategy[aipubt::BuilderConfig::get<int32_t>(Constants::load_balance_strategy)][1];
                 auto split_load_strategy = m_load_balance_strategy[aipubt::BuilderConfig::get<int32_t>(Constants::load_balance_strategy)][2];
-                load_balance_split(m_graph, m_levels, Target::get_the_target()->core_num(), split_load_strategy, split_strategy, aipubt::BuilderConfig::get<bool>(Constants::enable_gm_enhance), top_skip_levels);
+                load_balance_split(m_graph, m_levels, m_core, split_load_strategy, split_strategy, aipubt::BuilderConfig::get<bool>(Constants::enable_gm_enhance), top_skip_levels);
             }
             else
             {
 
-                apply_load_balance_algo(m_graph, m_levels, Target::get_the_target()->core_num(), strategy);
+                apply_load_balance_algo(m_graph, m_levels, m_core, strategy);
             }
 
             // show_level(m_levels,"after load split");
@@ -3743,27 +3743,27 @@ bool LoadBalancer::schedule()
                 top_skip_levels = candidates;
             }
 
-            reduce_level(m_graph, m_levels, Target::get_the_target()->core_num(), top_skip_levels);
+            reduce_level(m_graph, m_levels, m_core, top_skip_levels);
             // show_level(m_levels, "after opt level");
 
             for (size_t i = 0; i < m_levels.size(); ++i)
             {
-                merge_load(m_graph, Target::get_the_target()->core_num(), i, m_levels);
+                merge_load(m_graph, m_core, i, m_levels);
             }
         }
 
-        // load_balance_merge(m_graph, m_levels, Target::get_the_target()->core_num());
+        // load_balance_merge(m_graph, m_levels, m_core);
 
         // show_level("before level_balance");
         level_balance(m_graph, m_levels, 0);
         // show_level("after level_balance");
         remove_empty_level(m_levels);
 
-        performance_eval(m_levels, Target::get_the_target()->core_num(), true);
+        performance_eval(m_levels, m_core, true);
     }
     else
     {
-        performance_eval(m_levels, Target::get_the_target()->core_num(), false);
+        performance_eval(m_levels, m_core, false);
     }
 
     for (auto n : m_graph->nodes())
@@ -3905,7 +3905,7 @@ bool LoadBalancer::schedule()
             }
         }
 
-        const uint32_t max_dep_size = std::min((uint32_t)4, Target::get_the_target()->core_num());
+        const uint32_t max_dep_size = std::min(4, m_core);
         for (size_t i = 1; i < m_levels.size(); ++i)
         {
             bool remove_level = true;
@@ -4003,7 +4003,7 @@ bool LoadBalancer::schedule()
             return sg_size;
         };
 
-        uint64_t max_size = max_wt_size ? max_wt_size : max_act_size;
+        uint64_t max_size = max_act_size ? max_act_size : max_wt_size;
 
         for (size_t i = 0; i < m_levels.size(); ++i)
         {
@@ -4176,6 +4176,15 @@ const std::vector<std::vector<NodePtr>> &LoadBalancer::get_levels()
 void LoadBalancer::set_graph(GraphPtr g)
 {
     m_graph = g;
+}
+
+void LoadBalancer::set_core(int core)
+{
+    if (core == 0)
+    {
+        ERROR() << "core num is 0";
+    }
+    m_core = core;
 }
 
 }; // namespace aipubt

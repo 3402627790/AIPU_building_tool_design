@@ -360,7 +360,10 @@ public:
             char *data = tensor->data<char>();
             size_t size = tensor->mem_size();
             if (!data || size == 0)
+            {
+                DEBUG() << "Skip tensor payload, no data: " << tensor->name();
                 continue;
+            }
 
             utils::JsonObject data_obj(utils::JsonObject::OBJ);
             auto data_it = data_map.find(data);
@@ -415,7 +418,7 @@ private:
     std::map<std::string, TensorPtr> m_tensors;
 };
 
-TensorPtr resolve_tensor_by_desc(GraphPtr graph, utils::JsonObject desc)
+TensorPtr lookup_tensor_by_desc(GraphPtr graph, utils::JsonObject desc)
 {
     if (!graph || desc.t != utils::JsonObject::OBJ)
         return nullptr;
@@ -475,7 +478,7 @@ TensorPtr resolve_tensor_by_desc(GraphPtr graph, utils::JsonObject desc)
     return nullptr;
 }
 
-TensorPtr resolve_tensor_ref(GraphPtr graph, utils::JsonObject object_table, utils::JsonObject ref)
+TensorPtr lookup_tensor_ref(GraphPtr graph, utils::JsonObject object_table, utils::JsonObject ref)
 {
     if (!is_pointer_ref(ref) || object_table.t != utils::JsonObject::OBJ)
         return nullptr;
@@ -484,12 +487,12 @@ TensorPtr resolve_tensor_ref(GraphPtr graph, utils::JsonObject object_table, uti
     if (!object_table.exist(id))
         return nullptr;
 
-    return resolve_tensor_by_desc(graph, object_table[id]);
+    return lookup_tensor_by_desc(graph, object_table[id]);
 }
 
-TensorPtr resolve_tensor_by_desc_in_graphs(GraphPtr graph, utils::JsonObject desc)
+TensorPtr lookup_tensor_by_desc_in_graphs(GraphPtr graph, utils::JsonObject desc)
 {
-    auto tensor = resolve_tensor_by_desc(graph, desc);
+    auto tensor = lookup_tensor_by_desc(graph, desc);
     if (tensor)
         return tensor;
 
@@ -500,7 +503,7 @@ TensorPtr resolve_tensor_by_desc_in_graphs(GraphPtr graph, utils::JsonObject des
     {
         if (subgraph == graph)
             continue;
-        tensor = resolve_tensor_by_desc(subgraph, desc);
+        tensor = lookup_tensor_by_desc(subgraph, desc);
         if (tensor)
             return tensor;
     }
@@ -739,7 +742,7 @@ bool deserialize_json_to_any(const std::string& key, const utils::JsonObject& js
     {
         if (!graph || !object_table)
             return false;
-        auto tensor = resolve_tensor_ref(graph, *object_table, value_obj);
+        auto tensor = lookup_tensor_ref(graph, *object_table, value_obj);
         if (!tensor)
             return false;
         set_attr_func(key, Any(tensor));
@@ -988,7 +991,7 @@ void restore_tensor_ref_list(GraphPtr graph,
 
     for (const auto &ref : refs.array())
     {
-        auto tensor = resolve_tensor_ref(graph, object_table, ref);
+        auto tensor = lookup_tensor_ref(graph, object_table, ref);
         if (tensor)
             tensors.push_back(tensor);
     }
@@ -1021,7 +1024,7 @@ void restore_graph_references(GraphPtr graph, utils::JsonObject graph_json, cons
     {
         for (const auto &kv : refs["global_tensors"].obj())
         {
-            auto tensor = resolve_tensor_ref(graph, *object_table, kv.second);
+            auto tensor = lookup_tensor_ref(graph, *object_table, kv.second);
             if (tensor)
                 graph->global_tensors()[kv.first] = tensor;
         }
@@ -1069,7 +1072,7 @@ int restore_object_payloads(GraphPtr graph,
         if (offset < 0 || size <= 0)
             continue;
 
-        auto tensor = resolve_tensor_by_desc_in_graphs(graph, object_table[id]);
+        auto tensor = lookup_tensor_by_desc_in_graphs(graph, object_table[id]);
         if (!tensor)
         {
             WARN() << "mq_load_ir: cannot resolve tensor payload ref " << id;
@@ -1088,7 +1091,7 @@ int restore_object_payloads(GraphPtr graph,
             continue;
         }
 
-        tensor->set_data(data, (uint32_t)data_size);
+        tensor->set_data(data, data_size);
         restored++;
     }
 

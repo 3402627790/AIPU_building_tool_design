@@ -34,6 +34,7 @@ public:
     bool schedule();
     const std::vector<std::vector<NodePtr>> &get_levels();
     void set_graph(GraphPtr g);
+    void set_core(int core);
 
 protected:
     // merge_s split_s split_load_s
@@ -45,6 +46,7 @@ protected:
     };
     std::vector<std::vector<NodePtr>> m_levels;
     GraphPtr m_graph;
+    int m_core;
 };
 };     // namespace aipubt
 #endif //!BUILDER_MC_SCHEDULER_H
