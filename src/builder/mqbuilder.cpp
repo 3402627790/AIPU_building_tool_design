@@ -39,6 +39,29 @@
 
 namespace aipubt
 {
+namespace
+{
+
+void reset_mq_global_tensors(GraphPtr m_graph)
+{
+    m_graph->global_tensors().clear();
+    TensorPtr sp = std::make_shared<Tensor>("stack", TensorShape({8192}), Tensor::UINT8);
+    m_graph->global_tensors()["stack"] = sp;
+    TensorPtr print = std::make_shared<Tensor>("print", TensorShape({8192}), Tensor::UINT8);
+    m_graph->global_tensors()["print"] = print;
+    TensorPtr param = std::make_shared<Tensor>("param", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["param"] = param;
+    TensorPtr stream0 = std::make_shared<Tensor>("stream0", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream0"] = stream0;
+    TensorPtr stream1 = std::make_shared<Tensor>("stream1", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream1"] = stream1;
+    TensorPtr stream2 = std::make_shared<Tensor>("stream2", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream2"] = stream2;
+    TensorPtr stream3 = std::make_shared<Tensor>("stream3", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream3"] = stream3;
+}
+
+} // namespace
 
 MqBuilder::MqBuilder(GraphPtr graph) : m_graph(graph)
 {
@@ -75,21 +98,7 @@ std::vector<BuildPhase> MqBuilder::create_phases()
 
 bool MqBuilder::build()
 {
-    m_graph->global_tensors().clear();
-    TensorPtr sp = std::make_shared<Tensor>("stack", TensorShape({8192}), Tensor::UINT8);
-    m_graph->global_tensors()["stack"] = sp;
-    TensorPtr print = std::make_shared<Tensor>("print", TensorShape({8192}), Tensor::UINT8);
-    m_graph->global_tensors()["print"] = print;
-    TensorPtr param = std::make_shared<Tensor>("param", TensorShape({0}), Tensor::UINT8);
-    m_graph->global_tensors()["param"] = param;
-    TensorPtr stream0 = std::make_shared<Tensor>("stream0", TensorShape({0}), Tensor::UINT8);
-    m_graph->global_tensors()["stream0"] = stream0;
-    TensorPtr stream1 = std::make_shared<Tensor>("stream1", TensorShape({0}), Tensor::UINT8);
-    m_graph->global_tensors()["stream1"] = stream1;
-    TensorPtr stream2 = std::make_shared<Tensor>("stream2", TensorShape({0}), Tensor::UINT8);
-    m_graph->global_tensors()["stream2"] = stream2;
-    TensorPtr stream3 = std::make_shared<Tensor>("stream3", TensorShape({0}), Tensor::UINT8);
-    m_graph->global_tensors()["stream3"] = stream3;
+    reset_mq_global_tensors(m_graph);
 
     auto phases = create_phases();
     BuildStage save_stage = OPTIMIZE;
@@ -103,11 +112,22 @@ bool MqBuilder::build()
             if (phase.stage < load_stage)
             {
                 continue;
-            }
-            else if (phase.stage == load_stage)
+            }            else if (phase.stage == load_stage)
             {
                 m_graph = load_mq_ir_cache(mq_load_ir);
+                if (!m_graph)
+                {
+                    ERROR() << "mq_load_ir: failed to load cached MQ IR from " << mq_load_ir;
+                    return false;
+                }
+                if (!load_mq_ir_cache_attributes(m_graph, mq_load_ir))
+                {
+                    ERROR() << "mq_load_ir: failed to load cached MQ IR attributes from " << mq_load_ir;
+                    return false;
+                }
+                reset_mq_global_tensors(m_graph);
             }
+
         }
 
         INFO() << "====== executing phase: " << phase.name << " ======";
