@@ -24,12 +24,54 @@
 #define BUILDER_MQBUILDER_H
 
 #include "builder/ibuilder.h"
+#include "builder/readonly_param.h"
+#include "core/memory_object.h"
 
 namespace aipubt
 {
 
+enum BuildStage
+{
+    INIT,
+    OPTIMIZE,
+    SCHEDULE,
+    KERNEL_ADAPT,
+    MEM_ALLOC,
+    CODE_GEN,
+    ASSEMBLE,
+    GEN_OBJ,
+    DONE
+};
+
+struct StageCache
+{
+    std::vector<std::vector<NodePtr>> levels;
+
+    std::vector<ConstTensorPtr> const_tensors;
+    std::map<NodePtr, std::set<TensorPtr>> ws_map;
+    std::map<TensorPtr, NodePtr> surface_tensors;
+    std::map<std::string, std::string> kernel_lib_names;
+
+    std::vector<MemoryObjectPtr> data_slots;
+    std::vector<MemoryObjectPtr> const_slots;
+
+    std::vector<std::vector<task_t>> streams;
+    std::map<uint32_t, uint32_t> param_offset_table;
+    BuilderParams params;
+    std::map<TensorPtr, uint32_t> tensor_index_map;
+    std::map<ConstTensorPtr, uint32_t> const_index_map;
+};
+
+struct BuildPhase
+{
+    std::string name;
+    BuildStage stage;
+    std::function<bool()> execute;
+};
+
 class MqBuilder : public IBuilder
 {
+
 public:
     MqBuilder(GraphPtr graph);
     ~MqBuilder() override;
@@ -42,7 +84,15 @@ public:
 private:
     GraphPtr m_graph;
     CpsElfPtr m_elf;
-    std::map<TensorPtr, uint32_t> m_tensor_index_map;
+    StageCache m_cache;
+    std::vector<BuildPhase> create_phases();
+    bool phase_optimize();
+    bool phase_schedule();
+    bool phase_kernel_adapt();
+    bool phase_mem_alloc();
+    bool phase_code_gen();
+    bool phase_assemble();
+    bool phase_gen_obj();
 };
 
 } // namespace aipubt

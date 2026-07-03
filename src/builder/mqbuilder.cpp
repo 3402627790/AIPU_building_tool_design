@@ -57,28 +57,24 @@ CpsElfPtr MqBuilder::get_elf()
 
 std::map<TensorPtr, uint32_t> MqBuilder::get_tensor_index_map()
 {
-    return m_tensor_index_map;
+    return m_cache.tensor_index_map;
+}
+
+std::vector<BuildPhase> MqBuilder::create_phases()
+{
+    return {
+        {"optimize", BuildStage::OPTIMIZE, [this]() { return phase_optimize(); }},
+        {"schedule", BuildStage::SCHEDULE, [this]() { return phase_schedule(); }},
+        {"kernel_adapt", BuildStage::KERNEL_ADAPT, [this]() { return phase_kernel_adapt(); }},
+        {"mem_alloc", BuildStage::MEM_ALLOC, [this]() { return phase_mem_alloc(); }},
+        {"code_gen", BuildStage::CODE_GEN, [this]() { return phase_code_gen(); }},
+        {"assemble", BuildStage::ASSEMBLE, [this]() { return phase_assemble(); }},
+        {"gen_obj", BuildStage::GEN_OBJ, [this]() { return phase_gen_obj(); }},
+    };
 }
 
 bool MqBuilder::build()
 {
-    bool loaded_from_cache = false;
-    auto mq_load_ir = BuilderConfig::get<std::string>("mq_load_ir");
-    if (!mq_load_ir.empty())
-    {
-        auto cached_graph = load_mq_ir_cache(mq_load_ir);
-        if (!cached_graph)
-        {
-            ERROR() << "mq_load_ir: failed to load cache from " << mq_load_ir;
-            return false;
-        }
-        else
-        {
-            m_graph = cached_graph;
-            loaded_from_cache = true;
-        }
-    }
-
     m_graph->global_tensors().clear();
     TensorPtr sp = std::make_shared<Tensor>("stack", TensorShape({8192}), Tensor::UINT8);
     m_graph->global_tensors()["stack"] = sp;
@@ -95,30 +91,57 @@ bool MqBuilder::build()
     TensorPtr stream3 = std::make_shared<Tensor>("stream3", TensorShape({0}), Tensor::UINT8);
     m_graph->global_tensors()["stream3"] = stream3;
 
-    if (loaded_from_cache)
-    {
-        if (!load_mq_ir_cache_attributes(m_graph, mq_load_ir))
-        {
-            WARN() << "mq_load_ir: failed to load attributes, continuing without them";
-        }
-    }
+    auto phases = create_phases();
+    BuildStage save_stage = OPTIMIZE;
+    BuildStage load_stage = (BuildStage)((int)save_stage + 1);
 
-    if (!loaded_from_cache)
+    for (const auto &phase : phases)
     {
-        BuilderOptimizer optimizer;
-        optimizer.optimize_mq(m_graph);
-        if (!m_graph->check_valid_name())
+        auto mq_load_ir = BuilderConfig::get<std::string>("mq_load_ir");
+        if (!mq_load_ir.empty())
         {
-            ERROR() << "check valid name failed";
+            if (phase.stage < load_stage)
+            {
+                continue;
+            }
+            else if (phase.stage == load_stage)
+            {
+                m_graph = load_mq_ir_cache(mq_load_ir);
+            }
+        }
+
+        INFO() << "====== executing phase: " << phase.name << " ======";
+        if (!phase.execute())
+        {
+            ERROR() << "phase failed: " << phase.name;
+            return false;
         }
 
         auto mq_save_ir = BuilderConfig::get<std::string>("mq_save_ir");
-        if (!mq_save_ir.empty())
+        if (!mq_save_ir.empty() && phase.stage == save_stage)
         {
             save_mq_ir_cache(m_graph, mq_save_ir);
+            break;
         }
     }
+    return true;
+}
 
+bool MqBuilder::phase_optimize()
+{
+    BuilderOptimizer optimizer;
+    optimizer.optimize_mq(m_graph);
+    if (!m_graph->check_valid_name())
+    {
+        ERROR() << "check valid name failed";
+        return false;
+    }
+
+    return true;
+}
+
+bool MqBuilder::phase_schedule()
+{
     PerfEstimator perf;
     perf(m_graph);
 
@@ -129,24 +152,34 @@ bool MqBuilder::build()
     load_balancer.set_core(mq_num);
     load_balancer.set_graph(m_graph);
     load_balancer.schedule();
-    auto levels = load_balancer.get_levels();
+    m_cache.levels = load_balancer.get_levels();
 
+    return true;
+}
+
+bool MqBuilder::phase_kernel_adapt()
+{
     set_layer_id(m_graph);
 
     //kernel adaptor
     KernelAdapter kernel_adapter;
     kernel_adapter.set_graph(m_graph);
     kernel_adapter.kernel_adapt();
-    auto const_tensors = kernel_adapter.get_const_tensors();
-    auto ws_map = kernel_adapter.get_ws_map();
-    auto surface_tensors = kernel_adapter.get_surface_tensors();
-    auto kernel_lib_names = kernel_adapter.get_kernel_lib();
+    m_cache.const_tensors = kernel_adapter.get_const_tensors();
+    m_cache.ws_map = kernel_adapter.get_ws_map();
+    m_cache.surface_tensors = kernel_adapter.get_surface_tensors();
+    m_cache.kernel_lib_names = kernel_adapter.get_kernel_lib();
 
+    return true;
+}
+
+bool MqBuilder::phase_mem_alloc()
+{
     SOMSScheduler scheduler;
     scheduler.set_graph(m_graph);
-    scheduler.set_levels(levels);
+    scheduler.set_levels(m_cache.levels);
     scheduler.set_gm_size({0});
-    scheduler.set_ws(ws_map);
+    scheduler.set_ws(m_cache.ws_map);
     scheduler.disable_sm();
     std::set<TensorPtr> not_reuse_tensor;
     std::set<TensorPtr> skip_tensors;
@@ -193,45 +226,59 @@ bool MqBuilder::build()
         }
     }
 
-    auto data_slots = scheduler.mem_allocate(not_reuse_tensor, input_tensors, output_tensors, skip_tensors);
-    for (unsigned int i = 0; i < data_slots.size(); ++i)
+    m_cache.data_slots = scheduler.mem_allocate(not_reuse_tensor, input_tensors, output_tensors, skip_tensors);
+    for (unsigned int i = 0; i < m_cache.data_slots.size(); ++i)
     {
-        data_slots[i]->buffer_id = i;
+        m_cache.data_slots[i]->buffer_id = i;
     }
-    //TODO constant allocate
-    for (auto t : const_tensors)
-    {
-        INFO() << "constant tensor: " << t->name();
-    }
-    auto const_slots = scheduler.const_allocate(const_tensors);
 
-    //code gen
+    // for (auto t : m_cache.const_tensors)
+    // {
+    //     INFO() << "constant tensor: " << t->name();
+    // }
+    m_cache.const_slots = scheduler.const_allocate(m_cache.const_tensors);
+
+    return true;
+}
+
+bool MqBuilder::phase_code_gen()
+{
     CodeGenerator code_gen;
-    code_gen.set_kernel_lib(kernel_lib_names);
+    code_gen.set_kernel_lib(m_cache.kernel_lib_names);
     code_gen.code_gen(m_elf);
 
+    return true;
+}
+
+bool MqBuilder::phase_assemble()
+{
     //Assembler
     Assembler assembler;
     assembler.set_graph(m_graph);
     assembler.set_elf(m_elf);
-    assembler.set_level(levels);
+    assembler.set_level(m_cache.levels);
     assembler.assembly();
-    auto &streams = assembler.get_streams();
-    auto param_offset_table = assembler.get_param_offset_table();
-    auto &params = assembler.get_params();
-    m_tensor_index_map = assembler.get_tensor_index_map();
-    auto const_index_map = assembler.get_const_index_map();
+    m_cache.streams = assembler.get_streams();
+    m_cache.param_offset_table = assembler.get_param_offset_table();
+    m_cache.params = assembler.get_params();
+    m_cache.tensor_index_map = assembler.get_tensor_index_map();
+    m_cache.const_index_map = assembler.get_const_index_map();
 
+    return true;
+}
+
+bool MqBuilder::phase_gen_obj()
+{
     //gen elf
     ObjectGenerator object_generator;
-    object_generator.set_streams(streams);
-    object_generator.set_param_offset_table(param_offset_table);
-    object_generator.set_params(params);
-    object_generator.set_tensor_index_map(m_tensor_index_map);
-    object_generator.set_const_index_map(const_index_map);
-    object_generator.set_slots(data_slots);
+    object_generator.set_streams(m_cache.streams);
+    object_generator.set_param_offset_table(m_cache.param_offset_table);
+    object_generator.set_params(m_cache.params);
+    object_generator.set_tensor_index_map(m_cache.tensor_index_map);
+    object_generator.set_const_index_map(m_cache.const_index_map);
+    object_generator.set_slots(m_cache.data_slots);
     object_generator.set_graph(m_graph);
-    object_generator.set_constant(const_tensors);
+    object_generator.set_constant(m_cache.const_tensors);
     object_generator.gen(m_elf);
 
     return true;
