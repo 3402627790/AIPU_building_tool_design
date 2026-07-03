@@ -4967,7 +4967,6 @@ namespace ops
      *                   Optional parameter, the default value is 1.0/0;
      * @return A "TensorPtr", specifying the weight tensor.
      */
-
     TensorPtr make_weight(GraphPtr g,
                           const void *data,
                           const TensorShape &shape,

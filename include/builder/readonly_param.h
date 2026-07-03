@@ -25,12 +25,11 @@
 #include "builder/bldtypes.h"
 #include <core/const_tensor.h>
 #include <core/fp16.h>
+#include <core/param_list.h>
 #include <core/placeholder.h>
 #include <core/surface.h>
-#include <cstdint>
-#include <string>
 #include <tongue/symbolic.h>
-#include <vector>
+
 namespace aipubt
 {
 using namespace tongue;
@@ -66,6 +65,8 @@ struct ReadOnlyParam
     ConstTensorPtr const_tensor = 0;
 
     SurfacePtr surface = 0;
+
+    ParamListPtr param_list = 0;
 
     /**
      * @brief Construct a new Read Only Param object
@@ -142,6 +143,7 @@ struct ReadOnlyParam
             ERROR() << "A null pointer cannot be an argument!";
         }
     }
+
     ReadOnlyParam(ConstTensorPtr t) : const_tensor(t)
     {
         if (!t)
@@ -149,6 +151,7 @@ struct ReadOnlyParam
             ERROR() << "A null pointer cannot be an argument!";
         }
     }
+
     ReadOnlyParam(SurfacePtr s) : surface(s)
     {
         if (!s)
@@ -163,6 +166,14 @@ struct ReadOnlyParam
      * @param t use a PlaceholderPtr to construct the paramter as a memory paramter.
      */
     ReadOnlyParam(PlaceholderPtr t) : tensor(t)
+    {
+        if (!t)
+        {
+            ERROR() << "A null pointer cannot be an argument!";
+        }
+    }
+
+    ReadOnlyParam(ParamListPtr t) : param_list(t)
     {
         if (!t)
         {
@@ -190,6 +201,8 @@ struct ReadOnlyParam
      * @param o use a NodeParamValue to construct the paramter, the NodeParamValue will be cast to a uint32_t.
      */
     ReadOnlyParam(NodeParamValue o);
+
+    ReadOnlyParam(const std::vector<ReadOnlyParam> &params);
 
     // /**
     //  * @brief implicitly convertion to uint32_t
@@ -230,6 +243,7 @@ struct ReadOnlyParam
     {
         return surface;
     }
+
     /**
      * @brief implicitly convertion to PlaceholderPtr
      * 
@@ -238,6 +252,11 @@ struct ReadOnlyParam
     operator PlaceholderPtr()
     {
         return tensor;
+    }
+
+    operator ParamListPtr()
+    {
+        return param_list;
     }
 
     /**
@@ -264,6 +283,7 @@ inline ReadOnlyParam operator+(ReadOnlyParam p, uint32_t v)
     }
     return p.value + v;
 }
+
 inline ReadOnlyParam operator+(uint32_t v, ReadOnlyParam p)
 {
     return p + v;
@@ -284,6 +304,7 @@ inline ReadOnlyParam operator-(ReadOnlyParam p, uint32_t v)
 }
 
 std::ostream &operator<<(std::ostream &os, const ReadOnlyParam &p);
+std::ostream &operator<<(std::ostream &os, const std::vector<ReadOnlyParam> &params);
 
 // this function would complete the filename with different Architecture and Target (Z1_0904,...) and debug mode.
 std::string complete_text_code_name(const std::string &base_name);

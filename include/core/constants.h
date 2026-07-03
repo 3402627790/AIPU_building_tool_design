@@ -40,6 +40,7 @@ namespace Constants
     constexpr const char *AIPUOCC = "AIPUOCC";
 
     constexpr const char *CPSLD = "CPSLD";
+    constexpr const char *CPSCC = "CPSCC";
 
     // switch keys/global config
     constexpr const char *random_init = "random-init";
@@ -113,7 +114,6 @@ namespace Constants
     constexpr const char *max_input_shape = "max_input_shape";
     constexpr const char *default_input_shape = "default_input_shape";
     constexpr const char *dynamic_input_dim = "dynamic_input_dim";
-    constexpr const char *show_divided_graph = "show_divided_graph";
     constexpr const char *skip_simulator = "skip_simulator";
     constexpr const char *native_float_simulator = "native_float_simulator";
     constexpr const char *dump_schedule_cfg = "dump_schedule_cfg";
@@ -188,12 +188,16 @@ namespace Constants
     constexpr const char *tile_split_output_c_conv = "tile_split_output_c_conv";
     constexpr const char *remove_origin_constant = "remove_origin_constant";
     constexpr const char *specify_wt_gm = "specify_wt_gm";
+    constexpr const char *set_mq_num = "set_mq_num";
 
     // attributes keys
     constexpr const char *random_reg = "random_reg";
     constexpr const char *dumpspace = "dumpspace";
     constexpr const char *workspace = "workspace";
     constexpr const char *parambase = "parambase";
+    constexpr const char *param_bases = "param_bases";
+    constexpr const char *stream_bases = "stream_bases";
+    constexpr const char *stream_id = "stream_id";
     constexpr const char *remap_table = "remap_table";
     constexpr const char *descriptorbase = "descriptorbase";
     constexpr const char *mmu_reserve = "mmu_reserve";

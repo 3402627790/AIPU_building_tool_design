@@ -165,6 +165,10 @@ public:
     std::vector<Symbol> variables() const;
     bool is_constant() const
     {
+        if (m_op == Op::Val)
+        {
+            return true;
+        }
         return variables().empty();
     }
     bool is_integral_constant() const

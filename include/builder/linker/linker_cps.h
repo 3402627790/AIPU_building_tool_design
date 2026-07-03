@@ -36,26 +36,33 @@ namespace aipubt
 
 class LinkerCps : public LinkerImpl
 {
-
 public:
     LinkerCps();
     ~LinkerCps();
+
     // set the generated code
     virtual void set_code(const std::string &code) override
     {
         m_asm = code;
     }
 
-    //return the main offset, now we return the first lib's offset
+    // return the main offset, now we return the first lib's offset
     virtual void set_codes(std::vector<std::vector<std::string>> &codes) override
     {
         m_codes = codes;
     }
+
     virtual void set_objects(std::vector<std::string> &objs_filename) override
     {
         m_objs = objs_filename;
     }
+
     virtual uint32_t link(std::ostream &oss) override;
+
+    const std::string &workdir() const
+    {
+        return m_workdir;
+    }
 
 private:
     std::string m_main;

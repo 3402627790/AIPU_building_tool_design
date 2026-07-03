@@ -47,6 +47,16 @@ public:
         }
     }
     ParamList(Dtype dtype = UINT32) : ParamList(std::string(), dtype) {}
+    ParamList(const std::vector<ReadOnlyParam> &params) : ParamList()
+    {
+        set_params(params);
+    }
+    ParamList(const ParamList &o) : ParamList()
+    {
+        Tensor &t = *this;
+        t = o;
+        set_params(o.m_params);
+    }
 
     void clear()
     {
@@ -65,12 +75,12 @@ public:
         return m_shape;
     }
 
-    const std::vector<ReadOnlyParam> &data() const
+    const std::vector<ReadOnlyParam> &params() const
     {
         return m_params;
     }
 
-    void set_data(const std::vector<ReadOnlyParam> &params)
+    void set_params(const std::vector<ReadOnlyParam> &params)
     {
         m_params = params;
         update();

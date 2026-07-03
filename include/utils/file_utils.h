@@ -15,8 +15,8 @@
 //
 //--------------------------------------------------------------------------------
 /*
- * @Author: Neo Wang 
- * @Date: 2020-04-09 12:53:12 
+ * @Author: Neo Wang
+ * @Date: 2020-04-09 12:53:12
  * @Last Modified by: Neo Wang
  * @Last Modified time: 2021-08-11 10:31:35
  */
@@ -25,6 +25,7 @@ namespace utils
 {
 
 bool file_exists(const std::string &file);
+bool file_readable(const std::string &file);
 bool remove_file(const std::string &filename);
 // using force mode to remove all files in dir
 void remove_dir(const std::string &path);

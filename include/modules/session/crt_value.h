@@ -77,21 +77,27 @@ public:
 
     void Init(void *pData, size_t size, CrtTensorInfo tensor_info, cpsruntime::DeleteFunc deleter)
     {
-        data_.reset(pData, deleter);
+        raw_data_ = pData;
+        if (deleter != nullptr)
+            data_.reset(pData, deleter);
         size_ = size;
         tensor_info_ = tensor_info;
     }
 
     void Init(void *pData, size_t size, CrtTensorInfo tensor_info, const std::function<void(void *)> &deleter)
     {
-        data_.reset(pData, deleter);
+        raw_data_ = pData;
+        if (deleter != nullptr)
+            data_.reset(pData, deleter);
         size_ = size;
         tensor_info_ = tensor_info;
     }
 
     void Init(void *pData, size_t size, cpsruntime::DeleteFunc deleter)
     {
-        data_.reset(pData, deleter);
+        raw_data_ = pData;
+        if (deleter != nullptr)
+            data_.reset(pData, deleter);
         size_ = size;
     }
 
@@ -103,7 +109,7 @@ public:
     template <typename T>
     T *get() const
     {
-        return static_cast<T *>(data_.get());
+        return static_cast<T *>(raw_data_);
     }
 
     size_t &memsize()
@@ -149,6 +155,7 @@ public:
 
 private:
     std::shared_ptr<void> data_;
+    void *raw_data_ = nullptr;
     size_t size_; //  data size
     struct CrtTensorInfo tensor_info_;
 };

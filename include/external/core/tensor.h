@@ -342,8 +342,8 @@ public:
 
     /**
      * @brief get the buffer size occupyied by the tensor, which will count the strides of the tensor
-     * 
-     * @return size_t 
+     *
+     * @return size_t
      */
     virtual size_t buffer_size() const;
 
@@ -374,6 +374,7 @@ public:
      * @param size size of data
      */
     virtual void set_data(void *d, uint32_t size);
+    virtual void set_data(void *d, uint32_t size, bool is_owner);
     /**
      * @brief Set the device data to the tensor, then the  data's memory ownership is indicated by owner parameter
      *
@@ -384,11 +385,11 @@ public:
     virtual void set_device_data(void *d, uint32_t size, const bool owner = true);
     bool is_owns_host_data() const
     {
-        return owns_m_data;
+        return *m_owner_host;
     }
     bool is_owns_device_data() const
     {
-        return owns_m_device_data;
+        return *m_owner_device;
     }
     // free old data and share a new data of t
     /**
@@ -596,11 +597,14 @@ public:
     const CompressInfo get_compress_info();
     TensorPtr decompress();
     int get_ref_count();
+    // transfer ownership, if the data is not owner by the Tensor, nothing happen, return false
+    // if the data is owned by the Tensor, it will transfer to others, and the Tensor will not free the data.
+    bool transfer_ownership(bool is_host = true);
 
 protected:
     void _set_host_device_data(void *d, const uint32_t &size, const bool owner, const bool is_host);
+    void _clean_data();
 
-protected:
     template <Tensor::Dtype dtype>
     void compact_impl();
     template <Tensor::Dtype dtype>
@@ -614,6 +618,8 @@ protected:
     uint32_t m_data_offset = 0;
     // check m_data ref
     std::atomic<int> *ref_count = nullptr;
+    std::atomic<bool> *m_owner_host = nullptr;
+    std::atomic<bool> *m_owner_device = nullptr;
     TensorShape m_shape;
     Dtype m_type = UINT8;
     MemoryObjectPtr m_offset = MemoryObjectPtr(new MemoryObject(0));
@@ -621,19 +627,6 @@ protected:
     NodeRef m_node;
     std::vector<NodeRef> m_consumers;
     bool m_io = false;
-    union
-    {
-        // Bit0: m_data ownership (1=owned by Tensor, 0=owned by others)
-        // Bit1: m_device_data ownership (1=owned by Tensor, 0=owned by others)
-        uint8_t m_owner = 0b11;
-
-        struct
-        {
-            uint8_t owns_m_data : 1;        // 1: m_data(or host_data) owned by this Tensor, 0: owned by others
-            uint8_t owns_m_device_data : 1; // 1: m_device_data owned by this Tensor, 0: owned by others
-            uint8_t reserved : 6;
-        };
-    };
     friend Node;
     friend ComputeTensor;
 };

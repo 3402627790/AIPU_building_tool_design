@@ -33,7 +33,7 @@ namespace aipubt
 constexpr auto get_default_config_dict()
 {
     constexpr auto default_config = cexpr::make_constexpr_dict(
-        std::make_pair(Constants::target, "X3_1304"),
+        std::make_pair(Constants::target, "X3S_1304"),
         std::make_pair(Constants::prof_unit, "default"),
         std::make_pair(Constants::enable_sparse_opt, false),
         std::make_pair(Constants::enable_sparse_opt, false),
@@ -120,7 +120,8 @@ constexpr auto get_default_config_dict()
         std::make_pair(Constants::show_ds_shape, false),
         std::make_pair(Constants::print_emitter_var, false),
         std::make_pair(Constants::dump_constant_info, false),
-        std::make_pair(Constants::dump_lora_info, false));
+        std::make_pair(Constants::dump_lora_info, false),
+        std::make_pair(Constants::set_mq_num, 1));
     return default_config;
 }
 

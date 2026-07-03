@@ -32,23 +32,18 @@
 #include <core/stub.h>
 namespace aipubt
 {
-GraphPtr aipurun(GraphPtr g,
-                 std::vector<TensorPtr> &input_tensors,
-                 std::map<std::string, aipubt::Any> &arg_map);
-GraphPtr aipugb(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map);
 
-bool run_simulator(std::string dump_file, std::map<std::string, aipubt::Any> &arg_map);
-bool aipudumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map);
-bool cpsdumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map);
-bool elfdumper(std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map, GraphELFBuilder *builder = nullptr);
 bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retcode);
 void actions_after_build(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map);
-GraphBuilder *run_gb(GraphPtr g, std::vector<TensorPtr> &input_tensors, std::map<std::string, aipubt::Any> &arg_map);
-GraphPtr aipuestimator(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map);
+void insert_node_shape_params(GraphPtr graph,
+                              const std::map<std::string, std::vector<int>> &shapes = {});
 GraphPtr infershape(GraphPtr g,
                     const std::set<std::string> &dynamic_dims = {},
                     const std::vector<std::vector<int>> &input_shapes = {},
                     const std::vector<int> &dump_dims = {},
                     bool clone_graph = false);
+bool infer_real_shape(GraphPtr graph,
+                      const std::vector<int> &dump_shape_dims, // data-aware
+                      const std::vector<std::vector<int>> &input_shapes);
 } // namespace aipubt
 #endif //! BUILDER_TOOLS_H

@@ -82,7 +82,7 @@ namespace GCompilerLogger
 #undef DEFAULT_LOGGER_OPS
 #endif
 #define DEFAULT_LOGGER_OPS aipubt::GCompilerLogger::aipubtLoggerOps
-
+#define USE_DEFAULT_OPS 0
 #include "base_logger.h"
 
 #if __cplusplus >= 201402L

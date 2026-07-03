@@ -41,7 +41,7 @@ public:
     ConstTensor(const std::string &name, const TensorShape &shape, Dtype type, void *data, size_t data_size) : ConstTensor(shape, type, data, data_size)
     {
         m_name = name;
-    };
+    }
     ConstTensor() = delete;
     /**
      * @brief Construct a new ConstTensor object

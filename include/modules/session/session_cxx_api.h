@@ -45,10 +45,7 @@ class Session
 {
 public:
     static SessionPtr create(aipubt::GraphPtr g, SessionConfig cfg = {});
-    Session() {}
-
-    // Init by elf file name, load from elf file, No need to compile.
-    Session(std::string elf_name);
+    Session();
 
     // Init by AIPU graph, need to compile.
     Session(aipubt::GraphPtr g, SessionConfig cfg = {});
@@ -63,14 +60,35 @@ public:
     int32_t compile();
 
     /**
+     * @brief load elf from file name.
+     */
+    int32_t load_from_file(std::string file_name);
+
+    /**
      * @brief Graph compute
+     * @param[in] inputs Input in dictionary format.
+     * @param[in] output_names Name of required output data.
+     * @param[out] outputs Data returned after run.
      */
     int32_t run(const NameMLValMap &inputs,
                 const std::vector<std::string> &output_names,
                 std::vector<CrtValue> &outputs) const;
 
     /**
+     * @brief Graph compute
+     * @param[in] inputs Input should be in list format. Users need to ensure the input order..
+     * @param[in] output_names Name of required output data.
+     * @param[out] outputs Data returned after run.
+     */
+    int32_t run(const std::vector<CrtValue> &inputs,
+                const std::vector<std::string> &output_names,
+                std::vector<CrtValue> &outputs) const;
+
+    /**
      * Graph asynchronous compute
+     * @param[in] file_name Filename with path.
+     * @param[in] file_name Filename with path.
+     * @param[in] file_name Filename with path.
      */
     int32_t run_async(const NameMLValMap &inputs,
                       const std::vector<std::string> &output_names,
@@ -81,7 +99,7 @@ public:
      * @brief Get the input information of the compiled graph.
      * If the compilation is unsuccessful, it returns empty.
      */
-    std::vector<CrtValue> get_inputs();
+    std::vector<CrtTensorInfo> get_inputs();
 
     /**
      * @brief Get the otuput information of the compiled graph.
@@ -94,10 +112,18 @@ public:
      * If the compilation is unsuccessful, it returns empty.
      * If Session create by by elf file , it returns empty.
      */
-    std::pair<void *, uint64_t> get_elf_info();
+    std::pair<void *, uint64_t> get_elf();
+
+    /**
+     * @brief Save the compiled content to a file.
+     * Successfully returned 0.
+     * @param[in] file_name Filename with path.
+     */
+    int32_t save_elf(std::string file_name);
 
     /*
-     * Set confg
+     * Set config
+     * @param[in] config set session config
      */
     int32_t set_config(const SessionConfig &config);
 
@@ -123,6 +149,12 @@ public:
 
 private:
     /**
+     * @brief run function.
+     */
+    int32_t do_run(std::vector<aipubt::rt::tensor_data_t> &inputs,
+                   const std::vector<std::string> &output_names,
+                   std::vector<CrtValue> &outputs) const;
+    /**
      *@brief Dump  the input tensors for debug.
      */
     // void dump_input_tensors(const std::vector<TensorData> &tensors) const;
@@ -147,6 +179,9 @@ private:
 
     // btrt launcher
     std::unique_ptr<aipubt::rt::Launcher> m_launcher;
+
+    // elf file name
+    std::string m_elf_name;
 };
 
 // memory copy api

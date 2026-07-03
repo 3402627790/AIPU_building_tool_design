@@ -37,13 +37,15 @@ public:
 
     int load_from_file(const std::string &elf_filepath);
 
-    int run(const std::vector<tensor_data_t> &inputs = {},
-            const std::map<std::string, int> &symbols = {});
+    int set_inputs(const std::vector<tensor_data_t> &inputs,
+                   const std::vector<std::vector<uint32_t>> &ds_shape = {});
+
+    std::vector<tensor_data_t> get_inputs() const;
+
+    int run();
 
     int run_async(AsyncCallback callback, const std::vector<tensor_data_t> &inputs = {},
                   const std::map<std::string, int> &symbols = {});
-
-    std::vector<tensor_data_t> get_inputs() const;
 
     std::vector<tensor_data_t> get_outputs() const;
 

@@ -266,6 +266,8 @@ enum OpType
     OpType_FlashDecoding = 227,
     OpType_ScaledDotProductAttention = 228,
     OpType_Trilu = 229,
+    OpType_ParamUpdate = 230,
+    OpType_FusedMoELoop = 231,
 
     OpType_BatchToDepth = 1000,
     OpType_DepthToBatch = 1001,

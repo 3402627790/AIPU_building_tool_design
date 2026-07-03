@@ -94,7 +94,15 @@ struct DefaultLoggerOps
     static int get_logger_level() { return DEFAULT_LOG_LEVEL; }
     static void print_backtrace() {}
 };
+
 #ifndef DEFAULT_LOGGER_OPS
+#define DEFAULT_LOGGER_OPS aipubtLogger::DefaultLoggerOps
+#endif
+
+#if USE_DEFAULT_OPS
+#ifdef DEFAULT_LOGGER_OPS
+#undef DEFAULT_LOGGER_OPS
+#endif
 #define DEFAULT_LOGGER_OPS aipubtLogger::DefaultLoggerOps
 #endif
 
