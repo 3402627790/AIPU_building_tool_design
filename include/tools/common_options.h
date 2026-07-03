@@ -293,6 +293,7 @@ inline void get_common_argparser(ArgParser &args)
     args.add_hidden_argument("", "--enable_weight_align", "all weight will be aligned to 256Byte", true, true);
     args.add_hidden_argument("", "--mq_save_ir", "save the post-lowering MQ graph IR/weight to the given directory for caching", true, false);
     args.add_hidden_argument("", "--mq_load_ir", "load a previously saved MQ post-lowering graph IR/weight from the given directory and skip re-parsing the input IR", true, false);
+    args.add_hidden_argument("", "--mq_ir_stage", "MQ IR cache stage: optimize or schedule", true, false);
     args.add_hidden_argument("", "--set_mq_num", "set multi queue number, default 1", true, false);
 }
 

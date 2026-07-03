@@ -139,6 +139,7 @@ namespace Constants
     constexpr const char *dump_lora_info = "dump_lora_info";
     constexpr const char *mq_save_ir = "mq_save_ir";
     constexpr const char *mq_load_ir = "mq_load_ir";
+    constexpr const char *mq_ir_stage = "mq_ir_stage";
 
     constexpr const char *load_addr_cfg = "load_addr_cfg";
     constexpr const char *dump_addr_cfg = "dump_addr_cfg";

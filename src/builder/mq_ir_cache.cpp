@@ -30,6 +30,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -1592,6 +1593,8 @@ constexpr const char *kMqIrCacheDef = "lowered.def";
 constexpr const char *kMqIrCacheBin = "lowered.bin";
 constexpr const char *kMqIrCacheAttrs = "lowered.attrs.json";
 constexpr const char *kMqIrCachePayloadBin = "lowered.payload.bin";
+constexpr const char *kMqIrCacheStage = "lowered.stage.txt";
+constexpr const char *kMqIrCacheSchedule = "lowered.schedule.txt";
 
 inline std::string mq_ir_cache_def_path(const std::string &dir)
 {
@@ -1611,6 +1614,16 @@ inline std::string mq_ir_cache_attrs_path(const std::string &dir)
 inline std::string mq_ir_cache_payload_bin_path(const std::string &dir)
 {
     return dir + "/" + kMqIrCachePayloadBin;
+}
+
+inline std::string mq_ir_cache_stage_path(const std::string &dir)
+{
+    return dir + "/" + kMqIrCacheStage;
+}
+
+inline std::string mq_ir_cache_schedule_path(const std::string &dir)
+{
+    return dir + "/" + kMqIrCacheSchedule;
 }
 
 } // namespace
@@ -1660,8 +1673,134 @@ bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir)
     return loaded;
 }
 
+std::string load_mq_ir_cache_stage(const std::string &dir)
+{
+    auto stage_path = mq_ir_cache_stage_path(dir);
+    std::ifstream ifs(stage_path);
+    if (!ifs.is_open())
+    {
+        DEBUG() << "mq_load_ir: no stage file found, using optimize stage";
+        return "optimize";
+    }
+
+    std::string stage;
+    std::getline(ifs, stage);
+    if (!stage.empty() && stage.back() == '\r')
+    {
+        stage.pop_back();
+    }
+    if (stage.empty())
+    {
+        return "optimize";
+    }
+    return stage;
+}
+
+bool save_mq_ir_cache_schedule(const std::vector<std::vector<NodePtr>> &levels, const std::string &dir)
+{
+    if (!utils::path_exists(dir) && !utils::mkdir(dir))
+    {
+        ERROR() << "mq_save_ir: cannot create cache directory " << dir;
+        return false;
+    }
+
+    auto abs_dir = utils::get_abspath(dir);
+    auto schedule_path = mq_ir_cache_schedule_path(abs_dir);
+    std::ofstream ofs(schedule_path);
+    if (!ofs.is_open())
+    {
+        ERROR() << "mq_save_ir: failed to open schedule cache for writing: " << schedule_path;
+        return false;
+    }
+
+    ofs << "MQ_SCHEDULE_V1\n";
+    ofs << levels.size() << "\n";
+    for (const auto &level : levels)
+    {
+        ofs << level.size() << "\n";
+        for (auto node : level)
+        {
+            ofs << (node ? node->name() : std::string()) << "\n";
+        }
+    }
+
+    INFO() << "mq_save_ir: dumped schedule cache to " << schedule_path;
+    return true;
+}
+
+bool load_mq_ir_cache_schedule(GraphPtr graph, const std::string &dir, std::vector<std::vector<NodePtr>> &levels)
+{
+    auto schedule_path = mq_ir_cache_schedule_path(dir);
+    std::ifstream ifs(schedule_path);
+    if (!ifs.is_open())
+    {
+        ERROR() << "mq_load_ir: schedule cache not found: " << schedule_path;
+        return false;
+    }
+
+    std::string magic;
+    std::getline(ifs, magic);
+    if (!magic.empty() && magic.back() == '\r')
+    {
+        magic.pop_back();
+    }
+    if (magic != "MQ_SCHEDULE_V1")
+    {
+        ERROR() << "mq_load_ir: invalid schedule cache format: " << schedule_path;
+        return false;
+    }
+
+    size_t level_count = 0;
+    if (!(ifs >> level_count))
+    {
+        ERROR() << "mq_load_ir: failed to read schedule level count";
+        return false;
+    }
+    ifs.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    std::vector<std::vector<NodePtr>> loaded_levels;
+    for (size_t i = 0; i < level_count; ++i)
+    {
+        size_t node_count = 0;
+        if (!(ifs >> node_count))
+        {
+            ERROR() << "mq_load_ir: failed to read schedule node count at level " << i;
+            return false;
+        }
+        ifs.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+        std::vector<NodePtr> level;
+        for (size_t j = 0; j < node_count; ++j)
+        {
+            std::string node_name;
+            std::getline(ifs, node_name);
+            if (!node_name.empty() && node_name.back() == '\r')
+            {
+                node_name.pop_back();
+            }
+            auto node = find_node_by_name(graph, node_name);
+            if (!node)
+            {
+                ERROR() << "mq_load_ir: scheduled node not found: " << node_name;
+                return false;
+            }
+            level.push_back(node);
+        }
+        loaded_levels.push_back(level);
+    }
+
+    levels = loaded_levels;
+    INFO() << "mq_load_ir: loaded " << levels.size() << " scheduled levels from " << schedule_path;
+    return true;
+}
+
 // Serialize the current graph into `dir`
 void save_mq_ir_cache(GraphPtr graph, const std::string &dir)
+{
+    save_mq_ir_cache(graph, dir, "optimize");
+}
+
+void save_mq_ir_cache(GraphPtr graph, const std::string &dir, const std::string &stage)
 {
     if (!utils::path_exists(dir) && !utils::mkdir(dir))
     {
@@ -1674,6 +1813,7 @@ void save_mq_ir_cache(GraphPtr graph, const std::string &dir)
     auto bin_path = mq_ir_cache_bin_path(abs_dir);
     auto attrs_path = mq_ir_cache_attrs_path(abs_dir);
     auto payload_bin_path = mq_ir_cache_payload_bin_path(abs_dir);
+    auto stage_path = mq_ir_cache_stage_path(abs_dir);
 
     INFO() << "mq_save_ir: dumping post-lowering MQ IR to " << def_path;
     {
@@ -1687,6 +1827,16 @@ void save_mq_ir_cache(GraphPtr graph, const std::string &dir)
     if (!save_graph_attributes(graph, attrs_path, payload_bin_path))
     {
         WARN() << "mq_save_ir: failed to save attributes file";
+    }
+
+    std::ofstream stage_ofs(stage_path);
+    if (!stage_ofs.is_open())
+    {
+        WARN() << "mq_save_ir: failed to save stage file " << stage_path;
+    }
+    else
+    {
+        stage_ofs << stage << "\n";
     }
 }
 

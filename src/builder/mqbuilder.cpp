@@ -37,6 +37,8 @@
 #include "statistic/perf_estimator.h"
 #include "transform/passes.h"
 
+#include <cctype>
+
 namespace aipubt
 {
 namespace
@@ -44,6 +46,11 @@ namespace
 
 void reset_mq_global_tensors(GraphPtr m_graph)
 {
+    if (!m_graph)
+    {
+        return;
+    }
+
     m_graph->global_tensors().clear();
     TensorPtr sp = std::make_shared<Tensor>("stack", TensorShape({8192}), Tensor::UINT8);
     m_graph->global_tensors()["stack"] = sp;
@@ -59,6 +66,41 @@ void reset_mq_global_tensors(GraphPtr m_graph)
     m_graph->global_tensors()["stream2"] = stream2;
     TensorPtr stream3 = std::make_shared<Tensor>("stream3", TensorShape({0}), Tensor::UINT8);
     m_graph->global_tensors()["stream3"] = stream3;
+}
+
+bool parse_mq_ir_stage(const std::string &stage_name, BuildStage &stage)
+{
+    std::string normalized_stage;
+    for (auto c : stage_name)
+    {
+        if (c != '\r' && c != '\n')
+        {
+            normalized_stage.push_back((char)std::tolower((unsigned char)c));
+        }
+    }
+
+    if (normalized_stage.empty() || normalized_stage == "optimize")
+    {
+        stage = BuildStage::OPTIMIZE;
+        return true;
+    }
+    if (normalized_stage == "schedule")
+    {
+        stage = BuildStage::SCHEDULE;
+        return true;
+    }
+
+    ERROR() << "unsupported mq_ir_stage: " << stage_name << ", expected optimize or schedule";
+    return false;
+}
+
+std::string mq_ir_stage_name(BuildStage stage)
+{
+    if (stage == BuildStage::SCHEDULE)
+    {
+        return "schedule";
+    }
+    return "optimize";
 }
 
 } // namespace
@@ -101,18 +143,38 @@ bool MqBuilder::build()
     reset_mq_global_tensors(m_graph);
 
     auto phases = create_phases();
-    BuildStage save_stage = OPTIMIZE;
-    BuildStage load_stage = (BuildStage)((int)save_stage + 1);
+    auto mq_save_ir = BuilderConfig::get<std::string>(Constants::mq_save_ir);
+    auto mq_load_ir = BuilderConfig::get<std::string>(Constants::mq_load_ir);
+
+    BuildStage save_stage = BuildStage::OPTIMIZE;
+    if (BuilderConfig::exist(Constants::mq_ir_stage) &&
+        !parse_mq_ir_stage(BuilderConfig::get<std::string>(Constants::mq_ir_stage), save_stage))
+    {
+        return false;
+    }
+
+    BuildStage cache_stage = save_stage;
+    if (!mq_load_ir.empty())
+    {
+        std::string stage_name = BuilderConfig::exist(Constants::mq_ir_stage) ?
+                                     BuilderConfig::get<std::string>(Constants::mq_ir_stage) :
+                                     load_mq_ir_cache_stage(mq_load_ir);
+        if (!parse_mq_ir_stage(stage_name, cache_stage))
+        {
+            return false;
+        }
+    }
+    BuildStage load_stage = (BuildStage)((int)cache_stage + 1);
 
     for (const auto &phase : phases)
     {
-        auto mq_load_ir = BuilderConfig::get<std::string>("mq_load_ir");
         if (!mq_load_ir.empty())
         {
             if (phase.stage < load_stage)
             {
                 continue;
-            }            else if (phase.stage == load_stage)
+            }
+            else if (phase.stage == load_stage)
             {
                 m_graph = load_mq_ir_cache(mq_load_ir);
                 if (!m_graph)
@@ -126,6 +188,12 @@ bool MqBuilder::build()
                     return false;
                 }
                 reset_mq_global_tensors(m_graph);
+                if (cache_stage == BuildStage::SCHEDULE &&
+                    !load_mq_ir_cache_schedule(m_graph, mq_load_ir, m_cache.levels))
+                {
+                    ERROR() << "mq_load_ir: failed to load cached MQ schedule from " << mq_load_ir;
+                    return false;
+                }
             }
 
         }
@@ -137,10 +205,14 @@ bool MqBuilder::build()
             return false;
         }
 
-        auto mq_save_ir = BuilderConfig::get<std::string>("mq_save_ir");
         if (!mq_save_ir.empty() && phase.stage == save_stage)
         {
-            save_mq_ir_cache(m_graph, mq_save_ir);
+            save_mq_ir_cache(m_graph, mq_save_ir, mq_ir_stage_name(save_stage));
+            if (save_stage == BuildStage::SCHEDULE && !save_mq_ir_cache_schedule(m_cache.levels, mq_save_ir))
+            {
+                ERROR() << "mq_save_ir: failed to save MQ schedule to " << mq_save_ir;
+                return false;
+            }
             break;
         }
     }
