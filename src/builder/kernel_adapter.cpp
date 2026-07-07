@@ -95,6 +95,11 @@ void KernelAdapter::kernel_adapt()
                     continue;
                 }
 
+                if (n->type() == OpType_ParamUpdate)
+                {
+                    continue;
+                }
+
                 if (n->attrs().count(Constants::plugin_impl))
                 {
                     auto plugin_impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);

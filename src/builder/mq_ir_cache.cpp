@@ -102,6 +102,22 @@ utils::JsonObject serialize_layout_combinations(const LayoutCombinations &layout
     return arr;
 }
 
+utils::JsonObject serialize_tensor_shape(const TensorShape &shape)
+{
+    utils::JsonObject arr(utils::JsonObject::ARR);
+    std::vector<int> dims = shape;
+    for (auto dim : dims)
+    {
+        arr.push_back(dim);
+    }
+    return arr;
+}
+
+utils::JsonObject serialize_tensor_dtype(Tensor::Dtype dtype)
+{
+    return Tensor::dtype_to_string(dtype);
+}
+
 bool deserialize_layout(const utils::JsonObject &obj, DataLayout &layout)
 {
     if (obj.t == utils::JsonObject::STR)
@@ -112,6 +128,35 @@ bool deserialize_layout(const utils::JsonObject &obj, DataLayout &layout)
     if (obj.t == utils::JsonObject::INT)
     {
         layout = static_cast<DataLayout>((int)obj);
+        return true;
+    }
+    return false;
+}
+
+bool deserialize_tensor_shape(const utils::JsonObject &obj, TensorShape &shape, DataLayout layout)
+{
+    if (obj.t != utils::JsonObject::ARR)
+        return false;
+
+    std::vector<int> dims;
+    for (const auto &item : obj.array())
+    {
+        dims.push_back((int)item);
+    }
+    shape = TensorShape(dims, layout);
+    return true;
+}
+
+bool deserialize_tensor_dtype(const utils::JsonObject &obj, Tensor::Dtype &dtype)
+{
+    if (obj.t == utils::JsonObject::STR)
+    {
+        dtype = Tensor::string_to_dtype((std::string)obj);
+        return true;
+    }
+    if (obj.t == utils::JsonObject::INT)
+    {
+        dtype = static_cast<Tensor::Dtype>((int)obj);
         return true;
     }
     return false;
@@ -790,6 +835,8 @@ utils::JsonObject serialize_tensor_metadata(TensorPtr tensor, size_t tensor_inde
     utils::JsonObject tensor_obj(utils::JsonObject::OBJ);
     tensor_obj["tensor_name"] = tensor->name();
     tensor_obj["tensor_index"] = (int)tensor_index;
+    tensor_obj["shape"] = serialize_tensor_shape(tensor->shape());
+    tensor_obj["dtype"] = serialize_tensor_dtype(tensor->type());
     tensor_obj["layout"] = serialize_layout(tensor->shape().layout());
     if (ref_table)
     {
@@ -805,6 +852,22 @@ utils::JsonObject serialize_tensor_metadata(TensorPtr tensor, size_t tensor_inde
     }
 
     return tensor_obj;
+}
+
+utils::JsonObject serialize_global_tensors(GraphPtr graph, int &tensor_attr_count, PointerRefTable &ref_table)
+{
+    utils::JsonObject globals(utils::JsonObject::OBJ);
+    size_t tensor_index = 0;
+    for (const auto &kv : graph->global_tensors())
+    {
+        if (!kv.second)
+            continue;
+
+        auto tensor_obj = serialize_tensor_metadata(kv.second, tensor_index++, tensor_attr_count, &ref_table);
+        tensor_obj["global_key"] = kv.first;
+        globals[kv.first] = tensor_obj;
+    }
+    return globals;
 }
 
 utils::JsonObject serialize_node_metadata(NodePtr node, int &node_attr_count, int &tensor_attr_count, PointerRefTable *ref_table = nullptr)
@@ -1105,12 +1168,30 @@ int restore_tensor_metadata(TensorPtr tensor, utils::JsonObject tensor_json, Gra
     if (!tensor || tensor_json.t != utils::JsonObject::OBJ)
         return 0;
 
+    DataLayout layout = tensor->shape().layout();
     if (tensor_json.exist("layout"))
     {
-        DataLayout layout = DataLayout_UnSupport;
         if (deserialize_layout(tensor_json["layout"], layout))
         {
             tensor->shape().set_layout(layout);
+        }
+    }
+
+    if (tensor_json.exist("shape"))
+    {
+        TensorShape shape;
+        if (deserialize_tensor_shape(tensor_json["shape"], shape, layout))
+        {
+            tensor->shape() = shape;
+        }
+    }
+
+    if (tensor_json.exist("dtype"))
+    {
+        Tensor::Dtype dtype = tensor->type();
+        if (deserialize_tensor_dtype(tensor_json["dtype"], dtype))
+        {
+            tensor->set_type(dtype);
         }
     }
 
@@ -1121,6 +1202,79 @@ int restore_tensor_metadata(TensorPtr tensor, utils::JsonObject tensor_json, Gra
         [&tensor](const std::string& key, const Any& value) {
             tensor->set_attr(key, value);
         }, graph, object_table);
+}
+
+TensorPtr create_tensor_from_metadata(const std::string &fallback_name, utils::JsonObject tensor_json)
+{
+    std::string name = fallback_name;
+    if (tensor_json.t == utils::JsonObject::OBJ &&
+        tensor_json.exist("tensor_name") &&
+        tensor_json["tensor_name"].t == utils::JsonObject::STR)
+    {
+        name = (std::string)tensor_json["tensor_name"];
+    }
+
+    DataLayout layout = DataLayout_Unkown;
+    if (tensor_json.t == utils::JsonObject::OBJ && tensor_json.exist("layout"))
+    {
+        deserialize_layout(tensor_json["layout"], layout);
+    }
+
+    TensorShape shape(0);
+    if (tensor_json.t == utils::JsonObject::OBJ && tensor_json.exist("shape"))
+    {
+        deserialize_tensor_shape(tensor_json["shape"], shape, layout);
+    }
+
+    Tensor::Dtype dtype = Tensor::UINT8;
+    if (tensor_json.t == utils::JsonObject::OBJ && tensor_json.exist("dtype"))
+    {
+        deserialize_tensor_dtype(tensor_json["dtype"], dtype);
+    }
+
+    return std::make_shared<Tensor>(name, shape, dtype);
+}
+
+int restore_global_tensors_from_metadata(GraphPtr graph, utils::JsonObject graph_json, const utils::JsonObject *object_table)
+{
+    if (!graph || graph_json.t != utils::JsonObject::OBJ ||
+        !graph_json.exist("global_tensors") ||
+        graph_json["global_tensors"].t != utils::JsonObject::OBJ)
+    {
+        return 0;
+    }
+
+    std::map<std::string, TensorPtr> restored_globals;
+    for (const auto &kv : graph_json["global_tensors"].obj())
+    {
+        TensorPtr tensor = nullptr;
+        auto existing = graph->global_tensors().find(kv.first);
+        if (existing != graph->global_tensors().end())
+        {
+            tensor = existing->second;
+        }
+        if (!tensor)
+        {
+            tensor = create_tensor_from_metadata(kv.first, kv.second);
+        }
+        restored_globals[kv.first] = tensor;
+    }
+
+    graph->global_tensors() = restored_globals;
+
+    int loaded_tensor_attrs = 0;
+    for (const auto &kv : graph_json["global_tensors"].obj())
+    {
+        auto tensor_it = graph->global_tensors().find(kv.first);
+        if (tensor_it != graph->global_tensors().end())
+        {
+            loaded_tensor_attrs += restore_tensor_metadata(tensor_it->second, kv.second, graph, object_table);
+        }
+    }
+
+    INFO() << "mq_load_ir: restored " << graph->global_tensors().size()
+           << " global tensors from attributes";
+    return loaded_tensor_attrs;
 }
 
 utils::JsonObject serialize_graph_metadata(GraphPtr graph, int &graph_attr_count, int &node_attr_count, int &tensor_attr_count, PointerRefTable &ref_table);
@@ -1306,6 +1460,7 @@ void restore_graph_metadata(GraphPtr graph, utils::JsonObject graph_json, const 
             graph->set_layout(layout);
         }
     }
+    restore_global_tensors_from_metadata(graph, graph_json, object_table);
     if (graph_json.exist("graph_attrs"))
     {
         deserialize_attrs_from_json(graph_json["graph_attrs"],
@@ -1434,6 +1589,7 @@ bool save_graph_attributes(GraphPtr graph, const std::string& json_path, const s
         total_graph_attrs += root_graph_attrs;
     }
     graph_obj["graph_references"] = serialize_graph_references(graph, ref_table);
+    graph_obj["global_tensors"] = serialize_global_tensors(graph, total_tensor_attrs, ref_table);
     root["graph"] = graph_obj;
 
     for (auto node : graph->nodes())
@@ -1516,6 +1672,7 @@ bool load_graph_attributes(GraphPtr graph, const std::string& json_path, const s
         auto graph_json = root["graph"];
         if (graph_json.t == utils::JsonObject::OBJ)
         {
+            restore_global_tensors_from_metadata(graph, graph_json, object_table);
             if (graph_json.exist("layout"))
             {
                 DataLayout layout = DataLayout_UnSupport;
@@ -1587,6 +1744,43 @@ bool load_graph_attributes(GraphPtr graph, const std::string& json_path, const s
     return true;
 }
 
+bool load_graph_global_tensors(GraphPtr graph, const std::string& json_path)
+{
+    if (!graph)
+        return false;
+
+    std::ifstream ifs(json_path);
+    if (!ifs.is_open())
+    {
+        ERROR() << "Failed to open attributes file for reading: " << json_path;
+        return false;
+    }
+
+    std::stringstream buffer;
+    buffer << ifs.rdbuf();
+    ifs.close();
+
+    utils::JsonObject root;
+    root = utils::JsonObject::parse(buffer.str());
+
+    if (root.t != utils::JsonObject::OBJ || !root.exist("graph") || root["graph"].t != utils::JsonObject::OBJ)
+    {
+        ERROR() << "Invalid attributes JSON format";
+        return false;
+    }
+
+    const utils::JsonObject *object_table = nullptr;
+    utils::JsonObject object_table_obj;
+    if (root.exist("object_table") && root["object_table"].t == utils::JsonObject::OBJ)
+    {
+        object_table_obj = root["object_table"];
+        object_table = &object_table_obj;
+    }
+
+    restore_global_tensors_from_metadata(graph, root["graph"], object_table);
+    return true;
+}
+
 
 // File names used inside the cache directory pointed at by --mq_save_ir / --mq_load_ir.
 constexpr const char *kMqIrCacheDef = "lowered.def";
@@ -1652,6 +1846,10 @@ GraphPtr load_mq_ir_cache(const std::string &dir)
 
     // Rebuild runtime-only GOP plugin metadata before folding subgraphs back from JSON.
     // plugin_impl is a C++ object pointer and is intentionally not serialized.
+    if (utils::file_exists(attrs_path))
+    {
+        load_graph_global_tensors(g, attrs_path);
+    }
     apply_gopplugins(g);
 
     return g;

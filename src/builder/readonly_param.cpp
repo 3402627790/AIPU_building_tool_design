@@ -23,8 +23,17 @@
 #include "builder/readonly_param.h"
 #include "core/compute_tensor.h"
 #include "core/core.h"
+
 namespace aipubt
 {
+ReadOnlyParam::ReadOnlyParam(const std::vector<ReadOnlyParam> &params)
+{
+    if (params.empty())
+    {
+        ERROR() << "An empty list cannot be an argument!";
+    }
+    param_list = std::make_shared<ParamList>(params);
+}
 
 ReadOnlyParam::ReadOnlyParam(ComputeTensor t) : tensor(t)
 {
@@ -97,5 +106,19 @@ std::ostream &operator<<(std::ostream &os, const ReadOnlyParam &p)
         return os << (p.expr->to_string());
     }
     return os << p.value;
+}
+
+std::ostream &operator<<(std::ostream &os, const std::vector<ReadOnlyParam> &params)
+{
+    os << "[";
+    for (size_t i = 0; i < params.size(); ++i)
+    {
+        os << params[i];
+        if (i != params.size() - 1)
+        {
+            os << ",";
+        }
+    }
+    return os << "]";
 }
 } // namespace aipubt

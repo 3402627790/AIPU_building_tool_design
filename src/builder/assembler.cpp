@@ -159,6 +159,10 @@ uint32_t Assembler::get_const_index(const ConstTensorPtr t)
         m_const_index_map[t] = m_tensor_index;
         m_tensor_index++;
     }
+    else
+    {
+        WARN() << "already have " << t->name();
+    }
     return m_const_index_map[t];
 }
 
@@ -182,7 +186,15 @@ void get_depend_nodes(NodePtr n, std::set<NodePtr> &nodes, const std::set<NodePt
         }
     }
 }
-int sync_set(std::vector<task_t> &stream, int steam_id, int index)
+
+int get_mask(int set_stream_id, int wait_stream_id)
+{
+    int mask = 0;
+    mask |= 1 << (set_stream_id * 4 + wait_stream_id);
+    return mask;
+}
+
+int sync_set(int wait_stream_id, std::vector<task_t> &stream, int stream_id, int index)
 {
     if (stream.empty())
     {
@@ -190,15 +202,13 @@ int sync_set(std::vector<task_t> &stream, int steam_id, int index)
         return 0;
     }
     auto &task = stream[index];
-    int mask = 1 << steam_id;
     if (task.type != TASK_TYPE_KERNEL)
     {
         ERROR();
+        return 0;
     }
-    else
-    {
-        task.kernel.sync.set_mask = mask;
-    }
+    auto mask = get_mask(stream_id, wait_stream_id);
+    task.kernel.sync.set_mask |= mask;
     return mask;
 }
 
@@ -214,10 +224,7 @@ void sync_wait(std::vector<task_t> &stream, int index, int mask)
     {
         ERROR();
     }
-    else
-    {
-        task.kernel.sync.wait_mask = mask;
-    }
+    task.kernel.sync.wait_mask |= mask;
 }
 
 void Assembler::setup_stream_sync(size_t first_kernel, NodePtr sgn, std::vector<task_t> &stream, size_t stream_id)
@@ -249,7 +256,7 @@ void Assembler::setup_stream_sync(size_t first_kernel, NodePtr sgn, std::vector<
             {
                 ERROR();
             }
-            sync_mask |= sync_set(p_stream, p_stream_id, m_node_last_kernel_map[p]);
+            sync_mask |= sync_set(stream_id, p_stream, p_stream_id, m_node_last_kernel_map[p]);
         }
     }
     if (sync_mask)
@@ -260,6 +267,17 @@ void Assembler::setup_stream_sync(size_t first_kernel, NodePtr sgn, std::vector<
 
 void Assembler::assembly()
 {
+    TensorPtr param = std::make_shared<Tensor>("param", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["param"] = param;
+    TensorPtr stream0 = std::make_shared<Tensor>("stream0", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream0"] = stream0;
+    TensorPtr stream1 = std::make_shared<Tensor>("stream1", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream1"] = stream1;
+    TensorPtr stream2 = std::make_shared<Tensor>("stream2", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream2"] = stream2;
+    TensorPtr stream3 = std::make_shared<Tensor>("stream3", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["stream3"] = stream3;
+
     aipubt::ELFIO::section *note_section = m_elf->get_section(".note.zhouyi");
     aipubt::ELFIO::section *symtab_section = m_elf->get_section(".symtab");
     if (!note_section || !symtab_section)
@@ -309,40 +327,42 @@ void Assembler::assembly()
             {
                 m_params.push_back(0);
             }
-        } });
+        }
+    });
     size_t input_shape_size = output_shape_offset - input_shape_offset;
     size_t output_shape_size = m_params.size() * PARAM_UNIT_SIZE - output_shape_offset;
+    auto enable_ds = BuilderConfig::get<bool>(Constants::enable_ds);
     m_params.resize(aligned(m_params.size(), 64), 0);
     m_params[0] = input_shape_offset;
     m_params[1] = input_shape_size;
     m_params[2] = output_shape_offset;
     m_params[3] = output_shape_size;
-    m_params[4] = 0; // default shape flag
+    m_params[4] = enable_ds ? 1 : 0; // dynamic shape flag
+    m_params[5] = 0;                 // default shape flag
+
+    PlaceholderPtr output_shape = std::make_shared<Tensor>("output_shape", TensorShape({(int)output_shape_size}), Tensor::UINT8);
+    *output_shape = *m_param_base + output_shape_offset;
+    m_graph->global_tensors()["output_shape"] = output_shape;
+    get_tensor_index(output_shape);
 
     m_streams.resize(m_stream_bases.size());
+    std::map<int, int> task_level_map; //for debug
 
-    for (auto level : m_levels)
+    for (size_t l = 0; l < m_levels.size(); ++l)
     {
+        auto &level = m_levels[l];
         for (size_t s_id = 0; s_id < level.size(); ++s_id)
         {
             auto s = level[s_id];
             auto sgn = SubGraphNode::from_node(s);
             if (sgn)
             {
-                size_t stream_id = s_id;
+                size_t stream_id = s_id % m_streams.size();
                 if (stream_id >= m_stream_bases.size())
                 {
                     ERROR() << "unknown stream_id: " << stream_id;
                 }
-
-                if (sgn->attrs().count(Constants::stream_id))
-                {
-                    stream_id = sgn->get_attr<size_t>(Constants::stream_id);
-                }
-                else
-                {
-                    sgn->set_attr(Constants::stream_id, stream_id);
-                }
+                sgn->set_attr(Constants::stream_id, stream_id);
 
                 auto &stream = m_streams[stream_id];
                 auto m_stream_base = m_stream_bases[stream_id];
@@ -353,7 +373,6 @@ void Assembler::assembly()
                 {
                     if (n->type() == OpType_Input || n->type() == OpType_SubGraphInput)
                     {
-
                         continue;
                     }
                     if (n->attrs().count(Constants::plugin_impl))
@@ -455,6 +474,7 @@ void Assembler::assembly()
                             task.kernel.pfc_group_en = 0;
                             task.kernel.pfc_addr = 0;
                             stream.push_back(task);
+                            task_level_map[task.id] = l;
 
                             if (BuilderConfig::get<bool>(Constants::dump_rt_output_tensors))
                             {
@@ -483,6 +503,26 @@ void Assembler::assembly()
                                 stream.push_back(b_wait);
                             }
 
+                            // for (size_t i = 0; i < params.size(); ++i)
+                            // {
+                            //     auto p = params[i];
+                            //     if (p.tensor)
+                            //     {
+                            //         DEBUG() << "param " << i << " tensor: " << p.tensor->name();
+                            //     }
+                            //     else if (p.const_tensor)
+                            //     {
+                            //         DEBUG() << "param " << i << " const tensor: " << p.const_tensor->name();
+                            //     }
+                            //     else if (p.param_list)
+                            //     {
+                            //         DEBUG() << "param " << i << " param list: " << p.param_list->name() << " size: " << p.param_list->params().size();
+                            //     }
+                            //     else
+                            //     {
+                            //         DEBUG() << "param " << i << " value " << p;
+                            //     }
+                            // }
                             std::set<ParamListPtr> ran_args;
                             for (auto &arg : info.args)
                             {
@@ -550,7 +590,7 @@ void Assembler::assembly()
     }
 
     // update invalid offset
-    if (BuilderConfig::get<bool>(Constants::enable_ds))
+    if (enable_ds)
     {
         m_graph->walk_on_node([this](NodePtr n) {
             if (n->type() != OpType_ParamUpdate)
@@ -573,7 +613,8 @@ void Assembler::assembly()
                 auto stream_id = n->get_attr<size_t>(Constants::stream_id);
                 auto &task = m_streams[stream_id][p0->offset() / PACKET_UNIT_SIZE];
                 task.invalid_offset = (p1->offset() - p0->offset()) / PACKET_UNIT_SIZE;
-            } });
+            }
+        });
     }
 
     // build remap table
@@ -604,6 +645,92 @@ void Assembler::assembly()
     }
 
     eval_expr_params(m_graph, m_params);
+
+    if (m_levels.size() > 1)
+    {
+        std::vector<std::vector<std::vector<task_t>>> queue_level;
+        for (size_t i = 0; i < m_streams.size(); ++i)
+        {
+            auto &stream = m_streams[i];
+            for (auto task : stream)
+            {
+                auto level_id = task_level_map[task.id];
+                if (queue_level.size() <= (size_t)level_id)
+                {
+                    queue_level.resize(level_id + 1);
+                }
+                auto &queues = queue_level[level_id];
+                if (queues.size() <= m_streams.size())
+                {
+                    queues.resize(m_streams.size());
+                }
+                auto &queue = queues[i];
+                queue.push_back(task);
+            }
+        }
+
+        std::stringstream oss;
+        oss << "       ";
+        for (size_t i = 0; i < m_streams.size(); ++i)
+        {
+            std::string line = "queue" + std::to_string(i);
+            oss << std::setw(20) << line;
+        }
+        INFO() << oss.str();
+        for (size_t j = 0; j < queue_level.size(); ++j)
+        {
+            auto queues = queue_level[j];
+            size_t max_packet_size = 0;
+            for (auto queue : queues)
+            {
+                max_packet_size = std::max(max_packet_size, queue.size());
+            }
+            for (size_t k = 0; k < max_packet_size; ++k)
+            {
+                oss.clear();
+                oss.str("");
+                oss << "level" << j << " ";
+                for (size_t i = 0; i < queues.size(); ++i)
+                {
+                    auto queue = queues[i];
+                    std::string line;
+                    if (k >= queue.size())
+                    {
+                        line = "-";
+                    }
+                    else
+                    {
+                        std::stringstream temp_oss;
+
+                        auto task = queue[k];
+                        temp_oss << (int)task.id;
+                        if (task.kernel.sync.set_mask)
+                        {
+                            temp_oss << "(0x" << std::hex << std::setw(4) << std::setfill('0') << task.kernel.sync.set_mask;
+                        }
+                        else
+                        {
+                            temp_oss << "(0";
+                        }
+
+                        if (task.kernel.sync.wait_mask)
+                        {
+                            temp_oss << " 0x" << std::hex << std::setw(4) << std::setfill('0') << task.kernel.sync.wait_mask << ")";
+                        }
+                        else
+                        {
+                            temp_oss << " 0)";
+                        }
+
+                        line = temp_oss.str();
+                    }
+                    oss << std::setw(20) << line;
+                }
+                INFO() << oss.str();
+            }
+            INFO();
+        }
+    }
 }
 
 const std::vector<std::vector<task_t>> &Assembler::get_streams() const
