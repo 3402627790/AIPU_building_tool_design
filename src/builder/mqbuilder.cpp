@@ -57,7 +57,8 @@ CpsElfPtr MqBuilder::get_elf()
 
 std::map<TensorPtr, uint32_t> MqBuilder::get_tensor_index_map()
 {
-    return m_cache.tensor_index_map;
+    std::map<TensorPtr, uint32_t> tensor_index_map = m_graph->attrs()["tensor_index_map"];
+    return tensor_index_map;
 }
 
 std::vector<BuildPhase> MqBuilder::create_phases()
@@ -152,8 +153,8 @@ bool MqBuilder::phase_schedule()
     load_balancer.set_core(mq_num);
     load_balancer.set_graph(m_graph);
     load_balancer.schedule();
-    m_cache.levels = load_balancer.get_levels();
-
+    auto levels = load_balancer.get_levels();
+    m_graph->set_attr("levels", levels);
     return true;
 }
 
@@ -165,11 +166,14 @@ bool MqBuilder::phase_kernel_adapt()
     KernelAdapter kernel_adapter;
     kernel_adapter.set_graph(m_graph);
     kernel_adapter.kernel_adapt();
-    m_cache.const_tensors = kernel_adapter.get_const_tensors();
-    m_cache.ws_map = kernel_adapter.get_ws_map();
-    m_cache.surface_tensors = kernel_adapter.get_surface_tensors();
-    m_cache.kernel_lib_names = kernel_adapter.get_kernel_lib();
-
+    auto const_tensors = kernel_adapter.get_const_tensors();
+    m_graph->set_attr("const_tensors", const_tensors);
+    auto ws_map = kernel_adapter.get_ws_map();
+    m_graph->set_attr("ws_map", ws_map);
+    auto surface_tensors = kernel_adapter.get_surface_tensors();
+    m_graph->set_attr("surface_tensors", surface_tensors);
+    auto kernel_lib_names = kernel_adapter.get_kernel_lib();
+    m_graph->set_attr("kernel_lib_names", kernel_lib_names);
     return true;
 }
 
@@ -177,9 +181,11 @@ bool MqBuilder::phase_mem_alloc()
 {
     SOMSScheduler scheduler;
     scheduler.set_graph(m_graph);
-    scheduler.set_levels(m_cache.levels);
+    std::vector<std::vector<NodePtr>> levels = m_graph->attrs()["levels"];
+    scheduler.set_levels(levels);
     scheduler.set_gm_size({0});
-    scheduler.set_ws(m_cache.ws_map);
+    std::map<NodePtr, std::set<TensorPtr>> ws_map = m_graph->attrs()["ws_map"];
+    scheduler.set_ws(ws_map);
     scheduler.disable_sm();
     std::set<TensorPtr> not_reuse_tensor;
     std::set<TensorPtr> skip_tensors;
@@ -226,17 +232,15 @@ bool MqBuilder::phase_mem_alloc()
         }
     }
 
-    m_cache.data_slots = scheduler.mem_allocate(not_reuse_tensor, input_tensors, output_tensors, skip_tensors);
-    for (unsigned int i = 0; i < m_cache.data_slots.size(); ++i)
+    auto data_slots = scheduler.mem_allocate(not_reuse_tensor, input_tensors, output_tensors, skip_tensors);
+    for (unsigned int i = 0; i < data_slots.size(); ++i)
     {
-        m_cache.data_slots[i]->buffer_id = i;
+        data_slots[i]->buffer_id = i;
     }
-
-    // for (auto t : m_cache.const_tensors)
-    // {
-    //     INFO() << "constant tensor: " << t->name();
-    // }
-    m_cache.const_slots = scheduler.const_allocate(m_cache.const_tensors);
+    m_graph->set_attr("data_slots", data_slots);
+    std::vector<ConstTensorPtr> const_tensors = m_graph->attrs()["const_tensors"];
+    auto const_slots = scheduler.const_allocate(const_tensors);
+    m_graph->set_attr("const_slots", const_slots);
 
     return true;
 }
@@ -244,7 +248,8 @@ bool MqBuilder::phase_mem_alloc()
 bool MqBuilder::phase_code_gen()
 {
     CodeGenerator code_gen;
-    code_gen.set_kernel_lib(m_cache.kernel_lib_names);
+    std::map<std::string, std::string> kernel_lib_names = m_graph->attrs()["kernel_lib_names"];
+    code_gen.set_kernel_lib(kernel_lib_names);
     code_gen.code_gen(m_elf);
 
     return true;
@@ -256,13 +261,19 @@ bool MqBuilder::phase_assemble()
     Assembler assembler;
     assembler.set_graph(m_graph);
     assembler.set_elf(m_elf);
-    assembler.set_level(m_cache.levels);
+    std::vector<std::vector<NodePtr>> levels = m_graph->attrs()["levels"];
+    assembler.set_level(levels);
     assembler.assembly();
-    m_cache.streams = assembler.get_streams();
-    m_cache.param_offset_table = assembler.get_param_offset_table();
-    m_cache.params = assembler.get_params();
-    m_cache.tensor_index_map = assembler.get_tensor_index_map();
-    m_cache.const_index_map = assembler.get_const_index_map();
+    auto streams = assembler.get_streams();
+    m_graph->set_attr("streams", streams);
+    auto param_offset_table = assembler.get_param_offset_table();
+    m_graph->set_attr("param_offset_table", param_offset_table);
+    auto params = assembler.get_params();
+    m_graph->set_attr("params", params);
+    auto tensor_index_map = assembler.get_tensor_index_map();
+    m_graph->set_attr("tensor_index_map", tensor_index_map);
+    auto const_index_map = assembler.get_const_index_map();
+    m_graph->set_attr("const_index_map", const_index_map);
 
     return true;
 }
@@ -271,14 +282,21 @@ bool MqBuilder::phase_gen_obj()
 {
     //gen elf
     ObjectGenerator object_generator;
-    object_generator.set_streams(m_cache.streams);
-    object_generator.set_param_offset_table(m_cache.param_offset_table);
-    object_generator.set_params(m_cache.params);
-    object_generator.set_tensor_index_map(m_cache.tensor_index_map);
-    object_generator.set_const_index_map(m_cache.const_index_map);
-    object_generator.set_slots(m_cache.data_slots);
+    std::vector<std::vector<task_t>> streams = m_graph->attrs()["streams"];
+    object_generator.set_streams(streams);
+    std::map<uint32_t, uint32_t> param_offset_table = m_graph->attrs()["param_offset_table"];
+    object_generator.set_param_offset_table(param_offset_table);
+    BuilderParams params = m_graph->attrs()["params"];
+    object_generator.set_params(params);
+    std::map<TensorPtr, uint32_t> tensor_index_map = m_graph->attrs()["tensor_index_map"];
+    object_generator.set_tensor_index_map(tensor_index_map);
+    std::map<ConstTensorPtr, uint32_t> const_index_map = m_graph->attrs()["const_index_map"];
+    object_generator.set_const_index_map(const_index_map);
+    std::vector<MemoryObjectPtr> data_slots = m_graph->attrs()["data_slots"];
+    object_generator.set_slots(data_slots);
     object_generator.set_graph(m_graph);
-    object_generator.set_constant(m_cache.const_tensors);
+    std::vector<ConstTensorPtr> const_tensors = m_graph->attrs()["const_tensors"];
+    object_generator.set_constant(const_tensors);
     object_generator.gen(m_elf);
 
     return true;

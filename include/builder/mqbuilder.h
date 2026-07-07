@@ -43,25 +43,6 @@ enum BuildStage
     DONE
 };
 
-struct StageCache
-{
-    std::vector<std::vector<NodePtr>> levels;
-
-    std::vector<ConstTensorPtr> const_tensors;
-    std::map<NodePtr, std::set<TensorPtr>> ws_map;
-    std::map<TensorPtr, NodePtr> surface_tensors;
-    std::map<std::string, std::string> kernel_lib_names;
-
-    std::vector<MemoryObjectPtr> data_slots;
-    std::vector<MemoryObjectPtr> const_slots;
-
-    std::vector<std::vector<task_t>> streams;
-    std::map<uint32_t, uint32_t> param_offset_table;
-    BuilderParams params;
-    std::map<TensorPtr, uint32_t> tensor_index_map;
-    std::map<ConstTensorPtr, uint32_t> const_index_map;
-};
-
 struct BuildPhase
 {
     std::string name;
@@ -84,7 +65,6 @@ public:
 private:
     GraphPtr m_graph;
     CpsElfPtr m_elf;
-    StageCache m_cache;
     std::vector<BuildPhase> create_phases();
     bool phase_optimize();
     bool phase_schedule();
