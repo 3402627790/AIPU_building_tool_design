@@ -20,7 +20,6 @@
 #include "core/graph.h"
 
 #include <string>
-#include <vector>
 
 namespace aipubt
 {
@@ -28,10 +27,6 @@ namespace aipubt
 GraphPtr load_mq_ir_cache(const std::string &dir);
 bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir);
 void save_mq_ir_cache(GraphPtr graph, const std::string &dir);
-void save_mq_ir_cache(GraphPtr graph, const std::string &dir, const std::string &stage);
-std::string load_mq_ir_cache_stage(const std::string &dir);
-bool save_mq_ir_cache_schedule(const std::vector<std::vector<NodePtr>> &levels, const std::string &dir);
-bool load_mq_ir_cache_schedule(GraphPtr graph, const std::string &dir, std::vector<std::vector<NodePtr>> &levels);
 
 } // namespace aipubt
 
