@@ -367,6 +367,31 @@ public:
         return make_pointer_ref(add_tensor(tensor));
     }
 
+    std::string add_node(NodePtr node)
+    {
+        if (!node)
+            return "";
+
+        std::string id = pointer_id("node", node.get());
+        if (m_objects.count(id))
+            return id;
+
+        utils::JsonObject obj(utils::JsonObject::OBJ);
+        obj["object_kind"] = "node";
+        obj["node_name"] = node->name();
+        if (node->graph())
+        {
+            obj["graph_name"] = node->graph()->name();
+        }
+        m_objects[id] = obj;
+        return id;
+    }
+
+    utils::JsonObject node_ref(NodePtr node)
+    {
+        return make_pointer_ref(add_node(node));
+    }
+
     utils::JsonObject to_json() const
     {
         utils::JsonObject obj(utils::JsonObject::OBJ);
@@ -377,7 +402,7 @@ public:
         return obj;
     }
 
-    utils::JsonObject serialize_payloads(const std::string &bin_path) const
+    utils::JsonObject serialize_payloads(const std::string &bin_path, const std::string &payload_file_name) const
     {
         utils::JsonObject payloads(utils::JsonObject::OBJ);
         std::ofstream ofs;
@@ -436,7 +461,7 @@ public:
                     continue;
                 }
 
-                data_obj["file"] = "lowered.payload.bin";
+                data_obj["file"] = payload_file_name;
                 data_obj["offset"] = offset;
                 data_obj["size"] = (int64_t)size;
                 data_map[data] = data_obj;
@@ -556,6 +581,104 @@ TensorPtr lookup_tensor_by_desc_in_graphs(GraphPtr graph, utils::JsonObject desc
     return nullptr;
 }
 
+NodePtr lookup_node_by_desc(GraphPtr graph, utils::JsonObject desc)
+{
+    if (!graph || desc.t != utils::JsonObject::OBJ ||
+        !desc.exist("node_name") || desc["node_name"].t != utils::JsonObject::STR)
+    {
+        return nullptr;
+    }
+
+    std::string node_name = (std::string)desc["node_name"];
+    std::string graph_name;
+    if (desc.exist("graph_name") && desc["graph_name"].t == utils::JsonObject::STR)
+    {
+        graph_name = (std::string)desc["graph_name"];
+    }
+
+    for (auto candidate_graph : graph->get_all_graphs())
+    {
+        if (!graph_name.empty() && candidate_graph->name() != graph_name)
+            continue;
+        auto node = find_node_by_name(candidate_graph, node_name);
+        if (node)
+            return node;
+    }
+
+    return find_node_by_name(graph, node_name);
+}
+
+NodePtr lookup_node_ref(GraphPtr graph, utils::JsonObject object_table, utils::JsonObject ref)
+{
+    if (!is_pointer_ref(ref) || object_table.t != utils::JsonObject::OBJ)
+        return nullptr;
+
+    std::string id = (std::string)ref["id"];
+    if (!object_table.exist(id))
+        return nullptr;
+
+    return lookup_node_by_desc(graph, object_table[id]);
+}
+
+utils::JsonObject serialize_node_ref_list(const std::vector<NodePtr> &nodes, PointerRefTable &ref_table)
+{
+    utils::JsonObject arr(utils::JsonObject::ARR);
+    for (auto node : nodes)
+    {
+        if (node)
+            arr.push_back(ref_table.node_ref(node));
+    }
+    return arr;
+}
+
+utils::JsonObject serialize_node_ref_levels(const std::vector<std::vector<NodePtr>> &levels, PointerRefTable &ref_table)
+{
+    utils::JsonObject arr(utils::JsonObject::ARR);
+    for (const auto &level : levels)
+    {
+        arr.push_back(serialize_node_ref_list(level, ref_table));
+    }
+    return arr;
+}
+
+bool deserialize_node_ref_list(GraphPtr graph,
+                               const utils::JsonObject &object_table,
+                               const utils::JsonObject &obj,
+                               std::vector<NodePtr> &nodes)
+{
+    if (!graph || object_table.t != utils::JsonObject::OBJ || obj.t != utils::JsonObject::ARR)
+        return false;
+
+    nodes.clear();
+    for (const auto &item : obj.array())
+    {
+        auto node = lookup_node_ref(graph, object_table, item);
+        if (!node)
+            return false;
+        nodes.push_back(node);
+    }
+    return true;
+}
+
+bool deserialize_node_ref_levels(GraphPtr graph,
+                                 const utils::JsonObject &object_table,
+                                 const utils::JsonObject &obj,
+                                 std::vector<std::vector<NodePtr>> &levels)
+{
+    if (obj.t != utils::JsonObject::ARR)
+        return false;
+
+    levels.clear();
+    for (const auto &item : obj.array())
+    {
+        std::vector<NodePtr> level;
+        if (!deserialize_node_ref_list(graph, object_table, item, level))
+            return false;
+        levels.push_back(level);
+    }
+    return true;
+}
+
 // Helper function: serialize an Any value to JsonObject
 bool serialize_any_to_json(const std::string& key, const Any& value, utils::JsonObject& json_obj, PointerRefTable *ref_table = nullptr)
 {
@@ -654,6 +777,26 @@ bool serialize_any_to_json(const std::string& key, const Any& value, utils::Json
     else if (type_id == GET_ANY_TYPEID<TensorPtr>() && ref_table)
     {
         set_typed_json_attr(key, "TensorPtr", ref_table->tensor_ref(value.cast<TensorPtr>()), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<NodePtr>() && ref_table)
+    {
+        auto node = value.cast<NodePtr>();
+        if (!node)
+            return false;
+        set_typed_json_attr(key, "NodePtr", ref_table->node_ref(node), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<std::vector<NodePtr>>() && ref_table)
+    {
+        set_typed_json_attr(key, "vector<NodePtr>", serialize_node_ref_list(value.cast<std::vector<NodePtr>>(), *ref_table), json_obj);
+        return true;
+    }
+    else if (type_id == GET_ANY_TYPEID<std::vector<std::vector<NodePtr>>>() && ref_table)
+    {
+        set_typed_json_attr(key, "vector<vector<NodePtr>>",
+                            serialize_node_ref_levels(value.cast<std::vector<std::vector<NodePtr>>>(), *ref_table),
+                            json_obj);
         return true;
     }
 
@@ -791,6 +934,36 @@ bool deserialize_json_to_any(const std::string& key, const utils::JsonObject& js
         if (!tensor)
             return false;
         set_attr_func(key, Any(tensor));
+        return true;
+    }
+    else if (type == "NodePtr")
+    {
+        if (!graph || !object_table)
+            return false;
+        auto node = lookup_node_ref(graph, *object_table, value_obj);
+        if (!node)
+            return false;
+        set_attr_func(key, Any(node));
+        return true;
+    }
+    else if (type == "vector<NodePtr>")
+    {
+        if (!graph || !object_table)
+            return false;
+        std::vector<NodePtr> nodes;
+        if (!deserialize_node_ref_list(graph, *object_table, value_obj, nodes))
+            return false;
+        set_attr_func(key, Any(nodes));
+        return true;
+    }
+    else if (type == "vector<vector<NodePtr>>")
+    {
+        if (!graph || !object_table)
+            return false;
+        std::vector<std::vector<NodePtr>> levels;
+        if (!deserialize_node_ref_levels(graph, *object_table, value_obj, levels))
+            return false;
+        set_attr_func(key, Any(levels));
         return true;
     }
 
@@ -1460,15 +1633,17 @@ void restore_graph_metadata(GraphPtr graph, utils::JsonObject graph_json, const 
         }
     }
     restore_global_tensors_from_metadata(graph, graph_json, object_table);
-    if (graph_json.exist("graph_attrs"))
-    {
-        deserialize_attrs_from_json(graph_json["graph_attrs"],
-            [&graph](const std::string& key, const Any& value) {
-                graph->set_attr(key, value);
-            }, graph, object_table);
-    }
     if (!graph_json.exist("nodes"))
     {
+        if (graph_json.exist("graph_attrs"))
+        {
+            deserialize_attrs_from_json(graph_json["graph_attrs"],
+                                        [&graph](const std::string &key, const Any &value) {
+                                            graph->set_attr(key, value);
+                                        },
+                                        graph,
+                                        object_table);
+        }
         restore_graph_references(graph, graph_json, object_table);
         return;
     }
@@ -1507,6 +1682,15 @@ void restore_graph_metadata(GraphPtr graph, utils::JsonObject graph_json, const 
         restore_node_metadata(graph, node, node_json, loaded_node_attrs, loaded_tensor_attrs, object_table);
     }
 
+    if (graph_json.exist("graph_attrs"))
+    {
+        deserialize_attrs_from_json(graph_json["graph_attrs"],
+                                    [&graph](const std::string &key, const Any &value) {
+                                        graph->set_attr(key, value);
+                                    },
+                                    graph,
+                                    object_table);
+    }
     restore_graph_references(graph, graph_json, object_table);
 }
 
@@ -1566,6 +1750,14 @@ void restore_node_metadata(GraphPtr graph, NodePtr node, utils::JsonObject node_
     }
 }
 
+std::string path_basename(const std::string &path)
+{
+    auto pos = path.find_last_of("/\\");
+    if (pos == std::string::npos)
+        return path;
+    return path.substr(pos + 1);
+}
+
 // Save graph, node and tensor metadata that the textual IR does not fully represent.
 bool save_graph_attributes(GraphPtr graph, const std::string& json_path, const std::string &payload_bin_path)
 {
@@ -1607,7 +1799,7 @@ bool save_graph_attributes(GraphPtr graph, const std::string& json_path, const s
 
     root["nodes"] = nodes_arr;
     root["object_table"] = ref_table.to_json();
-    auto object_payloads = ref_table.serialize_payloads(payload_bin_path);
+    auto object_payloads = ref_table.serialize_payloads(payload_bin_path, path_basename(payload_bin_path));
     if (object_payloads.t == utils::JsonObject::OBJ && !object_payloads.obj().empty())
     {
         root["object_payloads"] = object_payloads;
@@ -1680,13 +1872,6 @@ bool load_graph_attributes(GraphPtr graph, const std::string& json_path, const s
                     graph->set_layout(layout);
                 }
             }
-            if (graph_json.exist("graph_attrs"))
-            {
-                deserialize_attrs_from_json(graph_json["graph_attrs"],
-                    [&graph](const std::string& key, const Any& value) {
-                        graph->set_attr(key, value);
-                    }, graph, object_table);
-            }
         }
     }
 
@@ -1729,6 +1914,15 @@ bool load_graph_attributes(GraphPtr graph, const std::string& json_path, const s
 
     if (root.exist("graph") && root["graph"].t == utils::JsonObject::OBJ)
     {
+        if (root["graph"].exist("graph_attrs"))
+        {
+            deserialize_attrs_from_json(root["graph"]["graph_attrs"],
+                                        [&graph](const std::string &key, const Any &value) {
+                                            graph->set_attr(key, value);
+                                        },
+                                        graph,
+                                        object_table);
+        }
         restore_graph_references(graph, root["graph"], object_table);
     }
 
@@ -1782,48 +1976,70 @@ bool load_graph_global_tensors(GraphPtr graph, const std::string& json_path)
 
 
 // File names used inside the cache directory pointed at by --mq_save_ir / --mq_load_ir.
-constexpr const char *kMqIrCacheDef = "lowered.def";
-constexpr const char *kMqIrCacheBin = "lowered.bin";
-constexpr const char *kMqIrCacheAttrs = "lowered.attrs.json";
-constexpr const char *kMqIrCachePayloadBin = "lowered.payload.bin";
-
-inline std::string mq_ir_cache_def_path(const std::string &dir)
+std::string mq_ir_cache_stage_label(const std::string &stage)
 {
-    return dir + "/" + kMqIrCacheDef;
+    if (stage.empty())
+        return "optimize";
+    return stage;
 }
 
-inline std::string mq_ir_cache_bin_path(const std::string &dir)
+inline std::string mq_ir_cache_def_name(const std::string &stage)
 {
-    return dir + "/" + kMqIrCacheBin;
+    return mq_ir_cache_stage_label(stage) + ".def";
 }
 
-inline std::string mq_ir_cache_attrs_path(const std::string &dir)
+inline std::string mq_ir_cache_bin_name(const std::string &stage)
 {
-    return dir + "/" + kMqIrCacheAttrs;
+    return mq_ir_cache_stage_label(stage) + ".bin";
 }
 
-inline std::string mq_ir_cache_payload_bin_path(const std::string &dir)
+inline std::string mq_ir_cache_attrs_name(const std::string &stage)
 {
-    return dir + "/" + kMqIrCachePayloadBin;
+    return mq_ir_cache_stage_label(stage) + ".attrs.json";
+}
+
+inline std::string mq_ir_cache_payload_bin_name(const std::string &stage)
+{
+    return mq_ir_cache_stage_label(stage) + ".payload.bin";
+}
+
+inline std::string mq_ir_cache_def_path(const std::string &dir, const std::string &stage)
+{
+    return dir + "/" + mq_ir_cache_def_name(stage);
+}
+
+inline std::string mq_ir_cache_bin_path(const std::string &dir, const std::string &stage)
+{
+    return dir + "/" + mq_ir_cache_bin_name(stage);
+}
+
+inline std::string mq_ir_cache_attrs_path(const std::string &dir, const std::string &stage)
+{
+    return dir + "/" + mq_ir_cache_attrs_name(stage);
+}
+
+inline std::string mq_ir_cache_payload_bin_path(const std::string &dir, const std::string &stage)
+{
+    return dir + "/" + mq_ir_cache_payload_bin_name(stage);
 }
 
 } // namespace
 
 // Try to load a previously saved post-lowering graph from `dir`
-GraphPtr load_mq_ir_cache(const std::string &dir)
+GraphPtr load_mq_ir_cache(const std::string &dir, const std::string &stage)
 {
-    auto def_path = mq_ir_cache_def_path(dir);
-    auto bin_path = mq_ir_cache_bin_path(dir);
-    auto attrs_path = mq_ir_cache_attrs_path(dir);
+    auto def_path = mq_ir_cache_def_path(dir, stage);
+    auto bin_path = mq_ir_cache_bin_path(dir, stage);
+    auto attrs_path = mq_ir_cache_attrs_path(dir, stage);
 
     if (!utils::file_exists(def_path) || !utils::file_exists(bin_path))
     {
         WARN() << "mq_load_ir: cache files not found in " << dir << " (expected "
-               << kMqIrCacheDef << " and " << kMqIrCacheBin << ").";
+               << mq_ir_cache_def_name(stage) << " and " << mq_ir_cache_bin_name(stage) << ").";
         return nullptr;
     }
 
-    INFO() << "mq_load_ir: loading cached MQ IR from " << dir;
+    INFO() << "mq_load_ir: loading cached MQ IR from " << dir << " at stage " << mq_ir_cache_stage_label(stage);
     auto g = Graph::parse(def_path);
     if (!g)
     {
@@ -1842,10 +2058,10 @@ GraphPtr load_mq_ir_cache(const std::string &dir)
     return g;
 }
 
-bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir)
+bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir, const std::string &stage)
 {
-    auto attrs_path = mq_ir_cache_attrs_path(dir);
-    auto payload_bin_path = mq_ir_cache_payload_bin_path(dir);
+    auto attrs_path = mq_ir_cache_attrs_path(dir, stage);
+    auto payload_bin_path = mq_ir_cache_payload_bin_path(dir, stage);
     if (!utils::file_exists(attrs_path))
     {
         DEBUG() << "mq_load_ir: no attributes file found, skipping attribute loading";
@@ -1859,7 +2075,7 @@ bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir)
 }
 
 // Serialize the current graph into `dir`
-void save_mq_ir_cache(GraphPtr graph, const std::string &dir)
+void save_mq_ir_cache(GraphPtr graph, const std::string &dir, const std::string &stage)
 {
     if (!utils::path_exists(dir) && !utils::mkdir(dir))
     {
@@ -1868,12 +2084,12 @@ void save_mq_ir_cache(GraphPtr graph, const std::string &dir)
     }
 
     auto abs_dir = utils::get_abspath(dir);
-    auto def_path = mq_ir_cache_def_path(abs_dir);
-    auto bin_path = mq_ir_cache_bin_path(abs_dir);
-    auto attrs_path = mq_ir_cache_attrs_path(abs_dir);
-    auto payload_bin_path = mq_ir_cache_payload_bin_path(abs_dir);
+    auto def_path = mq_ir_cache_def_path(abs_dir, stage);
+    auto bin_path = mq_ir_cache_bin_path(abs_dir, stage);
+    auto attrs_path = mq_ir_cache_attrs_path(abs_dir, stage);
+    auto payload_bin_path = mq_ir_cache_payload_bin_path(abs_dir, stage);
 
-    INFO() << "mq_save_ir: dumping post-lowering MQ IR to " << def_path;
+    INFO() << "mq_save_ir: dumping MQ IR at stage " << mq_ir_cache_stage_label(stage) << " to " << def_path;
     {
         BoolConfigGuard serialize_scale_zp(Constants::serialize_scale_zp, true);
         BoolConfigGuard dump_debug_ir(Constants::dump_debug_IR, true);

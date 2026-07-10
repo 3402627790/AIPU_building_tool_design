@@ -176,61 +176,6 @@ static bool check_ds_plugin(const std::vector<NodePtr> &nodes, BuilderOpPluginIn
         bool is_ds_plugin = plugin->plugin_type & GBPlugin_DS;
         if ((is_dynamic && !is_ds_plugin) || (!is_dynamic && is_ds_plugin))
         {
-            return false;
-        }
-    }
-    return true;
-}
-
-static std::vector<std::vector<NodePtr>> filter_pattern(const std::vector<std::vector<NodePtr>> &matches, BuilderOpPluginInfo *plugin)
-{
-    std::vector<std::vector<NodePtr>> filtered;
-    if (matches.size() == 0)
-    {
-        return filtered;
-    }
-    if (plugin->name == "HwaConvEltwise" || plugin->name == "HwaConvEltwisePooling" || plugin->name == "HwaCropConvEltwise")
-    {
-        uint32_t conv_idx, eltwise_idx;
-        if (plugin->name == "HwaConvEltwise" || plugin->name == "HwaConvEltwisePooling")
-        {
-            conv_idx = 0;
-            eltwise_idx = 1;
-        }
-        else // HwaCropConvEltwise
-        {
-            conv_idx = 1;
-            eltwise_idx = 2;
-        }
-        std::map<NodePtr, uint32_t> elt_node_index;
-        int filter_index;
-        for (size_t i = 0; i < matches.size(); ++i)
-        {
-            auto pattern = matches[i];
-            auto elt_node = pattern[eltwise_idx];
-            filter_index = -1;
-            for (size_t j = 0; j < filtered.size(); ++j)
-            {
-                auto filtered_elt_node = filtered[j][eltwise_idx];
-                if (filtered_elt_node == elt_node)
-                {
-                    filter_index = j;
-                }
-            }
-
-            if (filter_index >= 0)
-            {
-                auto conv_new = pattern[conv_idx];
-                auto conv_old = filtered[filter_index][conv_idx];
-                // same channel will use the first one to make sure no mismatch
-                if (conv_new->inputs()[0]->shape().c() == conv_old->inputs()[0]->shape().c())
-                {
-                    if (conv_new == elt_node->parents()[0])
-                    {
-                        filtered[filter_index] = pattern;
-                    }
-                }
-                // different channel will use the larger one to optimize the perforamcne
                 else if (conv_new->inputs()[0]->shape().c() > conv_old->inputs()[0]->shape().c())
                 {
                     filtered[filter_index] = pattern;

@@ -101,8 +101,11 @@ static std::vector<ImplInfo> plugin_match(GopPluginInfo *plugin, NodePtr n)
         if (nodes.size())
         {
             auto impl = opt->get_impl(nodes, pattern);
-            ImplInfo info{impl, nodes};
-            impl_info.push_back(info);
+            if (impl)
+            {
+                ImplInfo info{impl, nodes};
+                impl_info.push_back(info);
+            }
         }
     }
 
@@ -120,10 +123,11 @@ static ImplInfo get_best_impl(NodePtr n, std::set<GopPluginInfo *> &plugins)
             candidates.push_back(info);
         }
     }
-
+    ImplInfo info;
     if (!candidates.size())
     {
         ERROR() << "no plugin found";
+        return info;
     }
     auto max_it = std::max_element(candidates.begin(), candidates.end(),
                                    [](const ImplInfo a, const ImplInfo b) {
@@ -139,7 +143,7 @@ static ImplInfo get_best_impl(NodePtr n, std::set<GopPluginInfo *> &plugins)
                                        return a.impl->score() < b.impl->score();
                                    });
 
-    ImplInfo info = *max_it;
+    info = *max_it;
     return info;
 }
 

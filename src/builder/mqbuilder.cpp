@@ -40,6 +40,49 @@
 namespace aipubt
 {
 
+BuildStage mq_ir_stage_from_string(const std::string &stage)
+{
+    if (stage.empty() || stage == "optimize")
+        return BuildStage::OPTIMIZE;
+    if (stage == "schedule")
+        return BuildStage::SCHEDULE;
+    if (stage == "kernel_adapt")
+        return BuildStage::KERNEL_ADAPT;
+    if (stage == "mem_alloc")
+        return BuildStage::MEM_ALLOC;
+    if (stage == "code_gen")
+        return BuildStage::CODE_GEN;
+    if (stage == "assemble")
+        return BuildStage::ASSEMBLE;
+    if (stage == "gen_obj")
+        return BuildStage::GEN_OBJ;
+
+    return BuildStage::OPTIMIZE;
+}
+
+std::string mq_ir_stage_to_string(BuildStage stage)
+{
+    switch (stage)
+    {
+    case BuildStage::OPTIMIZE:
+        return "optimize";
+    case BuildStage::SCHEDULE:
+        return "schedule";
+    case BuildStage::KERNEL_ADAPT:
+        return "kernel_adapt";
+    case BuildStage::MEM_ALLOC:
+        return "mem_alloc";
+    case BuildStage::CODE_GEN:
+        return "code_gen";
+    case BuildStage::ASSEMBLE:
+        return "assemble";
+    case BuildStage::GEN_OBJ:
+        return "gen_obj";
+    default:
+        return "optimize";
+    }
+}
+
 MqBuilder::MqBuilder(GraphPtr graph) : m_graph(graph)
 {
     m_elf = std::make_shared<CpsElf>();
@@ -83,8 +126,9 @@ bool MqBuilder::build()
     m_graph->global_tensors()["print"] = print;
 
     auto phases = create_phases();
-    BuildStage save_stage = OPTIMIZE;
+    BuildStage save_stage = mq_ir_stage_from_string(BuilderConfig::get<std::string>("mq_ir_stage"));
     BuildStage load_stage = (BuildStage)((int)save_stage + 1);
+    std::string ir_stage_name = mq_ir_stage_to_string(save_stage);
 
     for (const auto &phase : phases)
     {
@@ -97,13 +141,13 @@ bool MqBuilder::build()
             }
             else if (phase.stage == load_stage)
             {
-                m_graph = load_mq_ir_cache(mq_load_ir);
+                m_graph = load_mq_ir_cache(mq_load_ir, ir_stage_name);
                 if (!m_graph)
                 {
                     ERROR() << "mq_load_ir: failed to load cached MQ IR from " << mq_load_ir;
                     return false;
                 }
-                if (!load_mq_ir_cache_attributes(m_graph, mq_load_ir))
+                if (!load_mq_ir_cache_attributes(m_graph, mq_load_ir, ir_stage_name))
                 {
                     ERROR() << "mq_load_ir: failed to load cached MQ IR attributes from " << mq_load_ir;
                     return false;
@@ -121,7 +165,7 @@ bool MqBuilder::build()
         auto mq_save_ir = BuilderConfig::get<std::string>("mq_save_ir");
         if (!mq_save_ir.empty() && phase.stage == save_stage)
         {
-            save_mq_ir_cache(m_graph, mq_save_ir);
+            save_mq_ir_cache(m_graph, mq_save_ir, ir_stage_name);
             break;
         }
     }
