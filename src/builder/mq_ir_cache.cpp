@@ -399,6 +399,44 @@ public:
         return make_pointer_ref(add_node(node));
     }
 
+    std::string add_memory(MemoryObjectPtr memory)
+    {
+        if (!memory)
+            return "";
+
+        std::string id = pointer_id("memory", memory.get());
+        if (m_objects.count(id))
+            return id;
+
+        utils::JsonObject obj(utils::JsonObject::OBJ);
+        obj["object_kind"] = "memory";
+        obj["relative_offset"] = (uint64_t)memory->relative_offset;
+        obj["m_base"] = (uint64_t)memory->m_base;
+        obj["align"] = (uint64_t)memory->align;
+        obj["mask"] = (uint64_t)memory->mask;
+        obj["size"] = (uint64_t)memory->size;
+        obj["foot_print"] = (uint64_t)memory->foot_print;
+        obj["mem_flag"] = (uint64_t)memory->mem_flag;
+        obj["buffer_id"] = (int64_t)memory->buffer_id;
+        obj["bss_id"] = (int64_t)memory->bss_id;
+
+        m_objects[id] = obj;
+        if (memory->base_offset)
+        {
+            m_objects[id]["base_offset"] = memory_ref(memory->base_offset);
+        }
+        if (memory->next_block)
+        {
+            m_objects[id]["next_block"] = memory_ref(memory->next_block);
+        }
+        return id;
+    }
+
+    utils::JsonObject memory_ref(MemoryObjectPtr memory)
+    {
+        return make_pointer_ref(add_memory(memory));
+    }
+
     utils::JsonObject to_json() const
     {
         utils::JsonObject obj(utils::JsonObject::OBJ);
@@ -690,6 +728,7 @@ struct MqIrCacheContext
 {
     std::map<std::string, ConstTensorPtr> const_tensor_cache;
     std::map<std::string, SurfacePtr> surface_cache;
+    std::map<std::string, MemoryObjectPtr> memory_cache;
 };
 
 std::string pointer_ref_id(utils::JsonObject ref)
@@ -697,6 +736,100 @@ std::string pointer_ref_id(utils::JsonObject ref)
     if (!is_pointer_ref(ref))
         return "";
     return (std::string)ref["id"];
+}
+
+MemoryObjectPtr deserialize_memory_ref(utils::JsonObject object_table,
+                                       utils::JsonObject ref,
+                                       MqIrCacheContext *context);
+
+void restore_memory_fields(MemoryObjectPtr memory,
+                           utils::JsonObject object_table,
+                           utils::JsonObject desc,
+                           MqIrCacheContext *context)
+{
+    if (!memory || desc.t != utils::JsonObject::OBJ)
+        return;
+
+    if (desc.exist("relative_offset"))
+        memory->relative_offset = (uint64_t)desc["relative_offset"];
+    if (desc.exist("m_base"))
+        memory->m_base = (uint64_t)desc["m_base"];
+    if (desc.exist("align"))
+        memory->align = (uint32_t)(uint64_t)desc["align"];
+    if (desc.exist("mask"))
+        memory->mask = (uint64_t)desc["mask"];
+    if (desc.exist("size"))
+        memory->size = (uint64_t)desc["size"];
+    if (desc.exist("foot_print"))
+        memory->foot_print = (uint64_t)desc["foot_print"];
+    if (desc.exist("mem_flag"))
+        memory->mem_flag = (uint32_t)(uint64_t)desc["mem_flag"];
+    if (desc.exist("buffer_id"))
+        memory->buffer_id = (int32_t)(int64_t)desc["buffer_id"];
+    if (desc.exist("bss_id"))
+        memory->bss_id = (int32_t)(int64_t)desc["bss_id"];
+    if (desc.exist("base_offset"))
+        memory->base_offset = deserialize_memory_ref(object_table, desc["base_offset"], context);
+    if (desc.exist("next_block"))
+        memory->next_block = deserialize_memory_ref(object_table, desc["next_block"], context);
+}
+
+MemoryObjectPtr deserialize_memory_ref(utils::JsonObject object_table,
+                                       utils::JsonObject ref,
+                                       MqIrCacheContext *context)
+{
+    if (!is_pointer_ref(ref) || object_table.t != utils::JsonObject::OBJ)
+        return nullptr;
+
+    auto id = pointer_ref_id(ref);
+    if (context && context->memory_cache.count(id))
+        return context->memory_cache[id];
+    if (id.empty() || !object_table.exist(id))
+        return nullptr;
+
+    auto desc = object_table[id];
+    if (desc.t != utils::JsonObject::OBJ ||
+        !desc.exist("object_kind") ||
+        desc["object_kind"].t != utils::JsonObject::STR ||
+        (std::string)desc["object_kind"] != "memory")
+    {
+        return nullptr;
+    }
+
+    auto memory = std::make_shared<MemoryObject>(0);
+    if (context)
+        context->memory_cache[id] = memory;
+    restore_memory_fields(memory, object_table, desc, context);
+    return memory;
+}
+
+utils::JsonObject serialize_memory_list(const std::vector<MemoryObjectPtr> &memories, PointerRefTable &ref_table)
+{
+    utils::JsonObject arr(utils::JsonObject::ARR);
+    for (auto memory : memories)
+    {
+        arr.push_back(ref_table.memory_ref(memory));
+    }
+    return arr;
+}
+
+bool deserialize_memory_list(utils::JsonObject object_table,
+                             utils::JsonObject obj,
+                             std::vector<MemoryObjectPtr> &memories,
+                             MqIrCacheContext *context)
+{
+    if (obj.t != utils::JsonObject::ARR)
+        return false;
+
+    memories.clear();
+    for (auto item : obj.array())
+    {
+        auto memory = deserialize_memory_ref(object_table, item, context);
+        if (!memory)
+            return false;
+        memories.push_back(memory);
+    }
+    return true;
 }
 
 utils::JsonObject serialize_expr(Expr expr)
@@ -1344,6 +1477,13 @@ bool serialize_any_to_json(const std::string& key, const Any& value, utils::Json
                             json_obj);
         return true;
     }
+    else if (type_id == GET_ANY_TYPEID<std::vector<MemoryObjectPtr>>() && ref_table)
+    {
+        set_typed_json_attr(key, "vector<MemoryObjectPtr>",
+                            serialize_memory_list(value.cast<std::vector<MemoryObjectPtr>>(), *ref_table),
+                            json_obj);
+        return true;
+    }
     else if (type_id == GET_ANY_TYPEID<std::map<NodePtr, std::set<TensorPtr>>>() && ref_table)
     {
         set_typed_json_attr(key, "map<NodePtr,set<TensorPtr>>",
@@ -1569,6 +1709,16 @@ bool deserialize_json_to_any(const std::string& key, const utils::JsonObject& js
         set_attr_func(key, Any(tensors));
         return true;
     }
+    else if (type == "vector<MemoryObjectPtr>")
+    {
+        if (!object_table)
+            return false;
+        std::vector<MemoryObjectPtr> memories;
+        if (!deserialize_memory_list(*object_table, value_obj, memories, context))
+            return false;
+        set_attr_func(key, Any(memories));
+        return true;
+    }
     else if (type == "map<NodePtr,set<TensorPtr>>")
     {
         if (!graph || !object_table)
@@ -1645,6 +1795,7 @@ utils::JsonObject serialize_tensor_metadata(TensorPtr tensor, size_t tensor_inde
     if (ref_table)
     {
         tensor_obj["pointer_ref"] = ref_table->tensor_ref(tensor);
+        tensor_obj["memory_offset"] = ref_table->memory_ref(tensor->memory_offset());
     }
 
     utils::JsonObject tensor_attrs(utils::JsonObject::OBJ);
@@ -2000,6 +2151,16 @@ int restore_tensor_metadata(TensorPtr tensor,
         if (deserialize_tensor_dtype(tensor_json["dtype"], dtype))
         {
             tensor->set_type(dtype);
+        }
+    }
+
+    if (object_table && context && tensor_json.exist("memory_offset"))
+    {
+        auto memory = deserialize_memory_ref(*object_table, tensor_json["memory_offset"], context);
+        if (memory)
+        {
+            *tensor->memory_offset() = *memory;
+            context->memory_cache[pointer_ref_id(tensor_json["memory_offset"])] = tensor->memory_offset();
         }
     }
 
