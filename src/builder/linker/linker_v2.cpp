@@ -107,7 +107,7 @@ uint32_t LinkerV2::link(std::ostream &oss)
         }
         m_objs.push_back(perf_o_file);
     }
-    auto ds_code = get_ds_code().str();
+    auto ds_code = get_ds_device_code();
     if (ds_code.size())
     {
         std::string cl_file = m_workdir + "/" + "ds_impl.cl";

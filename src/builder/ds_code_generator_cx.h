@@ -180,6 +180,7 @@ struct DSKernelDesc
         EVAL = 1,
         MAX_BATCH = 2,
         MAX_BATCH_TAIL = 3,
+        OUTPUT_SHAPE = 4,
     };
 
     struct DSRemapTable
@@ -431,8 +432,12 @@ protected:
     void generate_kernel_code(std::stringstream &oss,
                               const DSKernelDesc &kernel);
 
+    void generate_eval_code(std::stringstream &oss,
+                            const DSKernelDesc &kernel);
+
     PlaceholderPtr m_param_base;
 };
 
-const std::string get_ds_code();
+const std::string get_ds_device_code();
+const std::string get_ds_host_code();
 } // namespace aipubt

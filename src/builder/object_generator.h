@@ -30,7 +30,6 @@
 #include "core/graph.h"
 #include "core/node.h"
 #include "core/subgraph.h"
-#include <vector>
 
 namespace aipubt
 {
@@ -40,20 +39,19 @@ class ObjectGenerator
     {
         input = 0,
         output = 1,
-        stream = 2,
-        param = 3,
+        output_shape = 2,
     };
 
 public:
     void set_streams(const std::vector<std::vector<task_t>> &streams);
     void set_param_offset_table(const std::map<uint32_t, uint32_t> &param_offset_table);
-    void set_params(const std::vector<uint32_t> &params);
+    void set_params(const BuilderParams &params);
     void set_tensor_index_map(const std::map<TensorPtr, uint32_t> &tensor_index_map);
     void set_const_index_map(const std::map<ConstTensorPtr, uint32_t> &const_index_map);
     void set_slots(const std::vector<MemoryObjectPtr> &slots);
     void set_graph(const GraphPtr g);
-    void set_constant(const std::set<ConstTensorPtr> &constant);
-    bool gen(CpsElfPtr &elf) const;
+    void set_constant(const std::vector<ConstTensorPtr> &constant);
+    bool gen(CpsElfPtr elf);
 
 private:
     std::vector<stream_t> m_streams;
@@ -64,9 +62,7 @@ private:
     std::map<std::string, std::string> m_kernel_lib;
     std::vector<MemoryObjectPtr> m_slots;
     GraphPtr m_graph;
-    std::set<ConstTensorPtr> m_constant;
-
-    tensor_info_t gen_info_from_global_tensor(const std::string &tensor_name) const;
+    std::vector<ConstTensorPtr> m_constant;
 };
-};     // namespace aipubt
+} // namespace aipubt
 #endif //!BUILDER_OBJECT_GENERATOR_H

@@ -22,7 +22,7 @@ include_directories("${ROOT_DIR}/3rdparty")
 
 FILE(GLOB COMMON_SRCS  ${PROJECT_SOURCE_DIR}/common/**.cpp)
 add_library(${aipubtep} SHARED ${COMMON_SRCS})
-target_link_libraries(${aipubtep} ${AIPUBuildLIB} aipubtrt )
+target_link_libraries(${aipubtep} ${AIPUBuildLIB} aipubtrt)
 
 
 MACRO(SUBDIRLIST result curdir)
@@ -52,3 +52,10 @@ FOREACH(tool ${ALL_TOOLS})
         PUBLIC_HEADER DESTINATION include
         )
 ENDFOREACH()
+
+install(TARGETS ${aipubtep}
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        PUBLIC_HEADER DESTINATION include
+        )

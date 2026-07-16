@@ -28,6 +28,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,16 +66,16 @@ enum
 
 struct buf_desc_t
 {
-    uint32_t type;
+    uint8_t type;
     uint32_t index;
     size_t size;
     size_t alignment;
-    uint8_t data[0];
+    void *data;
 };
 
 struct buf_loc_t
 {
-    uint32_t type;
+    uint8_t type;
     uint32_t index;
     size_t offset;
 };
@@ -84,8 +85,7 @@ struct task_t
     int type;
     uint16_t invalid_offset;
     uint16_t id;
-    union
-    {
+    union {
         struct
         {
             uint32_t offset;
@@ -172,68 +172,59 @@ struct tensor_info_t
     std::vector<uint32_t> shape;
 };
 
+class CpsElf;
+using CpsElfPtr = std::shared_ptr<CpsElf>;
+using CpsElfRef = std::weak_ptr<CpsElf>;
 class CpsElf
 {
 public:
-    CpsElf() { elfio_.create(ELFCLASS64, ELFDATA2LSB); };
+    CpsElf() { elfio_.create(ELFCLASS64, ELFDATA2LSB); }
     ~CpsElf() = default;
 
-    bool load(const std::string &filename)
-    {
-        return elfio_.load(filename);
-    }
     bool load(std::istream &stream)
     {
-        return elfio_.load(stream);
+        bool ret = elfio_.load(stream);
+        if (ret)
+            load_buffer_tab();
+        return ret;
+    }
+    bool load(const std::string &filename)
+    {
+        std::ifstream in(filename);
+        return load(in);
     }
 
-    bool save(const std::string &filename)
-    {
-        return elfio_.save(filename);
-    }
     bool save(std::ostream &stream)
     {
+        save_buffer_tab();
         return elfio_.save(stream);
     }
-
-    const buf_desc_t *get_buffer(uint32_t type, uint32_t idx) const
+    bool save(const std::string &filename)
     {
-        std::string key = "type" + std::to_string(type) + "_idx" + std::to_string(idx);
-        auto sect = get_note_section(key);
-        if (sect.first != nullptr)
-        {
-            const buf_desc_t *desc = (const buf_desc_t *)sect.first;
-            if (desc->size + sizeof(buf_desc_t) == sect.second || sizeof(buf_desc_t) == sect.second)
-                return desc;
-        }
-        return nullptr;
+        std::ofstream out(filename);
+        return save(out);
     }
-    void set_buffer(uint32_t type, uint32_t idx, size_t size,
+
+    const buf_desc_t *get_buffer(uint8_t type, uint32_t idx) const
+    {
+        uint32_t key = ((uint32_t)type << 24) | (idx & 0xffffff);
+        auto it = buffers_.find(key);
+        return it != buffers_.end() ? &(it->second) : nullptr;
+    }
+    void set_buffer(uint8_t type, uint32_t idx, size_t size,
                     size_t alignment = 1, const void *data = nullptr)
     {
-        auto real_size = sizeof(buf_desc_t);
-        buf_desc_t *desc = nullptr;
-        if (data == nullptr)
-        {
-            desc = (buf_desc_t *)malloc(real_size);
-        }
-        else
-        {
-            real_size += size;
-            desc = (buf_desc_t *)malloc(real_size);
-            memcpy(desc->data, data, size);
-        }
+        buf_desc_t desc;
+        desc.type = type;
+        desc.index = idx;
+        desc.size = size;
+        desc.alignment = alignment;
+        desc.data = (void *)data;
 
-        desc->type = type;
-        desc->index = idx;
-        desc->size = size;
-        desc->alignment = alignment;
+        uint32_t key = ((uint32_t)type << 24) | (idx & 0xffffff);
+        buffers_[key] = desc;
 
-        ELFIO::note_section_accessor nsa(elfio_, force_get_note());
-        std::string key = "type" + std::to_string(type) + "_idx" + std::to_string(idx);
-        nsa.add_note(0, key, desc, real_size);
-
-        free(desc);
+        buffer_total_size_ += (data ? size : 0);
     }
 
     std::map<uint32_t, buf_loc_t> get_tensor_offsets() const
@@ -503,10 +494,267 @@ private:
         nsa.add_note(0, name, buf.get(), tab.size() * sizeof(tab_elem_t));
     }
 
+    void save_buffer_tab()
+    {
+        auto data = std::make_unique<uint8_t[]>(buffer_total_size_);
+        uint64_t offset = 0;
+        for (auto it = buffers_.begin(); it != buffers_.end(); ++it)
+        {
+            auto &desc = it->second;
+            if (desc.data == nullptr)
+                continue;
+
+            memcpy(data.get() + offset, desc.data, desc.size);
+            desc.data = (void *)((offset << 1) | 1);
+            offset += desc.size;
+        }
+
+        ELFIO::note_section_accessor nsa(elfio_, force_get_note());
+        nsa.add_note(0, "buffer_data", data.get(), buffer_total_size_);
+
+        set_tab("buffer_tab", buffers_);
+
+        buffers_.clear();
+        buffer_total_size_ = 0;
+    }
+    void load_buffer_tab()
+    {
+        auto duo = get_note_section("buffer_data");
+        uint8_t *data = (uint8_t *)duo.first;
+        buffer_total_size_ = duo.second;
+        auto tab = get_tab<uint32_t, buf_desc_t>("buffer_tab");
+        for (auto it = tab.begin(); it != tab.end(); ++it)
+        {
+            auto &desc = it->second;
+            uint64_t offset = (uint64_t)desc.data;
+            if (!(offset & 1))
+                continue;
+            offset >>= 1;
+            desc.data = data + offset;
+        }
+        buffers_ = std::move(tab);
+    }
+
     ELFIO::elfio elfio_;
+    std::map<uint32_t, buf_desc_t> buffers_;
+    uint64_t buffer_total_size_ = 0;
 };
 
-using CpsElfPtr = std::shared_ptr<CpsElf>;
+class HybridELF;
+using HybridELFPtr = std::shared_ptr<HybridELF>;
+using HybridELFRef = std::weak_ptr<HybridELF>;
+class HybridELF
+{
+public:
+    struct Section
+    {
+        operator bool() const
+        {
+            return data && size;
+        }
+
+        void *data = nullptr;
+        size_t size = 0;
+    };
+
+    struct SectionBuf : public std::streambuf
+    {
+        SectionBuf(const void *data = nullptr, size_t size = 0)
+        {
+            char *p = (char *)data;
+            setg(p, p, p + size);
+        }
+        SectionBuf(const Section &sec) : SectionBuf(sec.data, sec.size) {}
+
+        std::streambuf::pos_type seekoff(std::streambuf::off_type off,
+                                         std::ios_base::seekdir way,
+                                         std::ios_base::openmode which)
+        {
+            if (!(which & std::ios::in) || gptr() == nullptr)
+                return std::streambuf::pos_type(std::streambuf::off_type(-1));
+
+            std::streambuf::off_type newoff = 0;
+            char *seekhigh = egptr();
+            switch (way)
+            {
+            case std::ios::beg:
+                newoff = 0;
+                break;
+            case std::ios::cur:
+                newoff = gptr() - eback();
+                break;
+            case std::ios::end:
+                newoff = seekhigh - eback();
+                break;
+            default:
+                break;
+            }
+            newoff += off;
+            if (newoff < 0 || newoff > seekhigh - eback())
+                return std::streambuf::pos_type(std::streambuf::off_type(-1));
+
+            char *newpos = eback() + newoff;
+            setg(eback(), newpos, std::max(newpos, egptr()));
+            return std::streambuf::pos_type(newoff);
+        }
+
+        std::streambuf::pos_type seekpos(std::streambuf::pos_type sp,
+                                         std::ios_base::openmode which)
+        {
+            if (!(which & std::ios::in) || gptr() == nullptr)
+                return std::streambuf::pos_type(std::streambuf::off_type(-1));
+
+            if (sp < 0 || sp > egptr() - eback())
+                return std::streambuf::pos_type(off_type(-1));
+
+            char *newpos = eback() + sp;
+
+            setg(eback(), newpos, std::max(newpos, egptr()));
+
+            return sp;
+        }
+    };
+
+    HybridELF() { m_elfio.create(ELFCLASS64, ELFDATA2LSB); }
+    ~HybridELF() = default;
+
+    bool load(std::istream &stream)
+    {
+        return m_elfio.load(stream);
+    }
+    bool load(const std::string &filename)
+    {
+        std::ifstream ifs(filename);
+        return load(ifs);
+    }
+
+    bool save(std::ostream &stream)
+    {
+        save_cpself();
+        return m_elfio.save(stream);
+    }
+    bool save(const std::string &filename)
+    {
+        std::ofstream ofs(filename);
+        return save(ofs);
+    }
+
+    void set_cpself(CpsElfPtr elf)
+    {
+        m_cpself = elf;
+    }
+    CpsElfPtr get_cpself()
+    {
+        if (!m_cpself)
+        {
+            load_cpself();
+        }
+        return m_cpself;
+    }
+    Section get_cpself_note()
+    {
+        return get_note("cpself");
+    }
+    void remove_cpself_note()
+    {
+        remove_note("cpself");
+    }
+
+    void set_note(const std::string &note,
+                  const std::string &note_name)
+    {
+        set_note(note, note_name, 0);
+    }
+    Section get_note(const std::string &note_name)
+    {
+        ELFIO::Elf_Word idx;
+        return get_note(note_name, 0, idx);
+    }
+    void remove_note(const std::string &note_name)
+    {
+        remove_note(note_name, 0);
+    }
+
+private:
+    void load_cpself()
+    {
+        auto note = get_note("cpself");
+        if (note)
+        {
+            SectionBuf buf(note);
+            std::istream stream(&buf);
+            m_cpself = std::make_shared<CpsElf>();
+            m_cpself->load(stream);
+        }
+    }
+    void save_cpself()
+    {
+        remove_note("cpself");
+        if (m_cpself)
+        {
+            std::stringstream oss;
+            m_cpself->save(oss);
+            set_note(oss.str(), "cpself");
+        }
+    }
+
+    void set_note_section()
+    {
+        if (!m_note)
+        {
+            m_note = m_elfio.sections[".note.zhouyi"];
+            if (!m_note)
+            {
+                m_note = m_elfio.sections.add(".note.zhouyi");
+                m_note->set_type(SHT_NOTE);
+            }
+        }
+    }
+    void set_note(const std::string &note,
+                  const std::string &note_name,
+                  size_t note_type)
+    {
+        set_note_section();
+        ELFIO::note_section_accessor nsa(m_elfio, m_note);
+        nsa.add_note(note_type, note_name, note.c_str(), note.size());
+    }
+    Section get_note(const std::string &note_name,
+                     size_t note_type,
+                     ELFIO::Elf_Word &idx)
+    {
+        set_note_section();
+        ELFIO::const_note_section_accessor nsa(m_elfio, m_note);
+        auto num = nsa.get_notes_num();
+        for (ELFIO::Elf_Word i = 0; i < num; ++i)
+        {
+            std::string name;
+            void *desc = nullptr;
+            ELFIO::Elf_Word type = 0;
+            ELFIO::Elf_Word size = 0;
+            nsa.get_note(i, type, name, desc, size);
+            if (note_name == name && note_type == type)
+            {
+                idx = i;
+                return {desc, size};
+            }
+        }
+        return Section();
+    }
+    void remove_note(const std::string &note_name,
+                     size_t note_type)
+    {
+        ELFIO::Elf_Word idx;
+        if (get_note(note_name, note_type, idx))
+        {
+            ELFIO::note_section_accessor nsa(m_elfio, m_note);
+            nsa.remove_note(idx);
+        }
+    }
+
+    ELFIO::elfio m_elfio;
+    ELFIO::section *m_note = nullptr;
+    CpsElfPtr m_cpself;
+};
 
 } // namespace aipubt
 

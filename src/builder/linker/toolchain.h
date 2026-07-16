@@ -34,4 +34,6 @@ int aipuas(const std::string &s, const std::string &obj);
 int aipuld(const std::vector<std::string> &objs, const std::string &out);
 int aipuocc(const std::string &c_file, const std::string &out);
 int cpsld(const std::vector<std::string> &objs, const std::string &out);
+int cpscc(const std::string &c_file, const std::string &out);
+int cpshostcc(const std::string &c_file, const std::string &out);
 } //namespace aipubt

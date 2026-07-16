@@ -935,6 +935,13 @@ GraphPtr aipurun(GraphPtr g,
     }
     handle_dynamic_shape_config(g);
 
+    std::vector<int> dump_shape_dims;
+    std::vector<std::vector<int>> input_shapes;
+    if (BuilderConfig::exist(Constants::input_shape))
+    {
+        input_shapes = parse_input_shape(g, Constants::input_shape);
+    }
+
     GraphPtr optimized_g;
     if (aipubt::get_target()->isainfo().type >= aipubt::ISA_ZYv7)
     {
@@ -953,15 +960,15 @@ GraphPtr aipurun(GraphPtr g,
         builder->build();
         optimized_g = builder->get_graph();
 
-        auto elf = builder->get_elf();
-        std::stringstream ss;
-        elf->save(ss);
-
         if (GCompilerLogger::get_error_count() > error_cnt)
         {
             INFO() << "There are some errors in compiling time, Simulator will not run.";
             return nullptr;
         }
+
+        auto elf = builder->get_elf();
+        std::stringstream ss;
+        elf->save(ss);
 
         aipubt::rt::Launcher launcher;
         auto str = ss.str();
@@ -975,11 +982,18 @@ GraphPtr aipurun(GraphPtr g,
         auto inputs = launcher.get_inputs();
         for (size_t i = 0; i < inputs.size(); ++i)
         {
+            auto t = input_tensors[i];
+            if (input_shapes.size())
+            {
+                t = std::make_shared<Tensor>(*input_tensors[i]);
+                auto shape = get_base_shape(t->shape());
+                t->shape() = TensorShape(input_shapes[i], shape.layout());
+            }
             auto &input = inputs[i];
-            input.data = input_tensors[i]->data<char>();
-            input.length = input_tensors[i]->mem_size();
-            input.name = input_tensors[i]->name();
-            input.shape = input_tensors[i]->shape();
+            input.data = t->data<char>();
+            input.length = t->mem_size();
+            input.name = t->name();
+            input.shape = t->shape();
         }
         launcher.set_inputs(inputs);
 
@@ -990,7 +1004,6 @@ GraphPtr aipurun(GraphPtr g,
 
         if (!arg_map.count("skip_simulator"))
         {
-
             INFO() << "run with btrt:";
             uint64_t t0, t1;
             t0 = utils::get_time_in_us();
@@ -1082,10 +1095,8 @@ GraphPtr aipurun(GraphPtr g,
             dumper = new DumperX1(BuilderConfig::get_instance(), builder->get_aipubin(), builder->get_marked_tensors());
         }
 
-        std::vector<std::vector<int>> input_shapes;
-        if (BuilderConfig::exist(Constants::input_shape))
+        if (input_shapes.size())
         {
-            input_shapes = parse_input_shape(optimized_g, Constants::input_shape);
             for (uint32_t i = 0; i < input_tensors.size(); ++i)
             {
                 auto tensor = std::make_shared<Tensor>(*input_tensors[i]);
@@ -1099,11 +1110,11 @@ GraphPtr aipurun(GraphPtr g,
         if (BuilderConfig::exist(Constants::multi_batch))
         {
             auto batch = BuilderConfig::get<uint32_t>(Constants::multi_batch);
-            for (auto &input_t : input_tensors)
+            for (auto t : input_tensors)
             {
-                auto input_shape = input_t->shape();
+                auto input_shape = t->shape();
                 input_shape[0] = input_shape[0] * batch;
-                input_t->shape() = TensorShape(input_shape, input_t->shape().layout());
+                t->shape() = TensorShape(input_shape, t->shape().layout());
             }
         }
         auto ret_dump = dumper->gen_dumper_files(input_tensors, dump_prefix, output_file);
@@ -1116,8 +1127,6 @@ GraphPtr aipurun(GraphPtr g,
             INFO() << "There are some errors in dumper, Simulator would not run.";
             return optimized_g;
         }
-
-        std::vector<int> dump_shape_dims;
 
         // simulator
         if (ret_dump && !arg_map.count("skip_simulator"))
@@ -1280,7 +1289,12 @@ GraphPtr aipugb(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map)
         actions_after_build(optimized_g, arg_map);
 
         auto elf = builder->get_elf();
-        elf->save(cast_any<std::string>(arg_map["output"]));
+        auto bin_name = cast_any<std::string>(arg_map["output"]);
+        elf->save(bin_name);
+
+        std::ofstream ofile(bin_name + ".h");
+        ofile << builder->get_header();
+        ofile.close();
 
         delete builder;
     }

@@ -18,7 +18,7 @@
  * @Author: Neo Wang
  * @Date: 2020-08-21 15:57:42
  * @Last Modified by: Neo Wang
- * @Last Modified time: 2026-01-06 17:32:38
+ * @Last Modified time: 2026-07-15 16:17:03
  */
 #ifndef CORE_CONSTANS_H
 #define CORE_CONSTANS_H
@@ -41,6 +41,9 @@ namespace Constants
 
     constexpr const char *CPSLD = "CPSLD";
     constexpr const char *CPSCC = "CPSCC";
+    constexpr const char *CPS_PATH = "CPS_PATH";
+    constexpr const char *CPSHOSTCC = "CPSHOSTCC";
+    constexpr const char *CPSDEVKIT_PATH = "CPSDEVKIT_PATH";
 
     // switch keys/global config
     constexpr const char *random_init = "random-init";
@@ -195,6 +198,7 @@ namespace Constants
     constexpr const char *random_reg = "random_reg";
     constexpr const char *dumpspace = "dumpspace";
     constexpr const char *workspace = "workspace";
+    constexpr const char *localspace = "localspace";
     constexpr const char *parambase = "parambase";
     constexpr const char *param_bases = "param_bases";
     constexpr const char *stream_bases = "stream_bases";
@@ -224,6 +228,7 @@ namespace Constants
     constexpr const char *use_in_tensor = "use_in_tensor";
     constexpr const char *use_out_tensor = "use_out_tensor";
     constexpr const char *is_workspace_tensor = "is_workspace_tensor";
+    constexpr const char *numa = ".numa";
 
     constexpr const char *printf_fifo = "printf_fifo";
     constexpr const char *printf_fifo_size = "printf_fifo_size";

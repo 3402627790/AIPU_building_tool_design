@@ -33,10 +33,15 @@ class CodeGenerator
 {
 public:
     void set_kernel_lib(const std::map<std::string, std::string> &kernel_lib);
-    void code_gen(CpsElfPtr &elf);
+    void code_gen(HybridELFPtr elf);
+    const std::string get_cpshost_header() const;
 
 private:
+    void gen_host_code();
+    const std::string get_cpshost_code();
+
     std::map<std::string, std::string> m_kernel_lib;
+    std::stringstream m_host_code;
 };
 } // namespace aipubt
 #endif //!BUILDER_CODE_GENERATROR_H

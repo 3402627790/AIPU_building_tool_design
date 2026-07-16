@@ -32,30 +32,43 @@ inline size_t aligned(size_t s, size_t align = 256)
 
 namespace aipubt
 {
-static std::stringstream ds_code;
-const std::string get_ds_code()
+static std::stringstream ds_device_code;
+const std::string get_ds_device_code()
 {
-    auto code = ds_code.str();
-    auto arch = get_target()->isainfo().type;
-    if (code.size() && (arch == ISA_ZYv5 || arch == ISA_ZYv6))
+    auto code = ds_device_code.str();
+    if (code.size())
     {
         std::stringstream oss;
-        oss << "typedef unsigned int uint;\n"
-            << "void _aipubt_copy_data(uint, uint, uint);\n"
-            << "__attribute__((overloadable)) float ceil(float);\n"
-            << "__attribute__((overloadable)) float round(float);\n"
-            << "__attribute__((overloadable)) float rint(float);\n"
-            << "__attribute__((overloadable)) float log2(float);\n"
-            << "__attribute__((overloadable)) float sqrt(float);\n"
-            << "__attribute__((overloadable)) float rsqrt(float);\n"
-            << "__attribute__((overloadable)) float floor(float);\n"
-            << "__attribute__((overloadable)) uint max(uint, uint);\n"
-            << "__attribute__((overloadable)) uint min(uint, uint);\n"
-            << "__attribute__((overloadable)) float pow(float, float);\n"
-            << "__attribute__((overloadable)) uint mul_hi(uint, uint);\n";
+        oss << "typedef unsigned int uint;\n";
+        auto arch = get_target()->isainfo().type;
+        if (arch == ISA_ZYv5 || arch == ISA_ZYv6)
+        {
+            oss << "void _aipubt_copy_data(uint, uint, uint);\n"
+                << "__attribute__((overloadable)) float ceil(float);\n"
+                << "__attribute__((overloadable)) float round(float);\n"
+                << "__attribute__((overloadable)) float rint(float);\n"
+                << "__attribute__((overloadable)) float log2(float);\n"
+                << "__attribute__((overloadable)) float sqrt(float);\n"
+                << "__attribute__((overloadable)) float rsqrt(float);\n"
+                << "__attribute__((overloadable)) float floor(float);\n"
+                << "__attribute__((overloadable)) uint max(uint, uint);\n"
+                << "__attribute__((overloadable)) uint min(uint, uint);\n"
+                << "__attribute__((overloadable)) float pow(float, float);\n"
+                << "__attribute__((overloadable)) uint mul_hi(uint, uint);\n";
+        }
+        else if (arch == ISA_ZYv7)
+        {
+            oss << "typedef unsigned long long ulonglong;\n";
+        }
         return oss.str() + "\n" + code;
     }
     return code;
+}
+
+static std::stringstream ds_host_code;
+const std::string get_ds_host_code()
+{
+    return ds_host_code.str();
 }
 
 static void parse_params(GraphPtr graph,
@@ -494,7 +507,7 @@ void DSCodeGeneratorCL::max_batch_preprocess(NodePtr node,
 
 void DSCodeGeneratorCL::generate(std::map<int, DSCodePkg> &code_map)
 {
-    auto &oss = ds_code;
+    auto &oss = ds_device_code;
     oss.clear();
 
     std::set<std::string> kernel_names;
@@ -939,6 +952,25 @@ void DSCodeGeneratorCPS::parse(GraphPtr graph)
         }
     });
 
+    auto output_tensors = graph->get_output_tensors();
+    std::vector<ReadOnlyParam> dims;
+    for (auto t : output_tensors)
+    {
+        std::vector<Expr> shape = t->shape().symbol();
+        for (auto d : shape)
+        {
+            dims.push_back(d);
+        }
+    }
+
+    m_kernels.push_back(DSKernelDesc());
+    auto &kernel = m_kernels.back();
+    kernel.impl = std::make_shared<GopDSCodeImpl>();
+    kernel.type = DSKernelDesc::OUTPUT_SHAPE;
+    kernel.name = "eval_output_shape";
+
+    parse_params(graph, dims, DSParamDesc::PARAM, kernel);
+
     optimize();
 }
 
@@ -946,19 +978,26 @@ void DSCodeGeneratorCPS::generate(GraphPtr graph)
 {
     parse(graph);
 
-    auto &oss = ds_code;
-    oss.clear();
+    ds_device_code.clear();
+    ds_host_code.clear();
 
     std::set<std::string> kernel_names;
     for (auto &kernel : m_kernels)
     {
-        if (kernel.params.size())
+        if (kernel.type == DSKernelDesc::KERNEL)
         {
-            if (!kernel_names.count(kernel.name))
+            if (kernel.params.size())
             {
-                generate_kernel_code(oss, kernel);
-                kernel_names.insert(kernel.name);
+                if (!kernel_names.count(kernel.name))
+                {
+                    generate_kernel_code(ds_device_code, kernel);
+                    kernel_names.insert(kernel.name);
+                }
             }
+        }
+        else if (kernel.type == DSKernelDesc::OUTPUT_SHAPE)
+        {
+            generate_eval_code(ds_host_code, kernel);
         }
 
         auto impl = kernel.impl;
@@ -975,13 +1014,15 @@ void DSCodeGeneratorCPS::generate(GraphPtr graph)
         }
 
         auto impl = n->get_attr<std::shared_ptr<GopDSCodeImpl>>(Constants::plugin_impl);
+        auto infos = impl->kernel_infos();
         std::vector<PlaceholderPtr> param_bases;
         std::vector<PlaceholderPtr> stream_bases;
-        for (size_t i = 0; i < impl->kernel_names().size(); ++i)
+        for (size_t i = 0; i < infos.size(); ++i)
         {
             param_bases.push_back(std::make_shared<Placeholder>());
             stream_bases.push_back(std::make_shared<Placeholder>());
         }
+        n->set_attr(Constants::kernel_infos, infos);
         n->set_attr(Constants::param_bases, param_bases);
         n->set_attr(Constants::stream_bases, stream_bases);
     });
@@ -997,26 +1038,26 @@ void DSCodeGeneratorCPS::generate_kernel_code(std::stringstream &oss,
     auto gp = "gp";
     auto pp = "pp";
     auto sp = "sp";
-    auto tid = "tid";
-    oss << "__global__ void " << kernel.name << "("
-        << "uint *" << gp << ", uint *" << pp << ", uint *" << sp << ")\n{\n"
-        << tab << "uint " << tid << " = threadIdx.x;\n";
+    oss << "extern \"C\" __global__ void " << kernel.name << "("
+        << "uint *" << gp << ", uint *" << pp << ", uint *" << sp << ")\n{\n";
 
     auto data_aware = kernel.data_aware();
     if (!data_aware && BuilderConfig::exist(Constants::default_input_shape))
     {
-        oss << tab << "if (" << gp << "[4] != 0) {\n"
+        oss << tab << "if (" << gp << "[5] != 0) {\n"
             << tab2 << "return;\n"
             << tab << "}\n";
     }
 
-    oss << tab << "if (" << tid << " == 0) {\n";
+    auto tid = "tid";
+    oss << tab << "uint " << tid << " = threadIdx.x;\n"
+        << tab << "if (" << tid << " == 0) {\n";
     auto isp = "isp";
     auto osp = "osp";
-    oss << tab2 << "uint *" << isp << " = (uint *)((uint)" << gp << " + " << gp << "[0]);\n";
+    oss << tab2 << "uint *" << isp << " = (uint *)((char *)" << gp << " + " << gp << "[0]);\n";
     if (data_aware)
     {
-        oss << tab2 << "uint *" << osp << " = (uint *)((uint)" << gp << " + " << gp << "[2]);\n";
+        oss << tab2 << "uint *" << osp << " = (uint *)((char *)" << gp << " + " << gp << "[2]);\n";
     }
     auto wlinfo = "wlinfo";
     if (kernel.check_param_type({DSParamDesc::STREAM}))
@@ -1063,7 +1104,8 @@ void DSCodeGeneratorCPS::generate_kernel_code(std::stringstream &oss,
                     if (d.type == DSParamDesc::PARAM_LIST)
                     {
                         base = "val" + std::to_string(var_id++);
-                        oss << tab2 << "uint *" << base << " = (uint *)" << pp << "[" << d.index << "];\n";
+                        oss << tab2 << "uint *" << base << " = (uint *)(__attribute__((address_space(1))) uint *)"
+                            << "(*(ulonglong *)(" << pp << " + " << d.index << "));\n";
                     }
                     auto val = "val" + std::to_string(var_id++);
                     oss << tab2 << "uint *" << val << " = " << base << " + " << d.offset / 4 << ";\n";
@@ -1130,7 +1172,7 @@ void DSCodeGeneratorCPS::generate_kernel_code(std::stringstream &oss,
         generate_update_code(kernel.data_aware_params());
         if (BuilderConfig::exist(Constants::default_input_shape))
         {
-            oss << tab2 << "if (" << gp << "[4] != 0) {\n"
+            oss << tab2 << "if (" << gp << "[5] != 0) {\n"
                 << tab2 << tab << "goto " << skip_label << ";\n"
                 << tab2 << "}\n";
         }
@@ -1141,7 +1183,63 @@ void DSCodeGeneratorCPS::generate_kernel_code(std::stringstream &oss,
     {
         oss << skip_label << ":\n";
     }
-    oss << "__syncthreads();\n"
+    oss << tab << "__syncthreads();\n"
         << "}\n\n";
+}
+
+void DSCodeGeneratorCPS::generate_eval_code(std::stringstream &oss,
+                                            const DSKernelDesc &kernel)
+{
+    size_t var_id = 0;
+    auto tab = std::string(4, ' ');
+
+    auto gp = "gp";
+    oss << "void " << kernel.name << "("
+        << "uint *" << gp << ")\n{\n";
+
+    auto isp = "isp";
+    auto osp = "osp";
+    oss << tab << "uint *" << isp << " = (uint *)((char *)" << gp << " + " << gp << "[0]);\n"
+        << tab << "uint *" << osp << " = (uint *)((char *)" << gp << " + " << gp << "[2]);\n";
+
+    std::map<int, std::string> args;
+    std::map<ExprPtr, std::string> vars;
+    for (auto &p : kernel.params)
+    {
+        for (auto &arg : p.args)
+        {
+            if (args.count(arg.id))
+            {
+                continue;
+            }
+            std::string name;
+            auto idx = std::to_string(arg.offset / 4);
+            if (arg.type == DSParamDesc::GLOBAL)
+            {
+                name = "d" + idx;
+                oss << tab << "uint " << name << " = " << isp << "[" << idx << "];\n";
+            }
+            else
+            {
+                name = "r" + idx;
+                oss << tab << "uint " << name << " = " << osp << "[" << idx << "];\n";
+            }
+            args[arg.id] = name;
+        }
+        std::string res;
+        auto codes = expr_to_cl_code(p.expr, args, vars, res);
+        for (auto &c : codes)
+        {
+            oss << tab << c << "\n";
+        }
+        for (auto &d : p.dsts)
+        {
+            auto base = osp;
+            auto val = "val" + std::to_string(var_id++);
+            oss << tab << "uint *" << val << " = " << base << " + " << d.offset / 4 << ";\n"
+                << tab << "*" << val << " = " << res << ";\n";
+        }
+    }
+    oss << "}\n\n";
 }
 } // namespace aipubt

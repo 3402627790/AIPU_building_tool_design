@@ -58,13 +58,15 @@ public:
     ~MqBuilder() override;
     bool build() override;
     GraphPtr get_graph() override;
-    CpsElfPtr get_elf() override;
+    HybridELFPtr get_elf() override;
+    const std::string &get_header() const override;
 
     std::map<TensorPtr, uint32_t> get_tensor_index_map();
 
 private:
     GraphPtr m_graph;
-    CpsElfPtr m_elf;
+    HybridELFPtr m_elf;
+    std::string m_header;
     std::vector<BuildPhase> create_phases();
     bool phase_optimize();
     bool phase_schedule();

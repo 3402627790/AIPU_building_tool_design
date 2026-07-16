@@ -321,6 +321,122 @@ int cpsld(const std::vector<std::string> &objs, const std::string &out)
     return system(cmd.c_str());
 }
 
+static std::string get_cpscc()
+{
+    auto env = utils::get_env(Constants::CPSCC);
+    if (env.size())
+    {
+        return env;
+    }
+
+    auto path = utils::get_env("PATH");
+    auto dirs = utils::split_string(path, ':');
+    for (auto &d : dirs)
+    {
+        if (utils::file_exists(d + "/cpscc"))
+        {
+            return "cpscc";
+        }
+    }
+
+#if RELEASE_VERSION
+    WARN() << "Can NOT find cpscc in PATH. Please make sure you have added it to PATH.";
+    auto exe_path = "cpscc";
+#else
+    auto exe_path = "/project/ai/scratch01/compass-toolkit/compiler/latest/bin/cpscc";
+#endif
+    return exe_path;
+}
+
+static std::string get_cps_path()
+{
+    auto env = utils::get_env(Constants::CPS_PATH);
+    if (env.size())
+    {
+        return env;
+    }
+
+#if RELEASE_VERSION
+    WARN() << "Can NOT find CPS_PATH. Please make sure you have set it up.";
+    auto cps_path = "";
+#else
+    auto cps_path = "/project/ai/scratch01/compass-toolkit/toolkit/latest";
+#endif
+    return cps_path;
+}
+
+int cpscc(const std::string &c_file, const std::string &out)
+{
+    std::vector<std::string> args;
+    args.push_back(get_cpscc());
+    auto cps_path = get_cps_path();
+    if (cps_path.size())
+    {
+        args.push_back("--cps-path=" + cps_path);
+    }
+    args.push_back("-dc");
+    args.push_back("-O2");
+    args.push_back(c_file);
+    args.push_back("-o");
+    args.push_back(out);
+    auto cmd = utils::join_string(" ", args);
+    DEBUG() << "cpscc args:" << cmd;
+    return system(cmd.c_str());
+}
+
+static std::string get_hostcc()
+{
+    auto env = utils::get_env(Constants::CPSHOSTCC);
+    if (env.size())
+    {
+        return env;
+    }
+
+#if RELEASE_VERSION
+    WARN() << "Can NOT find CPSHOSTCC. Use g++ by default.";
+#endif
+    return "g++";
+}
+
+static std::string get_devkit_path()
+{
+    auto env = utils::get_env(Constants::CPSDEVKIT_PATH);
+    if (env.size())
+    {
+        return env;
+    }
+
+#if RELEASE_VERSION
+    WARN() << "Can NOT find CPSDEVKIT_PATH. Please make sure you have set it up.";
+    auto devkit_path = "";
+#else
+    auto devkit_path = "/project/ai/scratch01/AIPUBuilder";
+#endif
+    return devkit_path;
+}
+
+int cpshostcc(const std::string &c_file, const std::string &out)
+{
+    std::vector<std::string> args;
+    args.push_back(get_hostcc());
+    args.push_back("-fPIC");
+    args.push_back("-shared");
+    args.push_back("-O2");
+    args.push_back(c_file);
+    auto devkit_path = get_devkit_path();
+    if (devkit_path.size())
+    {
+        args.push_back("-I" + devkit_path + "/include");
+        args.push_back("-L" + devkit_path + "/lib");
+    }
+    args.push_back("-laipubtrt");
+    args.push_back("-o");
+    args.push_back(out);
+    auto cmd = utils::join_string(" ", args);
+    DEBUG() << "cpshostcc args:" << cmd;
+    return system(cmd.c_str());
+}
+
 class ToolChainHelper
 {
 public:

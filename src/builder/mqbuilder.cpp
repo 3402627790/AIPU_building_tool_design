@@ -57,7 +57,7 @@ BuildStage mq_ir_stage_from_string(const std::string &stage)
     if (stage == "gen_obj")
         return BuildStage::GEN_OBJ;
 
-    return BuildStage::OPTIMIZE;
+    return BuildStage::OPTIMIZE; // by default
 }
 
 std::string mq_ir_stage_to_string(BuildStage stage)
@@ -85,7 +85,9 @@ std::string mq_ir_stage_to_string(BuildStage stage)
 
 MqBuilder::MqBuilder(GraphPtr graph) : m_graph(graph)
 {
-    m_elf = std::make_shared<CpsElf>();
+    auto cpself = std::make_shared<CpsElf>();
+    m_elf = std::make_shared<HybridELF>();
+    m_elf->set_cpself(cpself);
 }
 
 GraphPtr MqBuilder::get_graph()
@@ -93,9 +95,14 @@ GraphPtr MqBuilder::get_graph()
     return m_graph;
 }
 
-CpsElfPtr MqBuilder::get_elf()
+HybridELFPtr MqBuilder::get_elf()
 {
     return m_elf;
+}
+
+const std::string &MqBuilder::get_header() const
+{
+    return m_header;
 }
 
 std::map<TensorPtr, uint32_t> MqBuilder::get_tensor_index_map()
@@ -295,6 +302,7 @@ bool MqBuilder::phase_code_gen()
     std::map<std::string, std::string> kernel_lib_names = m_graph->attrs()["kernel_lib_names"];
     code_gen.set_kernel_lib(kernel_lib_names);
     code_gen.code_gen(m_elf);
+    m_header = code_gen.get_cpshost_header();
 
     return true;
 }
@@ -304,7 +312,7 @@ bool MqBuilder::phase_assemble()
     //Assembler
     Assembler assembler;
     assembler.set_graph(m_graph);
-    assembler.set_elf(m_elf);
+    assembler.set_elf(m_elf->get_cpself());
     std::vector<std::vector<NodePtr>> levels = m_graph->attrs()["levels"];
     assembler.set_level(levels);
     assembler.assembly();
@@ -341,7 +349,7 @@ bool MqBuilder::phase_gen_obj()
     object_generator.set_graph(m_graph);
     std::vector<ConstTensorPtr> const_tensors = m_graph->attrs()["const_tensors"];
     object_generator.set_constant(const_tensors);
-    object_generator.gen(m_elf);
+    object_generator.gen(m_elf->get_cpself());
 
     return true;
 }
