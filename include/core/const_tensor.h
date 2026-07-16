@@ -131,6 +131,16 @@ public:
         return m_ptr != nullptr;
     }
 
+    bool operator==(const ConstTensorPtr &other) const
+    {
+        return m_ptr == other.m_ptr;
+    }
+
+    bool operator<(const ConstTensorPtr &other) const
+    {
+        return m_ptr.get() < other.get();
+    }
+
 protected:
     operator TensorPtr() const
     {
