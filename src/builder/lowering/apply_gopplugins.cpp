@@ -81,11 +81,6 @@ static const std::vector<GopPluginInfo *> &get_gopplugins()
 static std::vector<ImplInfo> plugin_match(GopPluginInfo *plugin, NodePtr n)
 {
     std::vector<ImplInfo> impl_info;
-    bool is_ds_plugin = plugin->plugin_type & GBPlugin_DS;
-    if (is_ds_plugin)
-    {
-        return impl_info;
-    }
 
     auto opt = plugin->init_handle();
     auto patterns = opt->patterns();

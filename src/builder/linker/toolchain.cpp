@@ -430,6 +430,7 @@ int cpshostcc(const std::string &c_file, const std::string &out)
         args.push_back("-L" + devkit_path + "/lib");
     }
     args.push_back("-laipubtrt");
+    args.push_back("-ldl");
     args.push_back("-o");
     args.push_back(out);
     auto cmd = utils::join_string(" ", args);

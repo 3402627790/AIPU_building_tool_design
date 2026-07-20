@@ -59,6 +59,7 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
     params.push_back(0);            // reserve1
     params.push_back(info.block.x); // blkdim.x
     params.push_back(info.grid.x);  // griddim.x
+    params.push_back(info.block.y); // blkdim.y
 
     std::vector<SurfacePtr> surfaces;
     for (auto &arg : info.args)
@@ -95,10 +96,10 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
         }
     }
 
-    params.push_back(info.block.y); // blkdim.y
     params.push_back(info.grid.y);  // griddim.y
     params.push_back(info.block.z); // blkdim.z
     params.push_back(info.grid.z);  // griddim.z
+    params.push_back(0);            // is_cooperative_group
     params.push_back(print);
     params.push_back(0);
     params.push_back(0); // padding
@@ -122,106 +123,76 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
     return params;
 }
 
-bool Assembler::set_graph(GraphPtr g)
-{
-    m_graph = g;
-    if (!g)
+    params.push_back(stack);
+    params.push_back(0);
+    params.push_back(0);            // reserve0
+    params.push_back(0);            // reserve1
+    params.push_back(info.block.x); // blkdim.x
+    params.push_back(info.grid.x);  // griddim.x
+    params.push_back(info.block.y); // blkdim.y
+
+    std::vector<SurfacePtr> surfaces;
+    for (auto &arg : info.args)
     {
-        return true;
-    }
-    return false;
-}
-
-void Assembler::set_level(const std::vector<std::vector<NodePtr>> &levels)
-{
-    m_levels = levels;
-}
-
-void Assembler::set_elf(const CpsElfPtr &elf)
-{
-    m_elf = elf;
-}
-
-uint32_t Assembler::get_tensor_index(const TensorPtr t)
-{
-    if (!m_tensor_index_map.count(t))
-    {
-        m_tensor_index_map[t] = m_tensor_index;
-        m_tensor_index++;
-    }
-    return m_tensor_index_map[t];
-}
-
-uint32_t Assembler::get_const_index(const ConstTensorPtr t)
-{
-    if (!m_const_index_map.count(t))
-    {
-        m_const_index_map[t] = m_tensor_index;
-        m_tensor_index++;
-    }
-    else
-    {
-        WARN() << "already have " << t->name();
-    }
-    return m_const_index_map[t];
-}
-
-uint32_t Assembler::get_task_id()
-{
-    m_task_id++;
-    return m_task_id;
-}
-
-void get_depend_nodes(NodePtr n, std::set<NodePtr> &nodes, const std::set<NodePtr> &empty_kernel)
-{
-    for (auto p : n->parents())
-    {
-        if (empty_kernel.count(p))
+        if (arg.tensor)
         {
-            get_depend_nodes(p, nodes, empty_kernel);
+            auto t = arg.tensor;
+            auto pt = std::dynamic_pointer_cast<ProxyTensor>(t);
+            if (pt)
+            {
+                t = pt->proxied_tensor(true);
+            }
+            params.push_back(t);
+            params.push_back(0);
+        }
+        else if (arg.const_tensor)
+        {
+            params.push_back(arg.const_tensor);
+            params.push_back(0);
+        }
+        else if (arg.surface)
+        {
+            surfaces.push_back(arg.surface);
+            params.push_back(get_surface_index(arg.surface));
+        }
+        else if (arg.param_list)
+        {
+            params.push_back(arg.param_list);
+            params.push_back(0);
         }
         else
         {
-            nodes.insert(p);
+            params.push_back(arg);
         }
     }
+
+    params.push_back(info.grid.y);  // griddim.y
+    params.push_back(info.block.z); // blkdim.z
+    params.push_back(info.grid.z);  // griddim.z
+    params.push_back(0);            // is_cooperative_group
+    params.push_back(print);
+    params.push_back(0);
+    params.push_back(0); // padding
+
+    auto align_size = aligned(params.size(), 64);
+    if (params.size() < align_size)
+    {
+        params.resize(align_size, 0);
+    }
+
+    for (auto surface : surfaces)
+    {
+        params.push_back(surface);
+        params.push_back(0);
+
+        auto surface_desc = surface->get_surf_desc();
+        const uint32_t *ptr = reinterpret_cast<const uint32_t *>(&surface_desc);
+        params.push_back(ptr[0]);
+        params.push_back(ptr[1]);
+    }
+    return params;
 }
 
-int get_mask(int set_stream_id, int wait_stream_id)
-{
-    int mask = 0;
-    mask |= 1 << (set_stream_id * 4 + wait_stream_id);
-    return mask;
-}
-
-int sync_set(int wait_stream_id, std::vector<task_t> &stream, int stream_id, int index)
-{
-    if (stream.empty())
-    {
-        ERROR();
-        return 0;
-    }
-    auto &task = stream[index];
-    if (task.type != TASK_TYPE_KERNEL)
-    {
-        ERROR();
-        return 0;
-    }
-    auto mask = get_mask(stream_id, wait_stream_id);
-    task.kernel.sync.set_mask |= mask;
-    return mask;
-}
-
-void sync_wait(std::vector<task_t> &stream, int index, int mask)
-{
-    if (stream.empty())
-    {
-        ERROR();
-        return;
-    }
-    auto &task = stream[index];
-    if (task.type != TASK_TYPE_KERNEL)
-    {
         ERROR();
     }
     task.kernel.sync.wait_mask |= mask;
@@ -267,8 +238,6 @@ void Assembler::setup_stream_sync(size_t first_kernel, NodePtr sgn, std::vector<
 
 void Assembler::assembly()
 {
-    TensorPtr param = std::make_shared<Tensor>("param", TensorShape({0}), Tensor::UINT8);
-    m_graph->global_tensors()["param"] = param;
     TensorPtr stream0 = std::make_shared<Tensor>("stream0", TensorShape({0}), Tensor::UINT8);
     m_graph->global_tensors()["stream0"] = stream0;
     TensorPtr stream1 = std::make_shared<Tensor>("stream1", TensorShape({0}), Tensor::UINT8);

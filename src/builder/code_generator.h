@@ -37,7 +37,6 @@ public:
     const std::string get_cpshost_header() const;
 
 private:
-    void gen_host_code();
     const std::string get_cpshost_code();
 
     std::map<std::string, std::string> m_kernel_lib;

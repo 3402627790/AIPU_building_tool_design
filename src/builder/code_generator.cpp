@@ -40,6 +40,27 @@ void CodeGenerator::set_kernel_lib(const std::map<std::string, std::string> &ker
 
 void CodeGenerator::code_gen(HybridELFPtr elf)
 {
+    LinkerCps linker;
+    auto workdir = linker.workdir();
+
+    m_host_code.clear();
+    // TODO: gen host code and link host lib
+
+    auto host_code = get_cpshost_code();
+    if (host_code.size())
+    {
+        auto c_file = workdir + "/" + "cpshost.cpp";
+        auto o_file = workdir + "/" + "cpshost.o";
+        std::ofstream objfile(c_file);
+        objfile << host_code;
+        objfile.close();
+        if (cpshostcc(c_file, o_file) != 0)
+        {
+            FATAL() << "error occurred while compiling the host code!";
+        }
+        elf->load(o_file);
+    }
+
     std::set<std::string> libs;
 
     for (auto &k : m_kernel_lib)
@@ -90,30 +111,10 @@ void CodeGenerator::code_gen(HybridELFPtr elf)
     }
 
     std::vector<std::string> objs(libs.begin(), libs.end());
-    LinkerCps linker;
-
-    gen_host_code();
-
-    auto host_code = get_cpshost_code();
-    if (host_code.size())
-    {
-        auto workdir = linker.workdir();
-        auto c_file = workdir + "/" + "cpshost.cpp";
-        auto o_file = workdir + "/" + "cpshost.o";
-        std::ofstream objfile(c_file);
-        objfile << host_code;
-        objfile.close();
-        if (cpshostcc(c_file, o_file) != 0)
-        {
-            FATAL() << "error occurred while compiling the host code!";
-        }
-        elf->load(o_file);
-    }
 
     auto ds_code = get_ds_device_code();
     if (ds_code.size())
     {
-        auto workdir = linker.workdir();
         auto c_file = workdir + "/" + "ds_impl.cps";
         auto o_file = workdir + "/" + "ds_impl.o";
         std::ofstream objfile(c_file);
@@ -133,11 +134,6 @@ void CodeGenerator::code_gen(HybridELFPtr elf)
     cpself->load(oss.str());
 }
 
-void CodeGenerator::gen_host_code()
-{
-    m_host_code.clear();
-}
-
 const std::string CodeGenerator::get_cpshost_header() const
 {
     return R"(
@@ -146,9 +142,7 @@ const std::string CodeGenerator::get_cpshost_header() const
 
 extern "C" {
 
-aipubt::rt::Launcher *createLauncher(const char *file_path);
-
-void destroyLauncher(aipubt::rt::Launcher **launcher);
+aipubt::rt::Launcher *createLauncher();
 
 }
 )";
@@ -200,26 +194,30 @@ public:
 
 } // namespace aipubt::rt
 
+#include <dlfcn.h>
+#include <stdio.h>
+
 extern "C" {
 
-aipubt::rt::Launcher *createLauncher(const char *file_path)
+aipubt::rt::Launcher *createLauncher()
 {
-    auto launcher = new aipubt::rt::HybridLauncher();
-    launcher->load_from_file(file_path);
-    return launcher;
-}
-
-void destroyLauncher(aipubt::rt::Launcher **launcher)
-{
-    if (launcher)
+    Dl_info info;
+    if (dladdr((void *)createLauncher, &info) == 0)
     {
-        auto p = *launcher;
-        if (p)
-        {
-            delete p;
-        }
-        *launcher = nullptr;
+        return NULL;
     }
+    if (!info.dli_fname)
+    {
+        return NULL;
+    }
+    // printf("Library name: %s\n", info.dli_fname);
+    auto launcher = new aipubt::rt::HybridLauncher();
+    if (launcher->load_from_file(info.dli_fname) != 0)
+    {
+        delete launcher;
+        return NULL;
+    }
+    return launcher;
 }
 
 }

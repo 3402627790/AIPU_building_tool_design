@@ -131,6 +131,8 @@ bool MqBuilder::build()
     m_graph->global_tensors()["stack"] = sp;
     TensorPtr print = std::make_shared<Tensor>("print", TensorShape({8192}), Tensor::UINT8);
     m_graph->global_tensors()["print"] = print;
+    TensorPtr param = std::make_shared<Tensor>("param", TensorShape({0}), Tensor::UINT8);
+    m_graph->global_tensors()["param"] = param;
 
     auto phases = create_phases();
     BuildStage save_stage = mq_ir_stage_from_string(BuilderConfig::get<std::string>("mq_ir_stage"));
