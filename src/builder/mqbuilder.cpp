@@ -161,6 +161,17 @@ bool MqBuilder::build()
                     ERROR() << "mq_load_ir: failed to load cached MQ IR attributes from " << mq_load_ir;
                     return false;
                 }
+                if (save_stage == BuildStage::CODE_GEN)
+                {
+                    m_elf = load_mq_ir_cache_elf(mq_load_ir, ir_stage_name);
+                    if (!m_elf)
+                    {
+                        ERROR() << "mq_load_ir: failed to load cached HybridELF from " << mq_load_ir;
+                        return false;
+                    }
+                    CodeGenerator code_gen;
+                    m_header = code_gen.get_cpshost_header();
+                }
             }
         }
 
@@ -175,6 +186,11 @@ bool MqBuilder::build()
         if (!mq_save_ir.empty() && phase.stage == save_stage)
         {
             save_mq_ir_cache(m_graph, mq_save_ir, ir_stage_name);
+            if (phase.stage == BuildStage::CODE_GEN &&
+                !save_mq_ir_cache_elf(m_elf, mq_save_ir, ir_stage_name))
+            {
+                return false;
+            }
             break;
         }
     }

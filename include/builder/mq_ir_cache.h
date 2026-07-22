@@ -19,18 +19,26 @@
 
 #include "core/graph.h"
 
+#include <memory>
 #include <string>
 
 namespace aipubt
 {
 
+class HybridELF;
+
 GraphPtr load_mq_ir_cache(const std::string &dir, const std::string &stage = "");
 bool load_mq_ir_cache_attributes(GraphPtr graph,
                                  const std::string &dir,
                                  const std::string &stage = "");
+std::shared_ptr<HybridELF> load_mq_ir_cache_elf(const std::string &dir,
+                                                const std::string &stage = "");
 void save_mq_ir_cache(GraphPtr graph,
                       const std::string &dir,
                       const std::string &stage = "");
+bool save_mq_ir_cache_elf(const std::shared_ptr<HybridELF> &elf,
+                          const std::string &dir,
+                          const std::string &stage = "");
 
 } // namespace aipubt
 

@@ -17,6 +17,7 @@
 
 #include "builder/mq_ir_cache.h"
 
+#include "builder/cps_elf.h"
 #include "builder/gop_plugin.h"
 #include "builder/lowering/lowering.h"
 #include "builder/readonly_param.h"
@@ -2811,6 +2812,11 @@ inline std::string mq_ir_cache_payload_bin_name(const std::string &stage)
     return mq_ir_cache_stage_label(stage) + ".payload.bin";
 }
 
+inline std::string mq_ir_cache_elf_name(const std::string &stage)
+{
+    return mq_ir_cache_stage_label(stage) + ".elf";
+}
+
 inline std::string mq_ir_cache_def_path(const std::string &dir, const std::string &stage)
 {
     return dir + "/" + mq_ir_cache_def_name(stage);
@@ -2829,6 +2835,11 @@ inline std::string mq_ir_cache_attrs_path(const std::string &dir, const std::str
 inline std::string mq_ir_cache_payload_bin_path(const std::string &dir, const std::string &stage)
 {
     return dir + "/" + mq_ir_cache_payload_bin_name(stage);
+}
+
+inline std::string mq_ir_cache_elf_path(const std::string &dir, const std::string &stage)
+{
+    return dir + "/" + mq_ir_cache_elf_name(stage);
 }
 
 } // namespace
@@ -2882,6 +2893,39 @@ bool load_mq_ir_cache_attributes(GraphPtr graph, const std::string &dir, const s
     return loaded;
 }
 
+std::shared_ptr<HybridELF> load_mq_ir_cache_elf(const std::string &dir, const std::string &stage)
+{
+    auto elf_path = mq_ir_cache_elf_path(dir, stage);
+    if (!utils::file_exists(elf_path))
+    {
+        ERROR() << "mq_load_ir: cached HybridELF not found: " << elf_path;
+        return nullptr;
+    }
+
+    std::ifstream ifs(elf_path, std::ios::binary);
+    if (!ifs.is_open())
+    {
+        ERROR() << "mq_load_ir: failed to open cached HybridELF: " << elf_path;
+        return nullptr;
+    }
+
+    auto elf = std::make_shared<HybridELF>();
+    if (!elf->load(ifs))
+    {
+        ERROR() << "mq_load_ir: failed to load cached HybridELF: " << elf_path;
+        return nullptr;
+    }
+
+    if (!elf->get_cpself())
+    {
+        ERROR() << "mq_load_ir: cached HybridELF has no cpself note: " << elf_path;
+        return nullptr;
+    }
+
+    INFO() << "mq_load_ir: loaded cached HybridELF from " << elf_path;
+    return elf;
+}
+
 // Serialize the current graph into `dir`
 void save_mq_ir_cache(GraphPtr graph, const std::string &dir, const std::string &stage)
 {
@@ -2910,6 +2954,41 @@ void save_mq_ir_cache(GraphPtr graph, const std::string &dir, const std::string 
     {
         WARN() << "mq_save_ir: failed to save attributes file";
     }
+}
+
+bool save_mq_ir_cache_elf(const std::shared_ptr<HybridELF> &elf,
+                          const std::string &dir,
+                          const std::string &stage)
+{
+    if (!elf)
+    {
+        ERROR() << "mq_save_ir: cannot save a null HybridELF";
+        return false;
+    }
+
+    if (!utils::path_exists(dir) && !utils::mkdir(dir))
+    {
+        ERROR() << "mq_save_ir: cannot create cache directory " << dir;
+        return false;
+    }
+
+    auto abs_dir = utils::get_abspath(dir);
+    auto elf_path = mq_ir_cache_elf_path(abs_dir, stage);
+    std::ofstream ofs(elf_path, std::ios::binary);
+    if (!ofs.is_open())
+    {
+        ERROR() << "mq_save_ir: failed to open HybridELF cache file: " << elf_path;
+        return false;
+    }
+
+    if (!elf->save(ofs))
+    {
+        ERROR() << "mq_save_ir: failed to save HybridELF to " << elf_path;
+        return false;
+    }
+
+    INFO() << "mq_save_ir: saved HybridELF to " << elf_path;
+    return true;
 }
 
 } // namespace aipubt
