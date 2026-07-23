@@ -73,7 +73,7 @@ Sets `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH` for `3rdparty/llvm_mlir_sdk/`.
 | `src/mlir/` | AIPU MLIR dialect |
 | `src/transform/` | Graph optimization passes |
 | `src/engine/` | Execution engine |
-| `src/gsim/` | Graph simulator |
+| `src/gsim/` | Graph simplify |
 | `test/` | Tests (flat `testcase` binary) |
 | `tools/` | CLI tools (aipugb, aipurun, aipudumper) |
 | `plugin/` | User-facing plugins |
