@@ -422,7 +422,6 @@ struct BinSection
 
 struct RemapEntry
 {
-
     /*
     member	type	size	description
 type	uInt32	4	Type of a section where this node stores in

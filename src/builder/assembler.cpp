@@ -123,93 +123,221 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
     return params;
 }
 
-    params.push_back(stack);
-    params.push_back(0);
-    params.push_back(0);            // reserve0
-    params.push_back(0);            // reserve1
-    params.push_back(info.block.x); // blkdim.x
-    params.push_back(info.grid.x);  // griddim.x
-    params.push_back(info.block.y); // blkdim.y
-
-    std::vector<SurfacePtr> surfaces;
-    for (auto &arg : info.args)
+bool Assembler::set_graph(GraphPtr g)
+{
+    m_graph = g;
+    if (!g)
     {
-        if (arg.tensor)
+        return true;
+    }
+    return false;
+}
+
+void Assembler::set_level(const std::vector<std::vector<NodePtr>> &levels)
+{
+    m_levels = levels;
+}
+
+void Assembler::set_elf(const CpsElfPtr &elf)
+{
+    m_elf = elf;
+}
+
+uint32_t Assembler::get_tensor_index(const TensorPtr t)
+{
+    if (!m_tensor_index_map.count(t))
+    {
+        m_tensor_index_map[t] = m_tensor_index;
+        m_tensor_index++;
+    }
+    return m_tensor_index_map[t];
+}
+
+uint32_t Assembler::get_const_index(const ConstTensorPtr t)
+{
+    if (!m_const_index_map.count(t))
+    {
+        m_const_index_map[t] = m_tensor_index;
+        m_tensor_index++;
+    }
+    else
+    {
+        WARN() << "already have " << t->name();
+    }
+    return m_const_index_map[t];
+}
+
+uint32_t Assembler::get_task_id()
+{
+    m_task_id++;
+    return m_task_id;
+}
+
+void get_depend_nodes(NodePtr n, std::set<NodePtr> &nodes, const std::set<NodePtr> &empty_kernel)
+{
+    for (auto p : n->parents())
+    {
+        if (empty_kernel.count(p))
         {
-            auto t = arg.tensor;
-            auto pt = std::dynamic_pointer_cast<ProxyTensor>(t);
-            if (pt)
-            {
-                t = pt->proxied_tensor(true);
-            }
-            params.push_back(t);
-            params.push_back(0);
-        }
-        else if (arg.const_tensor)
-        {
-            params.push_back(arg.const_tensor);
-            params.push_back(0);
-        }
-        else if (arg.surface)
-        {
-            surfaces.push_back(arg.surface);
-            params.push_back(get_surface_index(arg.surface));
-        }
-        else if (arg.param_list)
-        {
-            params.push_back(arg.param_list);
-            params.push_back(0);
+            get_depend_nodes(p, nodes, empty_kernel);
         }
         else
         {
-            params.push_back(arg);
+            nodes.insert(p);
+        }
+    }
+}
+
+int get_mask(int set_stream_id, int wait_stream_id)
+{
+    int mask = 0;
+    mask |= 1 << (set_stream_id * 4 + wait_stream_id);
+    return mask;
+}
+
+int sync_set(int wait_stream_id, std::vector<task_t> &stream, int stream_id, int index)
+{
+    if (stream.empty())
+    {
+        ERROR();
+        return 0;
+    }
+    auto &task = stream[index];
+    auto mask = get_mask(stream_id, wait_stream_id);
+    if (task.type == TASK_TYPE_KERNEL)
+    {
+        task.kernel.sync.set_mask |= mask;
+    }
+    else if (task.type == TASK_TYPE_DMA)
+    {
+        task.dma.sync.set_mask |= mask;
+    }
+    else
+    {
+        ERROR();
+        mask = 0;
+    }
+    return mask;
+}
+
+void sync_wait(std::vector<task_t> &stream, int index, int mask)
+{
+    if (stream.empty())
+    {
+        ERROR();
+        return;
+    }
+    auto &task = stream[index];
+    if (task.type == TASK_TYPE_KERNEL)
+    {
+        task.kernel.sync.wait_mask |= mask;
+    }
+    else if (task.type == TASK_TYPE_DMA)
+    {
+        task.dma.sync.wait_mask |= mask;
+    }
+    else
+    {
+        ERROR();
+    }
+}
+
+void Assembler::setup_stream_offset(size_t first_kernel, NodePtr sgn, std::vector<task_t> &stream, size_t stream_id)
+{
+    auto find_stream_index = [this](NodePtr n, const std::vector<task_t> &stream) -> int {
+        for (size_t i = 0; i < stream.size(); ++i)
+        {
+            auto task = stream.at(i);
+            if (m_task_node_map[task.id] == n)
+            {
+                return i;
+            }
+        }
+        return -1;
+    };
+    auto node = m_task_node_map[stream[first_kernel].id];
+    if (node->attrs().count("invld_src")) //first packet need invalidate
+    {
+
+        auto src_node = node->get_attr<NodeRef>("invld_src").lock();
+        if (!src_node->attrs().count(Constants::stream_id))
+        {
+            ERROR() << src_node << " has no stream";
+        }
+        auto src_stream_id = src_node->get_attr<size_t>(Constants::stream_id);
+        if (src_stream_id != stream_id)
+        {
+            task_t empty_task;
+            empty_task.id = get_task_id();
+            empty_task.type = TASK_TYPE_DMA;
+            empty_task.invalid_offset = 0;
+            empty_task.dma.src_addr = 0;
+            empty_task.dma.size = 0;
+            empty_task.dma.mode = 0;
+            empty_task.dma.evict_priority = 0;
+            empty_task.dma.osd_ctrl = 0;
+            empty_task.dma.sync.set_mask = 0;
+            empty_task.dma.sync.wait_mask = 0;
+            stream.insert(stream.begin() + first_kernel, empty_task);
+            m_task_kernel_map[empty_task.id] = "empty";
+            m_task_node_map[empty_task.id] = node->parents()[0]; //subgraph_input node
+            if (node->parents()[0]->type() != OpType_SubGraphInput)
+            {
+                ERROR();
+            }
+            else
+            {
+                int level = node->get_attr_deep(Constants::schedule_level);
+                int gid = node->get_attr_deep<int>(Constants::schedule_gid);
+                node->parents()[0]->set_attr(Constants::schedule_level, level);
+                node->parents()[0]->set_attr(Constants::schedule_gid, gid);
+            }
         }
     }
 
-    params.push_back(info.grid.y);  // griddim.y
-    params.push_back(info.block.z); // blkdim.z
-    params.push_back(info.grid.z);  // griddim.z
-    params.push_back(0);            // is_cooperative_group
-    params.push_back(print);
-    params.push_back(0);
-    params.push_back(0); // padding
-
-    auto align_size = aligned(params.size(), 64);
-    if (params.size() < align_size)
+    for (size_t i = first_kernel; i < stream.size(); ++i)
     {
-        params.resize(align_size, 0);
+        auto task = stream[i];
+        auto node = m_task_node_map[task.id];
+        if (node->attrs().count("invld_src"))
+        {
+            auto src_node = node->get_attr<NodeRef>("invld_src").lock();
+            auto src_stream_id = src_node->get_attr<size_t>(Constants::stream_id);
+            if (src_stream_id != stream_id)
+            {
+                auto &first_task = stream[first_kernel];
+                if (first_task.invalid_offset > 0)
+                {
+                    continue;
+                }
+                first_task.invalid_offset = i - first_kernel;
+            }
+            else
+            {
+                auto index = find_stream_index(src_node, stream);
+                if (index < 0)
+                {
+                    ERROR() << "cannot find src node in the stream";
+                }
+                auto &src_task = stream[index];
+                if ((int)i <= index)
+                {
+                    ERROR() << "invalidate source packet is later";
+                }
+                if (src_task.invalid_offset > 0)
+                {
+                    ERROR() << "invalidate source packet offset already set";
+                }
+                src_task.invalid_offset = i - index;
+            }
+            //TODO: merge multiple invalidate
+        }
     }
-
-    for (auto surface : surfaces)
-    {
-        params.push_back(surface);
-        params.push_back(0);
-
-        auto surface_desc = surface->get_surf_desc();
-        const uint32_t *ptr = reinterpret_cast<const uint32_t *>(&surface_desc);
-        params.push_back(ptr[0]);
-        params.push_back(ptr[1]);
-    }
-    return params;
-}
-
-        ERROR();
-    }
-    task.kernel.sync.wait_mask |= mask;
 }
 
 void Assembler::setup_stream_sync(size_t first_kernel, NodePtr sgn, std::vector<task_t> &stream, size_t stream_id)
 {
-    if (first_kernel == stream.size())
-    {
-        m_empty_kernel_node.insert(sgn);
-        return;
-    }
-    else
-    {
-        m_node_last_kernel_map[sgn] = stream.size() - 1;
-    }
-
+    m_node_last_kernel_map[sgn] = stream.size() - 1;
     int sync_mask = 0;
     std::set<NodePtr> depend_nodes;
     get_depend_nodes(sgn, depend_nodes, m_empty_kernel_node);
@@ -233,6 +361,250 @@ void Assembler::setup_stream_sync(size_t first_kernel, NodePtr sgn, std::vector<
     if (sync_mask)
     {
         sync_wait(stream, first_kernel, sync_mask);
+    }
+}
+
+void Assembler::print_debug_info()
+{
+    if (m_levels.size()) //for DEBUG
+    {
+        std::vector<std::vector<std::vector<task_t>>> queue_level;
+        for (size_t i = 0; i < m_streams.size(); ++i)
+        {
+            auto &stream = m_streams[i];
+            for (auto task : stream)
+            {
+                auto node = m_task_node_map[task.id];
+                int level_id = 0;
+                if (node->has_attr_deep(Constants::schedule_level))
+                {
+                    level_id = node->get_attr_deep(Constants::schedule_level);
+                }
+                else
+                {
+                    ERROR() << "no level id";
+                }
+                if (queue_level.size() <= (size_t)level_id)
+                {
+                    queue_level.resize(level_id + 1);
+                }
+                auto &queues = queue_level[level_id];
+                if (queues.size() <= m_streams.size())
+                {
+                    queues.resize(m_streams.size());
+                }
+                auto &queue = queues[i];
+                queue.push_back(task);
+            }
+        }
+
+        std::stringstream oss;
+
+        oss.clear();
+        oss.str("");
+        oss << "[kernl]";
+        for (size_t i = 0; i < m_streams.size(); ++i)
+        {
+            std::string line = "queue" + std::to_string(i);
+            oss << std::setw(20) << line;
+        }
+        INFO() << oss.str();
+        for (size_t j = 0; j < queue_level.size(); ++j)
+        {
+            auto queues = queue_level[j];
+            size_t max_packet_size = 0;
+            for (auto queue : queues)
+            {
+                max_packet_size = std::max(max_packet_size, queue.size());
+            }
+            for (size_t k = 0; k < max_packet_size; ++k)
+            {
+                oss.clear();
+                oss.str("");
+                oss << "level" << j << " ";
+                for (size_t i = 0; i < queues.size(); ++i)
+                {
+                    auto queue = queues[i];
+                    std::string line;
+                    if (k >= queue.size())
+                    {
+                        line = "-";
+                    }
+                    else
+                    {
+                        std::stringstream temp_oss;
+
+                        auto task = queue[k];
+                        temp_oss << (int)task.id;
+
+                        auto kernel_name = m_task_kernel_map[task.id];
+                        if (kernel_name.size() > 16)
+                        {
+                            kernel_name.resize(15);
+                            kernel_name += ".";
+                        }
+                        temp_oss << "(" << kernel_name << ")";
+                        line = temp_oss.str();
+                    }
+                    oss << std::setw(20) << line;
+                }
+                INFO() << oss.str();
+            }
+            INFO("");
+        }
+        INFO("---------------------------------------------------------------------------------------");
+
+        oss.clear();
+        oss.str("");
+        oss << "[invld]";
+        for (size_t i = 0; i < m_streams.size(); ++i)
+        {
+            std::string line = "queue" + std::to_string(i);
+            oss << std::setw(20) << line;
+        }
+        INFO() << oss.str();
+        for (size_t j = 0; j < queue_level.size(); ++j)
+        {
+            auto queues = queue_level[j];
+            size_t max_packet_size = 0;
+            for (auto queue : queues)
+            {
+                max_packet_size = std::max(max_packet_size, queue.size());
+            }
+            for (size_t k = 0; k < max_packet_size; ++k)
+            {
+                oss.clear();
+                oss.str("");
+                oss << "level" << j << " ";
+                for (size_t i = 0; i < queues.size(); ++i)
+                {
+                    auto queue = queues[i];
+                    std::string line;
+                    if (k >= queue.size())
+                    {
+                        line = "-";
+                    }
+                    else
+                    {
+                        std::stringstream temp_oss;
+
+                        auto task = queue[k];
+                        temp_oss << (int)task.id;
+
+                        auto node = m_task_node_map[task.id];
+
+                        if (node->attrs().count("invld_src"))
+                        {
+                            int src_id = 0;
+                            auto src_node = node->get_attr<NodeRef>("invld_src").lock();
+                            auto it = std::find_if(m_task_node_map.begin(), m_task_node_map.end(),
+                                                   [&src_node](const auto &pair) {
+                                                       return pair.second == src_node;
+                                                   });
+
+                            if (it != m_task_node_map.end())
+                            {
+                                src_id = it->first;
+                            }
+                            else
+                            {
+                                ERROR() << "src node not found";
+                            }
+                            temp_oss << "(invld_src: " << src_id << ")";
+                        }
+
+                        if (task.invalid_offset > 0)
+                        {
+                            temp_oss << "(invld_offset: " << task.invalid_offset << ")";
+                        }
+                        line = temp_oss.str();
+                    }
+                    oss << std::setw(20) << line;
+                }
+                INFO() << oss.str();
+            }
+            INFO();
+        }
+        INFO("---------------------------------------------------------------------------------------");
+
+        oss.clear();
+        oss.str("");
+        oss << "[sync] ";
+        for (size_t i = 0; i < m_streams.size(); ++i)
+        {
+            std::string line = "queue" + std::to_string(i);
+            oss << std::setw(20) << line;
+        }
+        INFO() << oss.str();
+        for (size_t j = 0; j < queue_level.size(); ++j)
+        {
+            auto queues = queue_level[j];
+            size_t max_packet_size = 0;
+            for (auto queue : queues)
+            {
+                max_packet_size = std::max(max_packet_size, queue.size());
+            }
+            for (size_t k = 0; k < max_packet_size; ++k)
+            {
+                oss.clear();
+                oss.str("");
+                oss << "level" << j << " ";
+                for (size_t i = 0; i < queues.size(); ++i)
+                {
+                    auto queue = queues[i];
+                    std::string line;
+                    if (k >= queue.size())
+                    {
+                        line = "-";
+                    }
+                    else
+                    {
+                        std::stringstream temp_oss;
+
+                        auto task = queue[k];
+                        temp_oss << (int)task.id;
+                        int set = 0;
+                        int wait = 0;
+                        if (task.type == TASK_TYPE_KERNEL)
+                        {
+                            set = task.kernel.sync.set_mask;
+                            wait = task.kernel.sync.wait_mask;
+                        }
+                        else if (task.type == TASK_TYPE_DMA)
+                        {
+                            set = task.dma.sync.set_mask;
+                            wait = task.dma.sync.wait_mask;
+                        }
+                        else
+                        {
+                            ERROR() << "TYPE not supported";
+                        }
+                        if (set)
+                        {
+                            temp_oss << "(0x" << std::hex << std::setw(4) << std::setfill('0') << set;
+                        }
+                        else
+                        {
+                            temp_oss << "(0";
+                        }
+
+                        if (wait)
+                        {
+                            temp_oss << " 0x" << std::hex << std::setw(4) << std::setfill('0') << wait << ")";
+                        }
+                        else
+                        {
+                            temp_oss << " 0)";
+                        }
+
+                        line = temp_oss.str();
+                    }
+                    oss << std::setw(20) << line;
+                }
+                INFO() << oss.str();
+            }
+            INFO();
+        }
     }
 }
 
@@ -288,10 +660,13 @@ void Assembler::assembly()
             m_params.push_back(d);
         }
     }
-    m_graph->walk_on_node([this](NodePtr n) {
+    m_graph->walk_on_node([&](NodePtr n) {
         if (n->attrs().count(Constants::output_shape_size))
         {
+            auto shape_base = n->get_attr<PlaceholderPtr>(Constants::output_shape_base);
+            auto shape_offset = n->get_attr<uint32_t>(Constants::output_shape_offset);
             auto shape_size = n->get_attr<uint32_t>(Constants::output_shape_size);
+            *shape_base = *m_param_base + (output_shape_offset + shape_offset);
             for (size_t i = 0; i < shape_size / PARAM_UNIT_SIZE; ++i)
             {
                 m_params.push_back(0);
@@ -300,14 +675,12 @@ void Assembler::assembly()
     });
     size_t input_shape_size = output_shape_offset - input_shape_offset;
     size_t output_shape_size = m_params.size() * PARAM_UNIT_SIZE - output_shape_offset;
-    auto enable_ds = BuilderConfig::get<bool>(Constants::enable_ds);
     m_params.resize(aligned(m_params.size(), 64), 0);
     m_params[0] = input_shape_offset;
     m_params[1] = input_shape_size;
     m_params[2] = output_shape_offset;
     m_params[3] = output_shape_size;
-    m_params[4] = enable_ds ? 1 : 0; // dynamic shape flag
-    m_params[5] = 0;                 // default shape flag
+    m_params[4] = 0; // default shape flag
 
     PlaceholderPtr output_shape = std::make_shared<Tensor>("output_shape", TensorShape({(int)output_shape_size}), Tensor::UINT8);
     *output_shape = *m_param_base + output_shape_offset;
@@ -315,7 +688,6 @@ void Assembler::assembly()
     get_tensor_index(output_shape);
 
     m_streams.resize(m_stream_bases.size());
-    std::map<int, int> task_level_map; //for debug
 
     for (size_t l = 0; l < m_levels.size(); ++l)
     {
@@ -443,7 +815,8 @@ void Assembler::assembly()
                             task.kernel.pfc_group_en = 0;
                             task.kernel.pfc_addr = 0;
                             stream.push_back(task);
-                            task_level_map[task.id] = l;
+                            m_task_node_map[task.id] = n;
+                            m_task_kernel_map[task.id] = kernel_name;
 
                             if (BuilderConfig::get<bool>(Constants::dump_rt_output_tensors))
                             {
@@ -549,41 +922,22 @@ void Assembler::assembly()
                         }
                     }
                 }
+
+                if (original_size == stream.size())
+                {
+                    m_empty_kernel_node.insert(sgn);
+                    continue;
+                }
+
+                setup_stream_offset(original_size, sgn, stream, stream_id);
                 setup_stream_sync(original_size, sgn, stream, stream_id);
+                //packet handle done for this sg, no packet can be changed
             }
             else
             {
                 ERROR() << "not a sg";
             }
         }
-    }
-
-    // update invalid offset
-    if (enable_ds)
-    {
-        m_graph->walk_on_node([this](NodePtr n) {
-            if (n->type() != OpType_ParamUpdate)
-            {
-                return;
-            }
-
-            auto impl = n->get_attr<std::shared_ptr<GopDSCodeImpl>>(Constants::plugin_impl);
-            auto stream_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::stream_bases);
-            for (size_t i = 0; i < impl->kernel_names().size(); ++i)
-            {
-                auto p0 = stream_bases[i]->memory_offset();
-                auto p1 = impl->stream_bases()[i]->memory_offset();
-                if (p0->get_base_object() != p1->get_base_object())
-                {
-                    WARN() << "cannot update invalid offset for node: " << n->name();
-                    continue;
-                }
-
-                auto stream_id = n->get_attr<size_t>(Constants::stream_id);
-                auto &task = m_streams[stream_id][p0->offset() / PACKET_UNIT_SIZE];
-                task.invalid_offset = (p1->offset() - p0->offset()) / PACKET_UNIT_SIZE;
-            }
-        });
     }
 
     // build remap table
@@ -615,91 +969,7 @@ void Assembler::assembly()
 
     eval_expr_params(m_graph, m_params);
 
-    if (m_levels.size() > 1)
-    {
-        std::vector<std::vector<std::vector<task_t>>> queue_level;
-        for (size_t i = 0; i < m_streams.size(); ++i)
-        {
-            auto &stream = m_streams[i];
-            for (auto task : stream)
-            {
-                auto level_id = task_level_map[task.id];
-                if (queue_level.size() <= (size_t)level_id)
-                {
-                    queue_level.resize(level_id + 1);
-                }
-                auto &queues = queue_level[level_id];
-                if (queues.size() <= m_streams.size())
-                {
-                    queues.resize(m_streams.size());
-                }
-                auto &queue = queues[i];
-                queue.push_back(task);
-            }
-        }
-
-        std::stringstream oss;
-        oss << "       ";
-        for (size_t i = 0; i < m_streams.size(); ++i)
-        {
-            std::string line = "queue" + std::to_string(i);
-            oss << std::setw(20) << line;
-        }
-        INFO() << oss.str();
-        for (size_t j = 0; j < queue_level.size(); ++j)
-        {
-            auto queues = queue_level[j];
-            size_t max_packet_size = 0;
-            for (auto queue : queues)
-            {
-                max_packet_size = std::max(max_packet_size, queue.size());
-            }
-            for (size_t k = 0; k < max_packet_size; ++k)
-            {
-                oss.clear();
-                oss.str("");
-                oss << "level" << j << " ";
-                for (size_t i = 0; i < queues.size(); ++i)
-                {
-                    auto queue = queues[i];
-                    std::string line;
-                    if (k >= queue.size())
-                    {
-                        line = "-";
-                    }
-                    else
-                    {
-                        std::stringstream temp_oss;
-
-                        auto task = queue[k];
-                        temp_oss << (int)task.id;
-                        if (task.kernel.sync.set_mask)
-                        {
-                            temp_oss << "(0x" << std::hex << std::setw(4) << std::setfill('0') << task.kernel.sync.set_mask;
-                        }
-                        else
-                        {
-                            temp_oss << "(0";
-                        }
-
-                        if (task.kernel.sync.wait_mask)
-                        {
-                            temp_oss << " 0x" << std::hex << std::setw(4) << std::setfill('0') << task.kernel.sync.wait_mask << ")";
-                        }
-                        else
-                        {
-                            temp_oss << " 0)";
-                        }
-
-                        line = temp_oss.str();
-                    }
-                    oss << std::setw(20) << line;
-                }
-                INFO() << oss.str();
-            }
-            INFO();
-        }
-    }
+    print_debug_info();
 }
 
 const std::vector<std::vector<task_t>> &Assembler::get_streams() const

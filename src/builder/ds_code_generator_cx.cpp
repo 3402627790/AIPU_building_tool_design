@@ -888,22 +888,17 @@ void DSCodeGeneratorCPS::parse(GraphPtr graph)
     m_param_base = graph->global_tensors()["param"];
 
     graph->walk_on_node([&](NodePtr n) {
-        if (!n->attrs().count(Constants::plugin_impl))
+        if (n->type() != OpType_ParamUpdate)
         {
             return;
         }
-        auto parents = n->parents();
-        for (auto p : parents)
+        auto impl = n->get_attr<std::shared_ptr<GopDSCodeImpl>>(Constants::plugin_impl);
+        for (auto node : impl->nodes())
         {
-            if (p->type() != OpType_ParamUpdate)
-            {
-                continue;
-            }
-
-            auto impl = p->get_attr<std::shared_ptr<GopDSCodeImpl>>(Constants::plugin_impl);
-            auto infos = n->get_attr<KernelInfos>(Constants::kernel_infos);
-            auto param_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::param_bases);
-            auto stream_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::stream_bases);
+            auto sgn = node.lock();
+            auto infos = sgn->get_attr<KernelInfos>(Constants::kernel_infos);
+            auto param_bases = sgn->get_attr<std::vector<PlaceholderPtr>>(Constants::param_bases);
+            auto stream_bases = sgn->get_attr<std::vector<PlaceholderPtr>>(Constants::stream_bases);
             for (size_t i = 0; i < infos.size(); ++i)
             {
                 auto &info = infos[i];
@@ -915,10 +910,9 @@ void DSCodeGeneratorCPS::parse(GraphPtr graph)
 
                 m_kernels.push_back(DSKernelDesc());
                 auto &kernel = m_kernels.back();
-                kernel.node = n;
+                kernel.node = sgn;
                 kernel.impl = impl;
                 kernel.type = DSKernelDesc::KERNEL;
-                kernel.index = get_data_aware_param_index(n, params);
                 kernel.name = "_modify_param" + kernel_id;
                 kernel.param_base = param_base;
                 kernel.stream_base = stream_base;
@@ -943,12 +937,11 @@ void DSCodeGeneratorCPS::parse(GraphPtr graph)
                     }
                 }
 
-                if (kernel.params.empty() && kernel.index == -1)
+                if (kernel.params.empty())
                 {
                     m_kernels.pop_back();
                 }
             }
-            break;
         }
     });
 
@@ -1004,62 +997,75 @@ void DSCodeGeneratorCPS::generate(GraphPtr graph)
         impl->set_param_root(m_param_base);
         impl->kernel_names().push_back(kernel.name);
         impl->param_bases().push_back(kernel.param_base);
-        impl->stream_bases().push_back(kernel.stream_base);
+                for (size_t j = 0; j < params.size(); ++j)
+                {
+                    auto &p = params[j];
+                    if (p.param_list)
+                    {
+                        parse_params(graph, p.param_list->params(), DSParamDesc::PARAM_LIST, j, kernel);
+                    }
+                }
+
+                if (kernel.params.empty())
+                {
+                    m_kernels.pop_back();
+                }
+            }
+        }
+    });
+
+    auto output_tensors = graph->get_output_tensors();
+    std::vector<ReadOnlyParam> dims;
+    for (auto t : output_tensors)
+    {
+        std::vector<Expr> shape = t->shape().symbol();
+        for (auto d : shape)
+        {
+            dims.push_back(d);
+        }
     }
 
-    graph->walk_on_node([](NodePtr n) {
-        if (n->type() != OpType_ParamUpdate)
-        {
-            return;
-        }
+    m_kernels.push_back(DSKernelDesc());
+    auto &kernel = m_kernels.back();
+    kernel.impl = std::make_shared<GopDSCodeImpl>();
+    kernel.type = DSKernelDesc::OUTPUT_SHAPE;
+    kernel.name = "eval_output_shape";
 
-        auto impl = n->get_attr<std::shared_ptr<GopDSCodeImpl>>(Constants::plugin_impl);
-        auto infos = impl->kernel_infos();
-        std::vector<PlaceholderPtr> param_bases;
-        std::vector<PlaceholderPtr> stream_bases;
-        for (size_t i = 0; i < infos.size(); ++i)
-        {
-            param_bases.push_back(std::make_shared<Placeholder>());
-            stream_bases.push_back(std::make_shared<Placeholder>());
-        }
-        n->set_attr(Constants::kernel_infos, infos);
-        n->set_attr(Constants::param_bases, param_bases);
-        n->set_attr(Constants::stream_bases, stream_bases);
-    });
+    parse_params(graph, dims, DSParamDesc::PARAM, kernel);
+
+    optimize();
 }
 
-void DSCodeGeneratorCPS::generate_kernel_code(std::stringstream &oss,
-                                              const DSKernelDesc &kernel)
+void DSCodeGeneratorCPS::generate(GraphPtr graph)
 {
-    size_t var_id = 0;
-    auto tab = std::string(4, ' ');
-    auto tab2 = std::string(8, ' ');
+    parse(graph);
 
-    auto gp = "gp";
-    auto pp = "pp";
-    auto sp = "sp";
-    oss << "extern \"C\" __global__ void " << kernel.name << "("
-        << "uint *" << gp << ", uint *" << pp << ", uint *" << sp << ")\n{\n";
+    ds_device_code.clear();
+    ds_host_code.clear();
 
-    auto data_aware = kernel.data_aware();
-    if (!data_aware && BuilderConfig::exist(Constants::default_input_shape))
+    std::set<std::string> kernel_names;
+    for (auto &kernel : m_kernels)
     {
-        oss << tab << "if (" << gp << "[5] != 0) {\n"
-            << tab2 << "return;\n"
-            << tab << "}\n";
-    }
+        if (kernel.type == DSKernelDesc::KERNEL)
+        {
+            if (kernel.params.size())
+            {
+                if (!kernel_names.count(kernel.name))
+                {
+                    generate_kernel_code(ds_device_code, kernel);
+                    kernel_names.insert(kernel.name);
+                }
+            }
+        }
+        else if (kernel.type == DSKernelDesc::OUTPUT_SHAPE)
+        {
+            generate_eval_code(ds_host_code, kernel);
+        }
 
-    auto tid = "tid";
-    oss << tab << "uint " << tid << " = threadIdx.x;\n"
-        << tab << "if (" << tid << " == 0) {\n";
-    auto isp = "isp";
-    auto osp = "osp";
-    oss << tab2 << "uint *" << isp << " = (uint *)((char *)" << gp << " + " << gp << "[0]);\n";
-    if (data_aware)
-    {
-        oss << tab2 << "uint *" << osp << " = (uint *)((char *)" << gp << " + " << gp << "[2]);\n";
-    }
-    auto wlinfo = "wlinfo";
+        auto impl = kernel.impl;
+        impl->set_param_root(m_param_base);
+        impl->kernel_names().push_back(kernel.name);
+        impl->param_bases().push_back(kernel.param_base);
     if (kernel.check_param_type({DSParamDesc::STREAM}))
     {
         oss << tab2 << "uint " << wlinfo << " = " << sp << "[3];\n";
@@ -1172,7 +1178,7 @@ void DSCodeGeneratorCPS::generate_kernel_code(std::stringstream &oss,
         generate_update_code(kernel.data_aware_params());
         if (BuilderConfig::exist(Constants::default_input_shape))
         {
-            oss << tab2 << "if (" << gp << "[5] != 0) {\n"
+            oss << tab2 << "if (" << gp << "[4] != 0) {\n"
                 << tab2 << tab << "goto " << skip_label << ";\n"
                 << tab2 << "}\n";
         }

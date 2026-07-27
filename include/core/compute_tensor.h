@@ -62,77 +62,70 @@ struct function_traits<Ret(Args...)>
     };
 };
 
-// 特化版本：函数指针
-template <typename Ret, typename... Args>
-struct function_traits<Ret (*)(Args...)> : function_traits<Ret(Args...)>
-{
-};
-
-// 特化版本：std::function
-template <typename Ret, typename... Args>
-struct function_traits<std::function<Ret(Args...)>> : function_traits<Ret(Args...)>
-{
-};
-
-// 特化版本：非const成员函数指针
-template <typename Ret, typename ClassType, typename... Args>
-struct function_traits<Ret (ClassType::*)(Args...)> : function_traits<Ret(Args...)>
-{
-};
-
-// 特化版本：const成员函数指针（这是关键修复）
-template <typename Ret, typename ClassType, typename... Args>
-struct function_traits<Ret (ClassType::*)(Args...) const> : function_traits<Ret(Args...)>
-{
-};
-
-// ✅ 正确：针对函数对象（包括lambda）的特化
-template <typename Functor>
-struct function_traits : function_traits<decltype(&Functor::operator())>
-{
-};
-
-/**
- * @brief a class for Compute Tensor, compute tensor is a wrapper
- * of Tensor, but with many Tensor computcation method, and only those Tensor
- * who has data can convert to Compute Tensor
- *
+//-------------------------------------------------------------------------------
+// This file is CONFIDENTIAL and any use by you is subject to the terms of the
+// agreement between you and Arm China or the terms of the agreement between you
+// and the party authorised by Arm China to disclose this file to you.
+// The confidential and proprietary information contained in this file may only
+// be used by a person authorised under and to the extent permitted by a
+// subsisting licensing agreement from Arm China.
+//
+//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//                    All rights reserved.
+//
+// This entire notice must be reproduced on all copies of this file and copies of
+// this file may only be made by a person if such person is permitted to do so
+// under the terms of a subsisting license agreement from Arm China.
+//
+//--------------------------------------------------------------------------------
+/*
+ * @Author: Neo Wang
+ * @Date: 2020-02-09 12:16:08
+ * @Last Modified by: Neo Wang
+ * @Last Modified time: 2025-10-23 15:37:23
  */
-class ComputeTensor //: public Tensor
+#ifndef CORE_COMPUTE_TENSOR_H
+#define CORE_COMPUTE_TENSOR_H
+#include "tensor.h"
+#include <functional>
+#include <type_traits>
+
+namespace aipubt
 {
-public:
-    struct Slice
+
+class ComputeTensor;
+
+template <typename T>
+struct is_compute_tensor_support_type
+{
+    static constexpr bool value = false || is_supported_tensor_type<T>::value;
+};
+
+template <>
+struct is_compute_tensor_support_type<ComputeTensor>
+{
+    static constexpr bool value = true;
+};
+
+#include <functional>
+
+template <typename T>
+struct function_traits;
+// 特化版本：普通函数类型
+template <typename Ret, typename... Args>
+struct function_traits<Ret(Args...)>
+{
+    using return_type = Ret;
+    static constexpr std::size_t arity = sizeof...(Args);
+
+    template <std::size_t N>
+    struct arg
     {
-        int begin = 0;
-        int end = 0;
-        int step = 1;
-        bool is_index = false;
-        explicit Slice(int begin) : begin(begin), end(begin + 1), step(1), is_index(true) {}
-        Slice(int begin, int end) : begin(begin), end(end), step(1) {}
-        Slice(const std::initializer_list<int> &sl)
-        {
-            if (sl.size() > 3)
-            {
-                // error
-            }
-            else if (sl.size() == 0)
-            {
-                end = -1;
-            }
-            else
-            {
-                begin = *sl.begin();
-                if (sl.size() > 1)
-                {
-                    end = *(sl.begin() + 1);
-                    if (sl.size() == 3)
-                    {
-                        step = *(sl.begin() + 2);
-                    }
-                }
-                else
-                {
-                    end = begin + 1;
+        static_assert(N < arity, "参数索引超出范围");
+        using type = typename std::tuple_element<N, std::tuple<Args...>>::type;
+    };
+};
+
                     is_index = true;
                 }
             }
@@ -693,6 +686,7 @@ public:
     ComputeTensor ceil() const;
     ComputeTensor floor() const;
     ComputeTensor round() const;
+    ComputeTensor round_to_even() const;
     ComputeTensor clamp(double min, double max) const;
     ComputeTensor celu(float alpha) const;
     ComputeTensor elu(float alpha) const;
@@ -749,7 +743,7 @@ public:
     // }
 
     template <typename... T>
-    ComputeTensor reshape(T &&...arg) const
+    ComputeTensor reshape(T &&... arg) const
     {
         TensorPtr ret = std::make_shared<Tensor>(*m_tensor);
         ret->set_name();

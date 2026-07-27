@@ -36,6 +36,14 @@
 #include <utility>
 #include <vector>
 
+#ifndef ELF_MAJOR_VERSION
+#define ELF_MAJOR_VERSION 1
+#endif
+
+#ifndef ELF_MIN_VERSION
+#define ELF_MIN_VERSION 1
+#endif
+
 namespace aipubt
 {
 
@@ -546,6 +554,44 @@ using HybridELFRef = std::weak_ptr<HybridELF>;
 class HybridELF
 {
 public:
+    enum CompilerMsgFlag
+    {
+        HAS_HOST_CODE = 0x1 << 0,
+        ENABLE_DS = 0x1 << 1,
+    };
+
+    struct CompilerMsg
+    {
+        uint32_t file_version = ((ELF_MAJOR_VERSION & 0xff) << 24) | ((ELF_MIN_VERSION & 0xff) << 16);
+        uint32_t build_version = 0;
+        uint32_t arch = 0;
+        uint32_t flag = 0;
+
+        bool has_host_code() const
+        {
+            return flag & HAS_HOST_CODE;
+        }
+        bool enable_ds() const
+        {
+            return flag & ENABLE_DS;
+        }
+
+        void load(std::istream &stream)
+        {
+            stream.read((char *)&file_version, sizeof(uint32_t));
+            stream.read((char *)&build_version, sizeof(uint32_t));
+            stream.read((char *)&arch, sizeof(uint32_t));
+            stream.read((char *)&flag, sizeof(uint32_t));
+        }
+        void write(std::ostream &stream)
+        {
+            stream.write((char *)&file_version, sizeof(uint32_t));
+            stream.write((char *)&build_version, sizeof(uint32_t));
+            stream.write((char *)&arch, sizeof(uint32_t));
+            stream.write((char *)&flag, sizeof(uint32_t));
+        }
+    };
+
     struct Section
     {
         operator bool() const
@@ -620,7 +666,9 @@ public:
 
     bool load(std::istream &stream)
     {
-        return m_elfio.load(stream);
+        bool ret = m_elfio.load(stream);
+        load_msg();
+        return ret;
     }
     bool load(const std::string &filename)
     {
@@ -630,6 +678,7 @@ public:
 
     bool save(std::ostream &stream)
     {
+        save_msg();
         save_cpself();
         return m_elfio.save(stream);
     }
@@ -675,7 +724,34 @@ public:
         remove_note(note_name, 0);
     }
 
+    CompilerMsg &get_compiler_msg()
+    {
+        return m_msg;
+    }
+    const CompilerMsg &get_compiler_msg() const
+    {
+        return m_msg;
+    }
+
 private:
+    void load_msg()
+    {
+        auto note = get_note("compilermsg");
+        if (note)
+        {
+            SectionBuf buf(note);
+            std::istream stream(&buf);
+            m_msg.load(stream);
+        }
+    }
+    void save_msg()
+    {
+        remove_note("compilermsg");
+        std::stringstream oss;
+        m_msg.write(oss);
+        set_note(oss.str(), "compilermsg");
+    }
+
     void load_cpself()
     {
         auto note = get_note("cpself");
@@ -754,6 +830,7 @@ private:
     ELFIO::elfio m_elfio;
     ELFIO::section *m_note = nullptr;
     CpsElfPtr m_cpself;
+    CompilerMsg m_msg;
 };
 
 } // namespace aipubt

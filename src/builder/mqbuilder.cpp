@@ -31,6 +31,8 @@
 #include "builder/object_generator.h"
 #include "builder/optimizer.h"
 #include "builder/soms_scheduler.h"
+#include "builder/target.h"
+#include "core/buildtool_version.h"
 #include "core/config.h"
 #include "core/graph.h"
 #include "core/tensor.h"
@@ -207,6 +209,21 @@ bool MqBuilder::phase_optimize()
         return false;
     }
 
+    // NodePtr src;
+    // for(auto n : m_graph->nodes())
+    // {
+    //     INFO() << n;
+    //     if(n->name() == "subgraph_Pad_0")
+    //     {
+    //         src = n;
+    //     }
+    //     if(n->name() == "subgraph_Pad0_2")
+    //     // if(n->name() == "subgraph_Pad0_1")
+    //     {
+    //         n->set_attr("invld_src", NodeRef(src));
+    //     }
+    // }
+
     return true;
 }
 
@@ -368,6 +385,16 @@ bool MqBuilder::phase_gen_obj()
     std::vector<ConstTensorPtr> const_tensors = m_graph->attrs()["const_tensors"];
     object_generator.set_constant(const_tensors);
     object_generator.gen(m_elf->get_cpself());
+
+    auto &msg = m_elf->get_compiler_msg();
+    msg.build_version = AIPUBIN_BT_VERSION_NUMBER;
+    msg.arch = get_target()->gen_arch_number();
+    // TODO: check if has host plugins
+    // msg.flag |= HybridELF::HAS_HOST_CODE;
+    if (BuilderConfig::get<bool>(Constants::enable_ds))
+    {
+        msg.flag |= HybridELF::ENABLE_DS;
+    }
 
     return true;
 }
