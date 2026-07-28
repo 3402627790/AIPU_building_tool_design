@@ -2139,6 +2139,57 @@ def MatMulOp : AIPUOp<"MatMul",
 }
 
 //===----------------------------------------------------------------------===//
+// Operator: ScaledDotProductAttention
+//===----------------------------------------------------------------------===//
+def ScaledDotProductAttentionOp : AIPUOp<"ScaledDotProductAttention",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Scaled dot-product attention operator";
+
+  let description = [{
+    Computes scaled dot-product attention:
+      output = softmax((query * key^T) * scale + mask) * value.
+
+    Inputs:
+      - query: 4D tensor [batch, q_heads, q_sequence_length, head_size]
+      - key: 4D tensor [batch, kv_heads, kv_sequence_length, head_size]
+      - value: 4D tensor [batch, kv_heads, kv_sequence_length, value_head_size]
+      - attn_mask: optional tensor broadcastable to
+        [batch, q_heads, q_sequence_length, kv_sequence_length]
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$query,
+    AIPUGCAnyTensor:$key,
+    AIPUGCAnyTensor:$value,
+    Variadic<AIPUGCAnyTensor>:$attn_mask,
+    BoolAttr:$is_causal,
+    F32Attr:$scale,
+    BoolAttr:$enable_gqa,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$query,
+      "::mlir::Value":$key,
+      "::mlir::Value":$value,
+      "::mlir::ValueRange":$attn_mask,
+      "::mlir::BoolAttr":$is_causal,
+      "::mlir::FloatAttr":$scale,
+      "::mlir::BoolAttr":$enable_gqa,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Operator: RegionOp
 //===----------------------------------------------------------------------===//
 def RegionOp : AIPUOp<"Region",

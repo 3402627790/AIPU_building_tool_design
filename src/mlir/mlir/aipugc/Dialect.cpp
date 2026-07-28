@@ -2435,6 +2435,113 @@ void MatMulOp::build(OpBuilder &builder, OperationState &state, Type outputType,
 void MatMulOp::inferShapes() { return; }
 
 //===----------------------------------------------------------------------===//
+// ScaledDotProductAttentionOp
+//===----------------------------------------------------------------------===//
+void ScaledDotProductAttentionOp::build(OpBuilder &builder,
+                                        OperationState &state, Type outputType,
+                                        Value query, Value key, Value value,
+                                        ValueRange attn_mask,
+                                        BoolAttr is_causal, FloatAttr scale,
+                                        BoolAttr enable_gqa,
+                                        DictionaryAttr dictAttr) {
+  state.addOperands({query, key, value});
+  state.addOperands(attn_mask);
+  state.addAttribute("is_causal", is_causal);
+  state.addAttribute("scale", scale);
+  state.addAttribute("enable_gqa", enable_gqa);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult ScaledDotProductAttentionOp::verify() {
+  auto queryType = dyn_cast<RankedTensorType>(getQuery().getType());
+  auto keyType = dyn_cast<RankedTensorType>(getKey().getType());
+  auto valueType = dyn_cast<RankedTensorType>(getValue().getType());
+  if (!queryType || !keyType || !valueType)
+    return success();
+
+  auto checkRank4 = [&](RankedTensorType type,
+                        StringRef name) -> LogicalResult {
+    if (type.getRank() != 4)
+      return emitOpError(name) << " must be 4D, got rank " << type.getRank();
+    return success();
+  };
+  if (failed(checkRank4(queryType, "query")) ||
+      failed(checkRank4(keyType, "key")) ||
+      failed(checkRank4(valueType, "value")))
+    return failure();
+
+  auto compatibleDim = [](int64_t lhs, int64_t rhs) {
+    return ShapedType::isDynamic(lhs) || ShapedType::isDynamic(rhs) ||
+           lhs == rhs;
+  };
+
+  if (!compatibleDim(queryType.getDimSize(0), keyType.getDimSize(0)) ||
+      !compatibleDim(queryType.getDimSize(0), valueType.getDimSize(0))) {
+    return emitOpError("query, key and value batch dimensions must match");
+  }
+  if (!compatibleDim(queryType.getDimSize(3), keyType.getDimSize(3))) {
+    return emitOpError("query and key head_size dimensions must match");
+  }
+  if (!compatibleDim(keyType.getDimSize(1), valueType.getDimSize(1))) {
+    return emitOpError("key and value head dimensions must match");
+  }
+  if (!compatibleDim(keyType.getDimSize(2), valueType.getDimSize(2))) {
+    return emitOpError("key and value sequence dimensions must match");
+  }
+
+  auto attnMask = getAttnMask();
+  if (attnMask.size() > 1)
+    return emitOpError("expects at most one attn_mask input");
+  if (getIsCausal() && !attnMask.empty())
+    return emitOpError("is_causal and attn_mask cannot be set together");
+
+  if (!attnMask.empty()) {
+    auto maskType = dyn_cast<ShapedType>(attnMask.front().getType());
+    if (maskType && maskType.hasRank()) {
+      SmallVector<int64_t> attentionShape = {
+          queryType.getDimSize(0), queryType.getDimSize(1),
+          queryType.getDimSize(2), keyType.getDimSize(2)};
+      SmallVector<int64_t> resultShape;
+      if (!OpTrait::util::getBroadcastedShape(
+              maskType.getShape(), attentionShape, resultShape)) {
+        return emitOpError(
+            "attn_mask is not broadcastable to attention score shape");
+      }
+    }
+  }
+
+  if (getEnableGqa()) {
+    int64_t qHeads = queryType.getDimSize(1);
+    int64_t kHeads = keyType.getDimSize(1);
+    if (!ShapedType::isDynamic(qHeads) && !ShapedType::isDynamic(kHeads) &&
+        (kHeads == 0 || qHeads % kHeads != 0)) {
+      return emitOpError(
+          "enable_gqa requires query heads to be divisible by key heads");
+    }
+  }
+
+  return success();
+}
+
+void ScaledDotProductAttentionOp::inferShapes() {
+  auto queryType = dyn_cast<RankedTensorType>(getQuery().getType());
+  auto valueType = dyn_cast<RankedTensorType>(getValue().getType());
+  if (!queryType || !valueType || queryType.getRank() != 4 ||
+      valueType.getRank() != 4)
+    return;
+
+  SmallVector<int64_t> outputShape = {
+      queryType.getDimSize(0), queryType.getDimSize(1),
+      queryType.getDimSize(2), valueType.getDimSize(3)};
+  getResult().setType(
+      RankedTensorType::get(outputShape, queryType.getElementType()));
+}
+
+//===----------------------------------------------------------------------===//
 // RegionOp
 //===----------------------------------------------------------------------===//
 void RegionOp::build(OpBuilder &builder, OperationState &state,
