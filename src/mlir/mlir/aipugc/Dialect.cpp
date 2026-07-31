@@ -2542,6 +2542,196 @@ void ScaledDotProductAttentionOp::inferShapes() {
 }
 
 //===----------------------------------------------------------------------===//
+// FusedMoELoopOp
+//===----------------------------------------------------------------------===//
+void FusedMoELoopOp::build(OpBuilder &builder, OperationState &state,
+                           Type outputType, Value sorted_tokens,
+                           Value tokens_per_expert, ValueRange weights,
+                           ValueRange biases, StringAttr moe_type,
+                           DictionaryAttr dictAttr) {
+  state.addOperands({sorted_tokens, tokens_per_expert});
+  state.addOperands(weights);
+  state.addOperands(biases);
+  state.addAttribute("moe_type", moe_type);
+
+  SmallVector<int32_t, 3> segmentSizes = {
+      2, static_cast<int32_t>(weights.size()),
+      static_cast<int32_t>(biases.size())};
+  state.addAttribute("operand_segment_sizes",
+                     DenseI32ArrayAttr::get(builder.getContext(), segmentSizes));
+
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes(outputType);
+}
+
+LogicalResult FusedMoELoopOp::verify() {
+  auto sortedTokensType = dyn_cast<RankedTensorType>(getSortedTokens().getType());
+  auto tokensPerExpertType =
+      dyn_cast<RankedTensorType>(getTokensPerExpert().getType());
+  if (!sortedTokensType || !tokensPerExpertType)
+    return success();
+
+  if (sortedTokensType.getRank() != 2) {
+    return emitOpError("sorted_tokens must be 2D, got rank ")
+           << sortedTokensType.getRank();
+  }
+  if (tokensPerExpertType.getRank() != 1) {
+    return emitOpError("tokens_per_expert must be 1D, got rank ")
+           << tokensPerExpertType.getRank();
+  }
+
+  if (getWeights().size() == 0 || getBiases().size() == 0) {
+    return emitOpError("weights and biases must be provided");
+  }
+  if (getWeights().size() != getBiases().size()) {
+    return emitOpError("weights and biases must have the same length");
+  }
+
+  auto checkList = [&](OperandRange values, StringRef name,
+                       unsigned expectedRank) -> LogicalResult {
+    for (Value v : values) {
+      auto t = dyn_cast<RankedTensorType>(v.getType());
+      if (!t)
+        continue;
+      if (t.getRank() != expectedRank) {
+        return emitOpError(name) << " entries must be " << expectedRank
+                                 << "D, got rank " << t.getRank();
+      }
+    }
+    return success();
+  };
+  if (failed(checkList(getWeights(), "weights", 3)) ||
+      failed(checkList(getBiases(), "biases", 2)))
+    return failure();
+
+  if (getMoeType().getValue().empty()) {
+    return emitOpError("moe_type must not be empty");
+  }
+
+  return success();
+}
+
+void FusedMoELoopOp::inferShapes() {
+  auto sortedTokensType = dyn_cast<RankedTensorType>(getSortedTokens().getType());
+  if (!sortedTokensType)
+    return;
+  getResult().setType(sortedTokensType);
+}
+
+//===----------------------------------------------------------------------===//
+// CacheUpdateOp
+//===----------------------------------------------------------------------===//
+void CacheUpdateOp::build(OpBuilder &builder, OperationState &state,
+                          Type currentCacheType, Type totalCacheType,
+                          Value cache, Value position_id, Value value,
+                          IntegerAttr block_index, IntegerAttr axis,
+                          DictionaryAttr dictAttr) {
+  state.addOperands({cache, position_id, value});
+  state.addAttribute("block_index", block_index);
+  state.addAttribute("axis", axis);
+  if (dictAttr) {
+    state.attributes.append(dictAttr.getValue().begin(),
+                            dictAttr.getValue().end());
+  }
+  state.addTypes({currentCacheType, totalCacheType});
+}
+
+LogicalResult CacheUpdateOp::verify() {
+  auto cacheType = dyn_cast<RankedTensorType>(getCache().getType());
+  auto positionIdType =
+      dyn_cast<RankedTensorType>(getPositionId().getType());
+  auto valueType = dyn_cast<RankedTensorType>(getValue().getType());
+  if (!cacheType || !positionIdType || !valueType)
+    return success();
+
+  if (cacheType.getRank() != 3 && cacheType.getRank() != 4) {
+    return emitOpError("cache must be 3D or 4D, got rank ")
+           << cacheType.getRank();
+  }
+  if (positionIdType.getRank() != 2) {
+    return emitOpError("position_id must be 2D, got rank ")
+           << positionIdType.getRank();
+  }
+  if (valueType.getRank() != 4) {
+    return emitOpError("value must be 4D, got rank ") << valueType.getRank();
+  }
+
+  auto isI32OrU32 = [](Type type) {
+    if (type.isInteger(32))
+      return true;
+    if (auto quantType = dyn_cast<QuantizedType>(type))
+      return quantType.getStorageType().isInteger(32);
+    return false;
+  };
+  Type positionElementType = positionIdType.getElementType();
+  if (!isI32OrU32(positionElementType)) {
+    return emitOpError("position_id element type must be int32 or uint32");
+  }
+
+  int64_t axis = getAxis();
+  if (axis != 2 && axis != 3) {
+    return emitOpError("axis must be 2 or 3, got ") << axis;
+  }
+
+  int64_t blockIndex = getBlockIndex();
+  if (blockIndex < 0) {
+    return emitOpError("block_index must be non-negative, got ")
+           << blockIndex;
+  }
+  if (cacheType.getRank() == 3 && blockIndex != 0) {
+    return emitOpError("3D cache only supports block_index 0, got ")
+           << blockIndex;
+  }
+  if (cacheType.getRank() == 4) {
+    int64_t blockNum = cacheType.getDimSize(0);
+    if (!ShapedType::isDynamic(blockNum) && blockIndex >= blockNum) {
+      return emitOpError("block_index ")
+             << blockIndex << " out of range for cache block count "
+             << blockNum;
+    }
+  }
+
+  int64_t maxLen =
+      cacheType.getRank() == 3 ? cacheType.getDimSize(1)
+                               : cacheType.getDimSize(2);
+  int64_t valueSeqLen = valueType.getDimSize(axis);
+  if (!ShapedType::isDynamic(maxLen) &&
+      !ShapedType::isDynamic(valueSeqLen) && valueSeqLen > maxLen) {
+    return emitOpError("value dimension at axis ")
+           << axis << " must be <= cache max sequence length " << maxLen
+           << ", got " << valueSeqLen;
+  }
+
+  return success();
+}
+
+void CacheUpdateOp::inferShapes() {
+  auto cacheType = dyn_cast<RankedTensorType>(getCache().getType());
+  auto valueType = dyn_cast<RankedTensorType>(getValue().getType());
+  if (!cacheType || !valueType || (cacheType.getRank() != 3 &&
+                                   cacheType.getRank() != 4) ||
+      valueType.getRank() != 4)
+    return;
+
+  int64_t axis = getAxis();
+  if (axis != 2 && axis != 3)
+    return;
+
+  SmallVector<int64_t> currentShape(valueType.getShape().begin(),
+                                    valueType.getShape().end());
+  currentShape[axis] =
+      cacheType.getRank() == 3 ? cacheType.getDimSize(1)
+                               : cacheType.getDimSize(2);
+
+  getResult(0).setType(
+      RankedTensorType::get(currentShape, valueType.getElementType()));
+  getResult(1).setType(cacheType);
+}
+
+//===----------------------------------------------------------------------===//
 // RegionOp
 //===----------------------------------------------------------------------===//
 void RegionOp::build(OpBuilder &builder, OperationState &state,

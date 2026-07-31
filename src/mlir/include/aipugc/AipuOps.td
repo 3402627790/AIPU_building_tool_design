@@ -2190,6 +2190,97 @@ def ScaledDotProductAttentionOp : AIPUOp<"ScaledDotProductAttention",
 }
 
 //===----------------------------------------------------------------------===//
+// Operator: FusedMoELoop
+//===----------------------------------------------------------------------===//
+def FusedMoELoopOp : AIPUOp<"FusedMoELoop",
+    [Pure, AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "Fused Mixture-of-Experts loop operator";
+
+  let description = [{
+    Executes a fused MoE loop over sorted tokens and expert token counts,
+    using a list of expert weights and biases. The operator is intended to
+    match the fused MoE builder/kernel path used by the backend.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$sorted_tokens,
+    AIPUGCAnyTensor:$tokens_per_expert,
+    Variadic<AIPUGCAnyTensor>:$weights,
+    Variadic<AIPUGCAnyTensor>:$biases,
+    StrAttr:$moe_type,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$output
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$outputType,
+      "::mlir::Value":$sorted_tokens,
+      "::mlir::Value":$tokens_per_expert,
+      "::mlir::ValueRange":$weights,
+      "::mlir::ValueRange":$biases,
+      "::mlir::StringAttr":$moe_type,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Operator: CacheUpdate
+//===----------------------------------------------------------------------===//
+def CacheUpdateOp : AIPUOp<"CacheUpdate",
+    [Pure, DeclareOpInterfaceMethods<ShapeInferenceOpInterface>]> {
+  let summary = "KV cache update operator";
+
+  let description = [{
+    Updates one block of a KV cache and returns both the current cache block and
+    the whole updated cache.
+
+    Inputs:
+      - cache: 3D or 4D tensor. For 4D, dim 0 is block count and dim 2 is the
+        maximum sequence length. For 3D, only block_index 0 is valid and dim 1
+        is the maximum sequence length.
+      - position_id: 2D int32/uint32 tensor containing token positions.
+      - value: 4D tensor containing the values to write into cache.
+  }];
+
+  let arguments = (ins
+    AIPUGCAnyTensor:$cache,
+    AIPUGCAnyTensor:$position_id,
+    AIPUGCAnyTensor:$value,
+    I32Attr:$block_index,
+    I32Attr:$axis,
+    OptionalAttr<DictionaryAttr>:$dictAttr
+  );
+
+  let results = (outs
+    AIPUGCAnyTensor:$current_cache,
+    AIPUGCAnyTensor:$total_cache
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::Type":$currentCacheType,
+      "::mlir::Type":$totalCacheType,
+      "::mlir::Value":$cache,
+      "::mlir::Value":$position_id,
+      "::mlir::Value":$value,
+      "::mlir::IntegerAttr":$block_index,
+      "::mlir::IntegerAttr":$axis,
+      "::mlir::DictionaryAttr":$dictAttr
+    )>
+  ];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Operator: RegionOp
 //===----------------------------------------------------------------------===//
 def RegionOp : AIPUOp<"Region",
