@@ -1134,6 +1134,324 @@ static void dump_const_info_csv(GraphPtr g, const std::vector<std::vector<std::v
     }
 }
 
+void find_ancestor(NodePtr n, std::set<NodePtr> &ancestors)
+{
+    if (contains(ancestors, n))
+    {
+        return;
+    }
+    ancestors.insert(n);
+    for (auto p : n->parents())
+    {
+        find_ancestor(p, ancestors);
+    }
+    return;
+}
+
+void get_internal_mems(GraphPtr g, std::set<TensorPtr> &internal_vec)
+{
+    for (auto n : g->nodes())
+    {
+        if (n->type() == OpType_Loop || n->type() == OpType_If)
+        {
+            auto sgn = SubGraphNode::from_node(n);
+            get_internal_mems(sgn->subgraph(), internal_vec);
+        }
+
+        if (n->type() == OpType_SubGraphInput)
+        {
+            continue;
+        }
+
+        for (auto t : n->outputs())
+        {
+            internal_vec.insert(t);
+        }
+    }
+}
+
+
+bool handle_tensor_overlap(GraphPtr g, size_t gm_size)
+{
+    std::map<MemoryObjectPtr, uint64_t> prior_mem;
+    std::map<MemoryObjectPtr, std::set<NodePtr>> consumers;
+    std::map<MemoryObjectPtr, std::set<NodePtr>> generators;
+    std::map<NodePtr, std::set<NodePtr>> node_ancestors;
+
+    auto add_fake_tensor = [](NodePtr n1, NodePtr n2) -> void {
+        // INFO() << "insert fake edge from " << n1->name() << " to " << n2->name();
+        std::string name = n1->name() + "_" + n2->name() + "_fake_tensor";
+        TensorPtr fake_tensor = std::make_shared<Tensor>(name, TensorShape({0}), Tensor::UINT8);
+        fake_tensor->set_fake_tensor(true);
+        n1->insert_output(fake_tensor);
+        n2->insert_input(fake_tensor);
+    };
+
+    auto check_overlap = [&consumers, &generators, &node_ancestors](MemoryObjectPtr m1, MemoryObjectPtr m2) -> bool {
+        bool ret = true;
+        auto a_gens = generators[m1];
+        for (auto n2 : consumers[m2])
+        {
+            for (auto n1 : a_gens)
+            {
+                if (!node_ancestors.count(n1))
+                {
+                    std::set<NodePtr> ancestors;
+                    find_ancestor(n1, ancestors);
+                    node_ancestors[n1] = ancestors;
+                }
+                auto a_nodes = node_ancestors[n1];
+                if (a_nodes.find(n2) == a_nodes.end())
+                {
+                    ret = false;
+                    break;
+                }
+            }
+            if (!ret)
+            {
+                break;
+            }
+        }
+
+        if (!ret)
+        {
+            ret = true;
+            auto b_gens = generators[m2];
+            for (auto n1 : consumers[m1])
+            {
+                for (auto n2 : b_gens)
+                {
+                    if (!node_ancestors.count(n2))
+                    {
+                        std::set<NodePtr> ancestors;
+                        find_ancestor(n2, ancestors);
+                        node_ancestors[n2] = ancestors;
+                    }
+                    auto b_nodes = node_ancestors[n2];
+                    if (b_nodes.find(n1) == b_nodes.end())
+                    {
+                        ret = false;
+                        break;
+                    }
+                }
+                if (!ret)
+                {
+                    break;
+                }
+            }
+        }
+
+        return ret;
+    };
+
+    auto add_fake_dependency = [&consumers, &generators, &node_ancestors, &add_fake_tensor](MemoryObjectPtr m1, MemoryObjectPtr m2) -> bool {
+        bool ret = true;
+        auto a_cons = consumers[m1];
+        for (auto n2 : generators[m2])
+        {
+            for (auto n1 : a_cons)
+            {
+                if (!node_ancestors.count(n1))
+                {
+                    std::set<NodePtr> ancestors;
+                    find_ancestor(n1, ancestors);
+                    node_ancestors[n1] = ancestors;
+                }
+                auto a_nodes = node_ancestors[n1];
+                if (a_nodes.count(n2))
+                {
+                    ret = false;
+                    break;
+                }
+            }
+            if (!ret)
+            {
+                break;
+            }
+        }
+
+        if (ret)
+        {
+            //add fake edge m1 -> m2
+            for (auto n1 : consumers[m1])
+            {
+                for (auto n2 : generators[m2])
+                {
+                    add_fake_tensor(n1, n2);
+                }
+            }
+        }
+        else
+        {
+            ret = true;
+            auto b_cons = consumers[m2];
+            for (auto n1 : generators[m1])
+            {
+                for (auto n2 : b_cons)
+                {
+                    if (!node_ancestors.count(n2))
+                    {
+                        std::set<NodePtr> ancestors;
+                        find_ancestor(n2, ancestors);
+                        node_ancestors[n2] = ancestors;
+                    }
+                    auto b_nodes = node_ancestors[n2];
+                    if (b_nodes.count(n1))
+                    {
+                        ret = false;
+                        break;
+                    }
+                }
+                if (!ret)
+                {
+                    break;
+                }
+            }
+
+            if (ret)
+            {
+                //add fake edge m2 -> m1
+                for (auto n2 : consumers[m2])
+                {
+                    for (auto n1 : generators[m1])
+                    {
+                        add_fake_tensor(n2, n1);
+                    }
+                }
+            }
+        }
+        return ret;
+    };
+
+    for (auto n : g->nodes())
+    {
+        if (n->type() == OpType_Loop || n->type() == OpType_If)
+        {
+            std::set<TensorPtr> internal_vec;
+            auto sgn = SubGraphNode::from_node(n);
+            get_internal_mems(sgn->subgraph(), internal_vec);
+            for (auto t : internal_vec)
+            {
+                auto ptr = t->memory_offset()->get_base_object();
+                if (t->attrs().count("prior_in_gm"))
+                {
+                    auto size = std::max((uint64_t)ptr->size, (uint64_t)t->mem_size());
+                    prior_mem[ptr] = size;
+                    if (size > gm_size)
+                    {
+                        ERROR() << t->name() << " size: 0x" << std::hex << t->mem_size() << " already larger than gm size";
+                    }
+                    generators[ptr].insert(n);
+                    consumers[ptr].insert(n);
+                }
+            }
+        }
+        for (auto t : n->outputs())
+        {
+            auto ptr = t->memory_offset()->get_base_object();
+            if (t->attrs().count("prior_in_gm"))
+            {
+                auto size = std::max((uint64_t)ptr->size, (uint64_t)t->mem_size());
+                prior_mem[ptr] = size;
+                if (size > gm_size)
+                {
+                    ERROR() << t->name() << " size: 0x" << std::hex << t->mem_size() << " already larger than gm size";
+                }
+                generators[ptr].insert(n);
+                for (auto c : t->consumers())
+                {
+                    consumers[ptr].insert(c);
+                }
+            }
+        }
+    };
+
+    for (auto n : g->nodes())
+    {
+        if (n->type() == OpType_Loop || n->type() == OpType_If)
+        {
+            std::set<TensorPtr> internal_vec;
+            auto sgn = SubGraphNode::from_node(n);
+            get_internal_mems(sgn->subgraph(), internal_vec);
+            for (auto t : internal_vec)
+            {
+                auto ptr = t->memory_offset()->get_base_object();
+                if (prior_mem.count(ptr))
+                {
+                    generators[ptr].insert(n);
+                    consumers[ptr].insert(n);
+                }
+            }
+        }
+        for (auto t : n->outputs())
+        {
+            auto ptr = t->memory_offset()->get_base_object();
+            if (prior_mem.count(ptr))
+            {
+                generators[ptr].insert(n);
+                for (auto c : t->consumers())
+                {
+                    consumers[ptr].insert(c);
+                }
+            }
+        }
+    };
+
+    std::map<MemoryObjectPtr, uint64_t> prior_mem_2 = prior_mem;
+
+    for (auto &pair1 : prior_mem)
+    {
+        prior_mem_2.erase(pair1.first);
+        for (auto &pair2 : prior_mem_2)
+        {
+            auto m1 = pair1.first;
+            auto size1 = pair1.second;
+            auto m2 = pair2.first;
+            auto size2 = pair2.second;
+
+            if (check_overlap(m1, m2))
+            {
+                //has dependency no need
+                continue;
+            }
+            else
+            {
+                auto total_size = size1 + size2;
+                //no dependency may need add fake_edge
+                if (total_size <= gm_size)
+                {
+                    // can all put into gm
+                    pair1.second = total_size;
+                    pair2.second = total_size;
+                    std::set total_gen(generators[m1]);
+                    total_gen.insert(generators[m2].begin(), generators[m2].end());
+                    std::set total_con(consumers[m1]);
+                    total_con.insert(consumers[m2].begin(), consumers[m2].end());
+                    generators[m1] = total_gen;
+                    generators[m2] = total_gen;
+                    consumers[m1] = total_con;
+                    consumers[m2] = total_con;
+                }
+                else
+                {
+                    // need fake edge so that all can in gm
+                    // auto s1 = generators[m1];
+                    // auto s2 = generators[m2];
+                    // auto n1 = *s1.begin();
+                    // auto n2 = *s2.begin();
+                    // INFO() << "tensor overlap: " << n1->name() << " " << n2->name();
+                    if (!add_fake_dependency(m1, m2))
+                    {
+                        ERROR() << "cannot resolve overlap of t1 and t2";
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 GraphPtr GraphBuilder::build_graph(const std::vector<TensorPtr> &inputs_,
                                    const std::vector<TensorPtr> &outputs_)
 {
@@ -1202,6 +1520,17 @@ GraphPtr GraphBuilder::build_graph(const std::vector<TensorPtr> &inputs_,
     }
     else
     {
+
+        if (BuilderConfig::get<bool>(Constants::force_prior_in_gm))
+        {
+            int gm_size = BuilderConfig::get<int>(Constants::gm_size);
+            if (!handle_tensor_overlap(m_graph, gm_size))
+            {
+                ERROR() << "force prior in gm failed";
+            }
+            aipubt::BuilderConfig::set(Constants::load_balance_strategy, 0);
+        }
+
         LoadBalancer *load_balancer = new LoadBalancer();
         int core_num = BuilderConfig::get<bool>(Constants::single_core_opt) ? 1 : Target::get_the_target()->core_num();
         load_balancer->set_core(core_num);
@@ -2163,6 +2492,11 @@ bool GraphBuilder::build_aipu(const std::vector<TensorPtr> &inputs_,
             m_slots = slots;
         }
         delete scheduler;
+    }
+
+    if (BuilderConfig::get<bool>(Constants::force_prior_in_gm))
+    {
+        remove_fake_tensor(m_graph);
     }
 
     if (BuilderConfig::get<bool>(Constants::dump_tune_strategy))

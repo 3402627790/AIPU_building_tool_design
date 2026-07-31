@@ -40,7 +40,7 @@ public:
     virtual bool build() = 0;
     virtual GraphPtr get_graph() = 0;
     virtual HybridELFPtr get_elf() = 0;
-    virtual const std::string &get_header() const = 0;
+    virtual const std::string get_header() const = 0;
 };
 
 } // namespace aipubt

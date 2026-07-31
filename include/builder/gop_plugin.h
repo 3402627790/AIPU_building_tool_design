@@ -32,7 +32,6 @@
 #include <string>
 #include <vector>
 
-#define GOPPLUGIN_TYPE 0x31
 namespace aipubt
 {
 struct ReadOnlyParam;
@@ -83,9 +82,9 @@ struct Dim3
 struct KernelInfo
 {
     std::string kernel_name;
-    Dim3 grid;
-    Dim3 block;
-    size_t sharemem_size;
+    Dim3 grid = tongue::Expr(1);
+    Dim3 block = tongue::Expr(32);
+    size_t sharemem_size = 0;
     std::vector<ReadOnlyParam> args;
 };
 
@@ -102,12 +101,8 @@ public:
     virtual void update_prefer_cfg(const std::string &key, const Any &value)
     {
     }
-    virtual const Any &get_cfg(const std::string &key)
-    {
-        static const Any key_not_found;
-        return key_not_found;
-    }
-    virtual const Any &get_cfg(const std::string &key, const Any &default_value)
+
+    virtual const Any &get_cfg(const std::string &key, const Any &default_value = Any::none)
     {
         return default_value;
     }

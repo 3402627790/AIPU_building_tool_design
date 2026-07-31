@@ -40,7 +40,8 @@ public:
     std::vector<ConstTensorPtr> get_const_tensors();
     std::map<NodePtr, std::set<TensorPtr>> get_ws_map();
     std::map<TensorPtr, NodePtr> get_surface_tensors();
-    std::map<std::string, std::string> get_kernel_lib();
+    const std::map<std::string, std::string> &get_device_lib() const;
+    const std::map<std::string, std::string> &get_host_lib() const;
 
 private:
     void record_tensors(NodePtr n, const BuilderParams &params);
@@ -48,8 +49,3 @@ private:
     GraphPtr m_graph;
     std::vector<ConstTensorPtr> m_const_tensors;
     std::map<NodePtr, std::set<TensorPtr>> m_ws_map;
-    std::map<TensorPtr, NodePtr> m_surface_tensors;
-    std::map<std::string, std::string> m_kernel_lib;
-};
-} // namespace aipubt
-#endif //!BUILDER_KERNEL_ADAPTOR_H

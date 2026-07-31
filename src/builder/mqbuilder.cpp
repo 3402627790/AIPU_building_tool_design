@@ -52,10 +52,12 @@ BuildStage mq_ir_stage_from_string(const std::string &stage)
         return BuildStage::KERNEL_ADAPT;
     if (stage == "mem_alloc")
         return BuildStage::MEM_ALLOC;
-    if (stage == "code_gen")
-        return BuildStage::CODE_GEN;
+    if (stage == "device_code_gen")
+        return BuildStage::DEVICE_CODE_GEN;
     if (stage == "assemble")
         return BuildStage::ASSEMBLE;
+    if (stage == "host_code_gen")
+        return BuildStage::HOST_CODE_GEN;
     if (stage == "gen_obj")
         return BuildStage::GEN_OBJ;
 
@@ -74,10 +76,12 @@ std::string mq_ir_stage_to_string(BuildStage stage)
         return "kernel_adapt";
     case BuildStage::MEM_ALLOC:
         return "mem_alloc";
-    case BuildStage::CODE_GEN:
-        return "code_gen";
+    case BuildStage::DEVICE_CODE_GEN:
+        return "device_code_gen";
     case BuildStage::ASSEMBLE:
         return "assemble";
+    case BuildStage::HOST_CODE_GEN:
+        return "host_code_gen";
     case BuildStage::GEN_OBJ:
         return "gen_obj";
     default:
@@ -102,9 +106,13 @@ HybridELFPtr MqBuilder::get_elf()
     return m_elf;
 }
 
-const std::string &MqBuilder::get_header() const
+const std::string MqBuilder::get_header() const
 {
-    return m_header;
+    if (m_graph->attrs().count("header"))
+    {
+        return m_graph->attrs()["header"];
+    }
+    return std::string();
 }
 
 std::map<TensorPtr, uint32_t> MqBuilder::get_tensor_index_map()
@@ -120,8 +128,9 @@ std::vector<BuildPhase> MqBuilder::create_phases()
         {"schedule", BuildStage::SCHEDULE, [this]() { return phase_schedule(); }},
         {"kernel_adapt", BuildStage::KERNEL_ADAPT, [this]() { return phase_kernel_adapt(); }},
         {"mem_alloc", BuildStage::MEM_ALLOC, [this]() { return phase_mem_alloc(); }},
-        {"code_gen", BuildStage::CODE_GEN, [this]() { return phase_code_gen(); }},
+        {"device_code_gen", BuildStage::DEVICE_CODE_GEN, [this]() { return phase_device_code_gen(); }},
         {"assemble", BuildStage::ASSEMBLE, [this]() { return phase_assemble(); }},
+        {"host_code_gen", BuildStage::HOST_CODE_GEN, [this]() { return phase_host_code_gen(); }},
         {"gen_obj", BuildStage::GEN_OBJ, [this]() { return phase_gen_obj(); }},
     };
 }
@@ -163,7 +172,7 @@ bool MqBuilder::build()
                     ERROR() << "mq_load_ir: failed to load cached MQ IR attributes from " << mq_load_ir;
                     return false;
                 }
-                if (save_stage == BuildStage::CODE_GEN)
+                if (save_stage == BuildStage::DEVICE_CODE_GEN)
                 {
                     m_elf = load_mq_ir_cache_elf(mq_load_ir, ir_stage_name);
                     if (!m_elf)
@@ -171,8 +180,6 @@ bool MqBuilder::build()
                         ERROR() << "mq_load_ir: failed to load cached HybridELF from " << mq_load_ir;
                         return false;
                     }
-                    CodeGenerator code_gen;
-                    m_header = code_gen.get_cpshost_header();
                 }
             }
         }
@@ -188,7 +195,7 @@ bool MqBuilder::build()
         if (!mq_save_ir.empty() && phase.stage == save_stage)
         {
             save_mq_ir_cache(m_graph, mq_save_ir, ir_stage_name);
-            if (phase.stage == BuildStage::CODE_GEN &&
+            if (phase.stage == BuildStage::DEVICE_CODE_GEN &&
                 !save_mq_ir_cache_elf(m_elf, mq_save_ir, ir_stage_name))
             {
                 return false;
@@ -210,15 +217,15 @@ bool MqBuilder::phase_optimize()
     }
 
     // NodePtr src;
-    // for(auto n : m_graph->nodes())
+    // for (auto n : m_graph->nodes())
     // {
     //     INFO() << n;
-    //     if(n->name() == "subgraph_Pad_0")
+    //     if (n->name() == "subgraph_Pad_0")
     //     {
     //         src = n;
     //     }
-    //     if(n->name() == "subgraph_Pad0_2")
-    //     // if(n->name() == "subgraph_Pad0_1")
+    //     // if(n->name() == "subgraph_Pad0_2")
+    //     if (n->name() == "subgraph_Pad0_1")
     //     {
     //         n->set_attr("invld_src", NodeRef(src));
     //     }
@@ -258,8 +265,10 @@ bool MqBuilder::phase_kernel_adapt()
     m_graph->set_attr("ws_map", ws_map);
     auto surface_tensors = kernel_adapter.get_surface_tensors();
     m_graph->set_attr("surface_tensors", surface_tensors);
-    auto kernel_lib_names = kernel_adapter.get_kernel_lib();
-    m_graph->set_attr("kernel_lib_names", kernel_lib_names);
+    auto device_lib_names = kernel_adapter.get_device_lib();
+    auto host_lib_names = kernel_adapter.get_host_lib();
+    m_graph->set_attr("device_lib_names", device_lib_names);
+    m_graph->set_attr("host_lib_names", host_lib_names);
     return true;
 }
 
@@ -331,13 +340,13 @@ bool MqBuilder::phase_mem_alloc()
     return true;
 }
 
-bool MqBuilder::phase_code_gen()
+bool MqBuilder::phase_device_code_gen()
 {
     CodeGenerator code_gen;
-    std::map<std::string, std::string> kernel_lib_names = m_graph->attrs()["kernel_lib_names"];
-    code_gen.set_kernel_lib(kernel_lib_names);
-    code_gen.code_gen(m_elf);
-    m_header = code_gen.get_cpshost_header();
+    std::map<std::string, std::string> device_lib_names = m_graph->attrs()["device_lib_names"];
+    code_gen.set_graph(m_graph);
+    code_gen.set_device_lib(device_lib_names);
+    code_gen.gen_device_code(m_elf->get_cpself());
 
     return true;
 }
@@ -361,6 +370,19 @@ bool MqBuilder::phase_assemble()
     m_graph->set_attr("tensor_index_map", tensor_index_map);
     auto const_index_map = assembler.get_const_index_map();
     m_graph->set_attr("const_index_map", const_index_map);
+
+    return true;
+}
+
+bool MqBuilder::phase_host_code_gen()
+{
+    CodeGenerator code_gen;
+    std::map<std::string, std::string> host_lib_names = m_graph->attrs()["host_lib_names"];
+    code_gen.set_graph(m_graph);
+    code_gen.set_host_lib(host_lib_names);
+    code_gen.gen_host_code(m_elf);
+    auto header = code_gen.get_cpshost_header();
+    m_graph->set_attr("header", header);
 
     return true;
 }
@@ -389,8 +411,11 @@ bool MqBuilder::phase_gen_obj()
     auto &msg = m_elf->get_compiler_msg();
     msg.build_version = AIPUBIN_BT_VERSION_NUMBER;
     msg.arch = get_target()->gen_arch_number();
-    // TODO: check if has host plugins
-    // msg.flag |= HybridELF::HAS_HOST_CODE;
+    std::map<std::string, std::string> host_lib_names = m_graph->attrs()["host_lib_names"];
+    if (host_lib_names.size())
+    {
+        msg.flag |= HybridELF::HAS_HOST_CODE;
+    }
     if (BuilderConfig::get<bool>(Constants::enable_ds))
     {
         msg.flag |= HybridELF::ENABLE_DS;

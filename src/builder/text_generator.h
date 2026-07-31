@@ -45,8 +45,9 @@ kernel_generator_func get_kernel_generator(const OpType t);
 std::map<std::string, BuilderText> &get_text_cache_map();
 const std::string get_kernel_func_name(const std::string &libname);
 const std::string get_lib_full_filename(const std::string &libname);
-
+std::vector<std::string> get_all_lib_paths();
 const std::vector<ARFileReader> &get_all_afiles();
+
 class KernelGeneratorRegister
 {
 public:
@@ -116,5 +117,5 @@ inline bool is_valid_kernel(const std::string &kernel)
 {
     return !kernel.empty();
 }
-};     // namespace aipubt
+} // namespace aipubt
 #endif //! BUILDER_TEXT_GENERATOR_H

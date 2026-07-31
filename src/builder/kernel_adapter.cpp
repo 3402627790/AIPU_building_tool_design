@@ -104,19 +104,19 @@ void KernelAdapter::kernel_adapt()
                 {
                     auto plugin_impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
                     auto kernel_infos = n->get_attr<KernelInfos>(Constants::kernel_infos);
+                    auto is_host_impl = n->get_attr<bool>(Constants::is_host_impl);
                     auto lib_name = plugin_impl->kernel_cpsbin();
-                    if (lib_name == "GB_DEFAULT_PATH")
-                    {
-                        ERROR();
-                    }
-                    else if (lib_name == "")
-                    {
-                        lib_name = "GB_DEFAULT_PATH";
-                    }
                     for (auto info : kernel_infos)
                     {
                         INFO() << "kernel for " << n << " " << info.kernel_name;
-                        m_kernel_lib[info.kernel_name] = lib_name;
+                        if (is_host_impl)
+                        {
+                            m_host_lib[info.kernel_name] = lib_name;
+                        }
+                        else
+                        {
+                            m_device_lib[info.kernel_name] = lib_name;
+                        }
                         record_tensors(n, info.args);
 
                         for (auto &arg : info.args)
@@ -160,9 +160,14 @@ std::map<TensorPtr, NodePtr> KernelAdapter::get_surface_tensors()
     return m_surface_tensors;
 }
 
-std::map<std::string, std::string> KernelAdapter::get_kernel_lib()
+const std::map<std::string, std::string> &KernelAdapter::get_device_lib() const
 {
-    return m_kernel_lib;
+    return m_device_lib;
+}
+
+const std::map<std::string, std::string> &KernelAdapter::get_host_lib() const
+{
+    return m_host_lib;
 }
 
 } // namespace aipubt

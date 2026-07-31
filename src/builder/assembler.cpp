@@ -242,24 +242,26 @@ void sync_wait(std::vector<task_t> &stream, int index, int mask)
     }
 }
 
-void Assembler::setup_stream_offset(size_t first_kernel, NodePtr sgn, std::vector<task_t> &stream, size_t stream_id)
+void Assembler::insert_empty_task(GraphPtr sg, std::vector<task_t> &stream, size_t stream_id)
 {
-    auto find_stream_index = [this](NodePtr n, const std::vector<task_t> &stream) -> int {
-        for (size_t i = 0; i < stream.size(); ++i)
-        {
-            auto task = stream.at(i);
-            if (m_task_node_map[task.id] == n)
-            {
-                return i;
-            }
-        }
-        return -1;
-    };
-    auto node = m_task_node_map[stream[first_kernel].id];
-    if (node->attrs().count("invld_src")) //first packet need invalidate
+    if (sg->nodes().size() == 0)
     {
+        return;
+    }
 
-        auto src_node = node->get_attr<NodeRef>("invld_src").lock();
+    NodePtr first_node;
+    for (auto n : sg->nodes())
+    {
+        if (n->type() == OpType_Input || n->type() == OpType_SubGraphInput)
+        {
+            continue;
+        }
+        first_node = n;
+        break;
+    }
+    if (first_node && first_node->attrs().count("invld_src")) //first packet need invalidate
+    {
+        auto src_node = first_node->get_attr<NodeRef>("invld_src").lock();
         if (!src_node->attrs().count(Constants::stream_id))
         {
             ERROR() << src_node << " has no stream";
@@ -278,22 +280,38 @@ void Assembler::setup_stream_offset(size_t first_kernel, NodePtr sgn, std::vecto
             empty_task.dma.osd_ctrl = 0;
             empty_task.dma.sync.set_mask = 0;
             empty_task.dma.sync.wait_mask = 0;
-            stream.insert(stream.begin() + first_kernel, empty_task);
+            stream.push_back(empty_task);
             m_task_kernel_map[empty_task.id] = "empty";
-            m_task_node_map[empty_task.id] = node->parents()[0]; //subgraph_input node
-            if (node->parents()[0]->type() != OpType_SubGraphInput)
+            m_task_node_map[empty_task.id] = first_node->parents()[0]; //subgraph_input node
+            if (first_node->parents()[0]->type() != OpType_SubGraphInput)
             {
                 ERROR();
             }
             else
             {
-                int level = node->get_attr_deep(Constants::schedule_level);
-                int gid = node->get_attr_deep<int>(Constants::schedule_gid);
-                node->parents()[0]->set_attr(Constants::schedule_level, level);
-                node->parents()[0]->set_attr(Constants::schedule_gid, gid);
+                int level = first_node->get_attr_deep(Constants::schedule_level);
+                int gid = first_node->get_attr_deep<int>(Constants::schedule_gid);
+                first_node->parents()[0]->set_attr(Constants::schedule_level, level);
+                first_node->parents()[0]->set_attr(Constants::schedule_gid, gid);
             }
         }
     }
+    return;
+}
+
+void Assembler::setup_stream_offset(size_t first_kernel, std::vector<task_t> &stream, size_t stream_id)
+{
+    auto find_stream_index = [this](NodePtr n, const std::vector<task_t> &stream) -> int {
+        for (size_t i = 0; i < stream.size(); ++i)
+        {
+            auto task = stream.at(i);
+            if (m_task_node_map[task.id] == n)
+            {
+                return i;
+            }
+        }
+        return -1;
+    };
 
     for (size_t i = first_kernel; i < stream.size(); ++i)
     {
@@ -710,6 +728,8 @@ void Assembler::assembly()
 
                 auto sg = sgn->subgraph();
                 auto original_size = stream.size();
+
+                insert_empty_task(sg, stream, stream_id);
                 for (auto n : sg->nodes())
                 {
                     if (n->type() == OpType_Input || n->type() == OpType_SubGraphInput)
@@ -722,6 +742,7 @@ void Assembler::assembly()
                         auto kernel_infos = n->get_attr<KernelInfos>(Constants::kernel_infos);
                         auto param_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::param_bases);
                         auto stream_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::stream_bases);
+                        auto is_host_impl = n->get_attr<bool>(Constants::is_host_impl);
                         for (size_t i = 0; i < kernel_infos.size(); ++i)
                         {
                             auto &info = kernel_infos[i];
@@ -731,92 +752,121 @@ void Assembler::assembly()
                             *param_base = *m_param_base + m_params.size() * PARAM_UNIT_SIZE;
                             *stream_base = *m_stream_base + stream.size() * PACKET_UNIT_SIZE;
                             // DEBUG() << "kernel: " << info.kernel_name << " base 0x" << std::hex << param_base->offset();
-                            param_info_t kernel_param;
-                            std::string kernel_name = info.kernel_name;
-                            auto [param_bin, param_size] = m_elf->get_note_section(note_section, "kernel." + kernel_name, 1);
-                            if (param_size < sizeof(param_info_t))
+                            if (is_host_impl)
                             {
-                                ERROR() << "param size not enough: " << param_size;
+                                task_t b_set;
+                                b_set.id = get_task_id();
+                                b_set.type = TASK_TYPE_BARRIER_SET;
+                                b_set.invalid_offset = 0;
+                                b_set.barrier_set.addr = 0x1000000 + 0x24; // BARRIER_REG1 Register
+                                b_set.barrier_set.data = 1;
+                                b_set.barrier_set.wr_be = 0xf;
+                                b_set.barrier_set.interrupt = 1;
+                                b_set.barrier_set.timer_mode = 0;
+                                b_set.barrier_set.bar_src = 1; // src is register
+                                stream.push_back(b_set);
+
+                                task_t b_wait;
+                                b_wait.id = get_task_id();
+                                b_wait.type = TASK_TYPE_BARRIER_WAIT;
+                                b_wait.invalid_offset = 0;
+                                b_wait.barrier_wait.addr = 0x1000000 + 0x24; // BARRIER_REG1 Register
+                                b_wait.barrier_wait.ref = 1;
+                                b_wait.barrier_wait.rd_be = 0xf;
+                                b_wait.barrier_wait.func = 0;          // ==ref_val
+                                b_wait.barrier_wait.pool_interval = 0; // ignore for src=1
+                                b_wait.barrier_wait.bar_src = 1;       // src is register
+                                stream.push_back(b_wait);
                             }
                             else
                             {
-                                std::memcpy(&kernel_param, param_bin, sizeof(param_info_t));
-                                // INFO() << "param size: " << kernel_param.size;
-                                // INFO() << "param kind: " << kernel_param.kind;
-                            }
+                                param_info_t kernel_param;
+                                std::string kernel_name = info.kernel_name;
+                                auto [param_bin, param_size] = m_elf->get_note_section(note_section, "kernel." + kernel_name, 1);
+                                if (param_size < sizeof(param_info_t))
+                                {
+                                    ERROR() << "param size not enough: " << param_size;
+                                }
+                                else
+                                {
+                                    std::memcpy(&kernel_param, param_bin, sizeof(param_info_t));
+                                    // INFO() << "param size: " << kernel_param.size;
+                                    // INFO() << "param kind: " << kernel_param.kind;
+                                }
 
-                            launch_info_t kernel_launch;
-                            auto [launch_bin, launch_size] = m_elf->get_note_section(note_section, "kernel." + kernel_name, 2);
-                            if (launch_size < sizeof(launch_info_t))
-                            {
-                                ERROR() << "launch size not enough: " << launch_size;
-                            }
-                            else
-                            {
-                                std::memcpy(&kernel_launch, launch_bin, sizeof(launch_info_t));
-                                // INFO() << "launch ib_size: " << kernel_launch.ib_size;
-                                // INFO() << "launch static_sm_bytes: " << kernel_launch.static_sm_bytes;
-                                // INFO() << "launch param_size: " << kernel_launch.param_size;
-                                // INFO() << "launch sreg_param_size: " << (uint16_t)kernel_launch.sreg_param_size;
-                                // INFO() << "launch sreg_cnt: " << (uint16_t)kernel_launch.sreg_cnt;
-                                // INFO() << "launch vreg_cnt: " << (uint16_t)kernel_launch.vreg_cnt;
-                                // INFO() << "launch head_wg_vreg_cnt: " << (uint16_t)kernel_launch.head_wg_vreg_cnt;
-                                // INFO() << "launch isa_set: " << (uint16_t)kernel_launch.isa_set;
-                                // INFO() << "launch subnormal_en: " << (uint16_t)kernel_launch.subnormal_en;
-                                // INFO() << "launch saturation_en: " << (uint16_t)kernel_launch.saturation_en;
-                                // INFO() << "launch padding: " << (uint16_t)kernel_launch.padding;
-                            }
-                            auto [offset, size] = m_elf->get_symbol(symtab_section, kernel_name);
-                            if (offset == 0 && size == 0)
-                            {
-                                ERROR() << "cannot find kernel: " << kernel_name;
-                            }
+                                launch_info_t kernel_launch;
+                                auto [launch_bin, launch_size] = m_elf->get_note_section(note_section, "kernel." + kernel_name, 2);
+                                if (launch_size < sizeof(launch_info_t))
+                                {
+                                    ERROR() << "launch size not enough: " << launch_size;
+                                }
+                                else
+                                {
+                                    std::memcpy(&kernel_launch, launch_bin, sizeof(launch_info_t));
+                                    // INFO() << "launch ib_size: " << kernel_launch.ib_size;
+                                    // INFO() << "launch static_sm_bytes: " << kernel_launch.static_sm_bytes;
+                                    // INFO() << "launch param_size: " << kernel_launch.param_size;
+                                    // INFO() << "launch sreg_param_size: " << (uint16_t)kernel_launch.sreg_param_size;
+                                    // INFO() << "launch sreg_cnt: " << (uint16_t)kernel_launch.sreg_cnt;
+                                    // INFO() << "launch vreg_cnt: " << (uint16_t)kernel_launch.vreg_cnt;
+                                    // INFO() << "launch head_wg_vreg_cnt: " << (uint16_t)kernel_launch.head_wg_vreg_cnt;
+                                    // INFO() << "launch isa_set: " << (uint16_t)kernel_launch.isa_set;
+                                    // INFO() << "launch subnormal_en: " << (uint16_t)kernel_launch.subnormal_en;
+                                    // INFO() << "launch saturation_en: " << (uint16_t)kernel_launch.saturation_en;
+                                    // INFO() << "launch padding: " << (uint16_t)kernel_launch.padding;
+                                }
+                                auto [offset, size] = m_elf->get_symbol(symtab_section, kernel_name);
+                                if (offset == 0 && size == 0)
+                                {
+                                    ERROR() << "cannot find kernel: " << kernel_name;
+                                }
 
-                            std::vector<ReadOnlyParam> dims = {
-                                info.grid.x,
-                                info.grid.y,
-                                info.grid.z,
-                                info.block.x,
-                                info.block.y,
-                                info.block.z,
-                            };
-                            eval_expr_params(m_graph, dims);
+                                std::vector<ReadOnlyParam> dims = {
+                                    info.grid.x,
+                                    info.grid.y,
+                                    info.grid.z,
+                                    info.block.x,
+                                    info.block.y,
+                                    info.block.z,
+                                };
+                                eval_expr_params(m_graph, dims);
 
-                            task_t task;
-                            task.id = get_task_id();
-                            task.type = TASK_TYPE_KERNEL;
-                            task.invalid_offset = 0;
-                            task.kernel.offset = offset;
-                            task.kernel.grid_dim[0] = dims[0];
-                            task.kernel.grid_dim[1] = dims[1];
-                            task.kernel.grid_dim[2] = dims[2];
-                            task.kernel.block_dim[0] = dims[3];
-                            task.kernel.block_dim[1] = dims[4];
-                            task.kernel.block_dim[2] = dims[5];
-                            task.kernel.surfb_desp_num = 0;
-                            task.kernel.gb_param_offset = m_params.size() * PARAM_UNIT_SIZE;
-                            task.kernel.gb_param_size = params.size() * PARAM_UNIT_SIZE;
-                            task.kernel.ib_size = kernel_launch.ib_size;
-                            task.kernel.static_sm_bytes = kernel_launch.static_sm_bytes;
-                            task.kernel.param_size = kernel_launch.param_size;
-                            task.kernel.sreg_param_size = kernel_launch.sreg_param_size;
-                            task.kernel.sreg_cnt = kernel_launch.sreg_cnt;
-                            task.kernel.vreg_cnt = kernel_launch.vreg_cnt;
-                            task.kernel.head_wg_vreg_cnt = kernel_launch.head_wg_vreg_cnt;
-                            task.kernel.isa_set = kernel_launch.isa_set;
-                            task.kernel.subnormal_en = kernel_launch.subnormal_en;
-                            task.kernel.saturation_en = kernel_launch.saturation_en;
-                            task.kernel.padding = kernel_launch.padding;
-                            task.kernel.policy = 0;
-                            task.kernel.sync.set_mask = 0;
-                            task.kernel.sync.wait_mask = 0;
-                            task.kernel.l1d_op = 0;
-                            task.kernel.l1i_prefetch_stride = 0;
-                            task.kernel.pfc_group_en = 0;
-                            task.kernel.pfc_addr = 0;
-                            stream.push_back(task);
-                            m_task_node_map[task.id] = n;
-                            m_task_kernel_map[task.id] = kernel_name;
+                                task_t task;
+                                task.id = get_task_id();
+                                task.type = TASK_TYPE_KERNEL;
+                                task.invalid_offset = 0;
+                                task.kernel.offset = offset;
+                                task.kernel.grid_dim[0] = dims[0];
+                                task.kernel.grid_dim[1] = dims[1];
+                                task.kernel.grid_dim[2] = dims[2];
+                                task.kernel.block_dim[0] = dims[3];
+                                task.kernel.block_dim[1] = dims[4];
+                                task.kernel.block_dim[2] = dims[5];
+                                task.kernel.surfb_desp_num = 0;
+                                task.kernel.gb_param_offset = m_params.size() * PARAM_UNIT_SIZE;
+                                task.kernel.gb_param_size = params.size() * PARAM_UNIT_SIZE;
+                                task.kernel.ib_size = kernel_launch.ib_size;
+                                task.kernel.static_sm_bytes = kernel_launch.static_sm_bytes;
+                                task.kernel.param_size = kernel_launch.param_size;
+                                task.kernel.sreg_param_size = kernel_launch.sreg_param_size;
+                                task.kernel.sreg_cnt = kernel_launch.sreg_cnt;
+                                task.kernel.vreg_cnt = kernel_launch.vreg_cnt;
+                                task.kernel.head_wg_vreg_cnt = kernel_launch.head_wg_vreg_cnt;
+                                task.kernel.isa_set = kernel_launch.isa_set;
+                                task.kernel.subnormal_en = kernel_launch.subnormal_en;
+                                task.kernel.saturation_en = kernel_launch.saturation_en;
+                                task.kernel.padding = kernel_launch.padding;
+                                task.kernel.policy = 0;
+                                task.kernel.sync.set_mask = 0;
+                                task.kernel.sync.wait_mask = 0;
+                                task.kernel.l1d_op = 0;
+                                task.kernel.l1i_prefetch_stride = 0;
+                                task.kernel.pfc_group_en = 0;
+                                task.kernel.pfc_addr = 0;
+                                stream.push_back(task);
+                                m_task_node_map[task.id] = n;
+                                m_task_kernel_map[task.id] = kernel_name;
+                            }
 
                             if (BuilderConfig::get<bool>(Constants::dump_rt_output_tensors))
                             {
@@ -929,7 +979,7 @@ void Assembler::assembly()
                     continue;
                 }
 
-                setup_stream_offset(original_size, sgn, stream, stream_id);
+                setup_stream_offset(original_size, stream, stream_id);
                 setup_stream_sync(original_size, sgn, stream, stream_id);
                 //packet handle done for this sg, no packet can be changed
             }

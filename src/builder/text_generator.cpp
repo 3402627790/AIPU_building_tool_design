@@ -58,7 +58,7 @@ std::map<std::string, BuilderText> &get_text_cache_map()
     return TEXTCACHER.text_cache;
 }
 
-static std::vector<std::string> get_all_lib_pathes()
+std::vector<std::string> get_all_lib_paths()
 {
     static std::vector<std::string> ret;
     if (ret.size())
@@ -201,9 +201,9 @@ std::string complete_text_code_name(const std::string &base_name)
 
 const std::string get_lib_full_filename(const std::string &libname)
 {
-    auto lib_pathes = get_all_lib_pathes();
+    auto lib_paths = get_all_lib_paths();
     //read file
-    for (auto path : lib_pathes)
+    for (auto path : lib_paths)
     {
         std::string fullname = path + "/" + libname;
         if (utils::file_exists(fullname))
@@ -223,7 +223,6 @@ const std::string get_lib_full_filename(const std::string &libname)
 
 const std::string get_kernel_func_name(const std::string &libname)
 {
-
     return ELFReader::get_kernel_func(get_lib_full_filename(libname));
 }
 static BuilderText get_text_content_by_filename_internal(const std::string &filename)
@@ -232,10 +231,10 @@ static BuilderText get_text_content_by_filename_internal(const std::string &file
     {
         return TEXTCACHER.text_cache[filename];
     }
-    auto lib_pathes = get_all_lib_pathes();
+    auto lib_paths = get_all_lib_paths();
 
     //read file
-    for (auto path : lib_pathes)
+    for (auto path : lib_paths)
     {
         std::ifstream infile;
         std::string fullname = path + "/" + filename;
@@ -349,4 +348,4 @@ KernelGeneratorRegister::KernelGeneratorRegister(OpType t, kernel_generator_func
 {
     (get_kernel_generator_map())[t] = func;
 }
-}; // namespace aipubt
+} // namespace aipubt
