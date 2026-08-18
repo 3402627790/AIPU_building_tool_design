@@ -10,7 +10,7 @@ set(AIPUGC_ROOT_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR})
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 cmake_policy(SET CMP0003 NEW)
 
-set(INTERNAL_LLVM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/llvm_mlir_sdk")
+set(INTERNAL_LLVM_DIR "/project/ai/scratch01/qidson01/code/AIPU_llvm_design/build")
 set(MLIR_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/mlir" CACHE PATH "Path to internal MLIR config" FORCE)
 set(LLVM_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/llvm" CACHE PATH "Path to internal LLVM config" FORCE)
 
@@ -67,6 +67,10 @@ add_llvm_library(libAIPUMLIR MODULE
     MLIRSPIRVTransforms
     MLIRVectorTransforms
     MLIRDialect
+    MLIRTargetLLVMIRImport
+    LLVMCore
+    LLVMIRReader
+    LLVMAsmParser
     ${AIPUBT_LIB}
   )
 

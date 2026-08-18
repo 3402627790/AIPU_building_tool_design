@@ -16,16 +16,24 @@ add_executable(
   ${CMAKE_CURRENT_SOURCE_DIR}/utils.cpp
 )
 
+add_executable(
+  aipugc-llir-load
+  ${CMAKE_CURRENT_SOURCE_DIR}/llir_load_main.cpp
+)
+
 # Search priority, avoid search /project/ai/scratch01/AIPUBuilder/lib/libAIPUMLIR.so
 target_link_directories(aipugc PUBLIC ${AIPUGC_ROOT_BIN_DIR})
+target_link_directories(aipugc-llir-load PUBLIC ${AIPUGC_ROOT_BIN_DIR})
 #target_link_directories(aipugc PUBLIC ${LLVMPublicPath})
 target_link_directories(aipugc PUBLIC ${AIPUBuildPath}/lib)
+target_link_directories(aipugc-llir-load PUBLIC ${AIPUBuildPath}/lib)
 
 get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
 get_property(extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
 
 add_dependencies(aipugc libAIPUMLIR)
+add_dependencies(aipugc-llir-load libAIPUMLIR)
 
 target_link_libraries(aipugc
   PUBLIC
@@ -118,4 +126,26 @@ target_link_libraries(aipugc
     LLVMNVPTXCodeGen
     LLVMNVPTXDesc
     LLVMNVPTXInfo
+)
+
+target_link_libraries(aipugc-llir-load
+  PUBLIC
+    ${AIPUBuildLIB}
+    AIPUMLIR
+
+    ${dialect_libs}
+    ${conversion_libs}
+    ${extension_libs}
+
+    MLIRIR
+    MLIRSupport
+    MLIRParser
+    MLIRDialect
+    MLIRLLVMDialect
+    MLIRTargetLLVMIRImport
+
+    LLVMCore
+    LLVMIRReader
+    LLVMAsmParser
+    LLVMSupport
 )
