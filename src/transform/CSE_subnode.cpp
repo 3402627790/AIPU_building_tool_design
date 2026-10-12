@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -23,7 +23,7 @@
 #include "core/config.h"
 #include "core/core.h"
 #include "core/ops/ops.h"
-#include "passes.h"
+#include "transform/passes.h"
 #include <algorithm>
 #include <set>
 
@@ -123,6 +123,13 @@ static std::vector<NodePtrList> criteria(NodePtr n, std::map<NodePtr, uint32_t> 
         auto child_i = n->children()[i];
         std::string tsg_name_i = child_i->get_attr(Constants::tsg_name);
         if (child_i->type() == OpType_Reshape && child_i->outputs()[0]->is_io_tensor())
+        {
+            continue;
+        }
+
+        if (child_i->type() == OpType_DynamicQuantize &&
+            child_i->outputs()[0]->consumers().size() == 1 &&
+            child_i->outputs()[0]->consumers()[0]->type() == OpType_FullyConnected)
         {
             continue;
         }

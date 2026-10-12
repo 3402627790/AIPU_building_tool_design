@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2022 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2022-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -66,12 +66,15 @@ static inline bool criteria(std::vector<aipubt::NodePtr> m)
     }
 
     auto const_shape = add_consts->outputs()[0]->shape();
-    if (const_shape.size() != const_shape[-1])
+
+    const bool is_scalar_const = const_shape.dim() == 0;
+    if (!is_scalar_const && const_shape.size() != (size_t)const_shape[-1])
     {
         return false;
     }
 
-    if (const_shape.size() != 1 && add->inputs()[0]->shape()[-1] != add->inputs()[1]->shape()[-1])
+    if (!is_scalar_const && const_shape.size() != 1 &&
+        add->inputs()[0]->shape()[-1] != add->inputs()[1]->shape()[-1])
     {
         return false;
     }

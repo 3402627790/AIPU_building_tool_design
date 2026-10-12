@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -30,22 +30,22 @@
  *
  * =====================================================================================
  */
- #include "passes.h"
- #include "core/core.h"
- #include "core/compute_tensor.h"
- 
- namespace aipubt
- {
- 
- static void merge_fc_weight(ComputeTensor& fc_weight, ComputeTensor& fc_bias, ComputeTensor& bn_weight, ComputeTensor& bn_bias)
- {
-     fc_weight = fc_weight * bn_weight.reshape((*bn_weight).shape()[0], 1);
-     fc_bias = fc_bias * bn_weight + bn_bias;
- }
- 
+#include "core/compute_tensor.h"
+#include "core/core.h"
+#include "transform/passes.h"
+
+namespace aipubt
+{
+
+static void merge_fc_weight(ComputeTensor &fc_weight, ComputeTensor &fc_bias, ComputeTensor &bn_weight, ComputeTensor &bn_bias)
+{
+    fc_weight = fc_weight * bn_weight.reshape((*bn_weight).shape()[0], 1);
+    fc_bias = fc_bias * bn_weight + bn_bias;
+}
+
 static bool is_float_node(NodePtr node)
 {
-    for (const auto& tensors : { node->inputs(), node->outputs() })
+    for (const auto &tensors : {node->inputs(), node->outputs()})
     {
         for (auto tensor : tensors)
         {
@@ -115,16 +115,16 @@ bool fuse_fc_bn(GraphPtr graph)
                     << " bn: " << bn_node->name();
 
             auto origin_fc_weight = fc_node->constants()["weights"];
-            auto ic = origin_fc_weight->shape()[-1];
-            auto oc = origin_fc_weight->shape().size() / ic;
+            int32_t ic = origin_fc_weight->shape()[-1];
+            int32_t oc = origin_fc_weight->shape().size() / ic;
 
             ComputeTensor fc_weight = origin_fc_weight;
             auto fc_weight_zp = origin_fc_weight->quantization().offsets();
             bool is_quant_weight = false;
             if (fc_weight_zp.size() > 0)
             {
-                auto group_num = fc_weight_zp->shape().size() / oc;
-                fc_weight_zp = fc_weight_zp.reshape(std::vector<int32_t>{oc, group_num}).permute(std::vector<int32_t>{1, 0});
+                int32_t group_num = fc_weight_zp->shape().size() / oc;
+                fc_weight_zp = fc_weight_zp.reshape(std::vector<int32_t>{(int32_t)oc, group_num}).permute(std::vector<int32_t>{1, 0});
                 std::vector<ComputeTensor> zp_vec(ic / group_num, fc_weight_zp);
                 ComputeTensor new_fc_weight_zp = ComputeTensor::concat(zp_vec);
                 new_fc_weight_zp = new_fc_weight_zp.reshape(std::vector<int32_t>{ic / group_num, group_num, oc}).permute(std::vector<int32_t>{2, 1, 0}).reshape(fc_weight->shape());
@@ -134,11 +134,11 @@ bool fuse_fc_bn(GraphPtr graph)
             auto fc_weight_scale = origin_fc_weight->quantization().scales();
             if (fc_weight_scale.size() > 0)
             {
-                auto group_num = fc_weight_scale->shape().size() / oc;
+                int32_t group_num = fc_weight_scale->shape().size() / oc;
                 fc_weight_scale = fc_weight_scale.reshape(std::vector<int32_t>{oc, group_num}).permute(std::vector<int32_t>{1, 0});
                 std::vector<ComputeTensor> scale_vec(ic / group_num, fc_weight_scale);
                 ComputeTensor new_fc_weight_scale = ComputeTensor::concat(scale_vec);
-                new_fc_weight_scale = new_fc_weight_scale.reshape(std::vector<int32_t>{ic / group_num, group_num, oc}).permute(std::vector<int32_t>{2, 1, 0}).reshape(fc_weight->shape());
+                new_fc_weight_scale = new_fc_weight_scale.reshape(std::vector<int32_t>{ic / group_num, group_num, (int32_t)oc}).permute(std::vector<int32_t>{2, 1, 0}).reshape(fc_weight->shape());
                 fc_weight = fc_weight.astype(Tensor::FP32) / new_fc_weight_scale.astype(Tensor::FP32);
                 is_quant_weight = true;
             }

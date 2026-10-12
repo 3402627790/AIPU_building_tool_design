@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -32,15 +32,6 @@
 #include <map>
 namespace aipubt
 {
-static std::map<std::string, TensorPtr> GLOBAL_TENSOR_DICT = {};
-#define ADD_TENSOR_WITH_CHECK(tensor, name)                                               \
-    {                                                                                     \
-        if (GLOBAL_TENSOR_DICT.count(name))                                               \
-        {                                                                                 \
-            WARN() << "double create Tensor:" << GLOBAL_TENSOR_DICT[name] << " " << name; \
-        }                                                                                 \
-        GLOBAL_TENSOR_DICT[name] = tensor;                                                \
-    }
 
 static std::map<std::string, Tensor::Dtype> STR_TO_DTYPE_MAP =
     {
@@ -110,12 +101,8 @@ static std::map<Tensor::Dtype, std::string> DTYPE_TO_STR_MAP =
         {Tensor::COMPACT_FP4E2M1FN, "compact_fp4e2m1fn"},
 };
 
-Tensor::~Tensor()
+void Tensor::_clean_data()
 {
-    if (m_offset)
-    {
-        // delete m_offset;
-    }
     if (ref_count)
     {
         if (ref_count->load(std::memory_order_acquire) > 0)
@@ -124,26 +111,48 @@ Tensor::~Tensor()
         }
         if (ref_count->load(std::memory_order_acquire) == 0)
         {
-            if (m_data && owns_m_data)
+            if (m_data && m_owner_host->load(std::memory_order_acquire))
             {
                 delete[] m_data;
             }
+            else
+            {
+                m_attrs.erase("_py");
+            }
             m_data = nullptr;
 
-            if (m_device_data && owns_m_device_data)
+            if (m_device_data && m_owner_device->load(std::memory_order_acquire))
             {
                 delete[] m_device_data;
+            }
+            else
+            {
+                m_attrs.erase("_py_device");
             }
             m_device_data = nullptr;
 
             delete ref_count;
             ref_count = nullptr;
+            delete m_owner_host;
+            delete m_owner_device;
+            m_owner_host = nullptr;
+            m_owner_device = nullptr;
         }
     }
-    // if (GLOBAL_TENSOR_DICT.count(m_name))
-    // {
-    //     GLOBAL_TENSOR_DICT.erase(m_name);
-    // }
+}
+bool Tensor::transfer_ownership(bool is_host)
+{
+    bool owned = true;
+    if (is_host)
+    {
+        return m_owner_host->compare_exchange_strong(owned, false);
+    }
+    return m_owner_device->compare_exchange_strong(owned, false);
+}
+
+Tensor::~Tensor()
+{
+    _clean_data();
 }
 bool Tensor::is_signed(Tensor::Dtype dt)
 {
@@ -153,7 +162,6 @@ bool Tensor::is_signed(Tensor::Dtype dt)
     }
     return dt & 0b1;
 }
-
 
 bool Tensor::is_int(Tensor::Dtype dt)
 {
@@ -240,6 +248,8 @@ Tensor::Tensor(void *data, size_t size)
     if (m_data)
     {
         ref_count = new std::atomic<int>(1);
+        m_owner_host = new std::atomic<bool>(true);
+        m_owner_device = new std::atomic<bool>(false);
     }
 }
 
@@ -256,35 +266,14 @@ Tensor::Tensor(const std::string &name, void *data, size_t size) : m_name(name)
     if (m_data)
     {
         ref_count = new std::atomic<int>(1);
+        m_owner_host = new std::atomic<bool>(true);
+        m_owner_device = new std::atomic<bool>(false);
     }
 }
 Tensor::Tensor(const Tensor &t)
 {
     // clean old data
-    if (ref_count)
-    {
-        if (ref_count->load(std::memory_order_acquire) > 0)
-        {
-            ref_count->fetch_sub(1, std::memory_order_acq_rel);
-        }
-        if (ref_count->load(std::memory_order_acquire) == 0)
-        {
-            if (m_data && owns_m_data)
-            {
-                delete[] m_data;
-            }
-            m_data = nullptr;
-
-            if (m_device_data && owns_m_device_data)
-            {
-                delete[] m_device_data;
-            }
-            m_device_data = nullptr;
-
-            delete ref_count;
-            ref_count = nullptr;
-        }
-    }
+    _clean_data();
     Tensor *ct = (Tensor *)(&t);
     auto pt = dynamic_cast<ProxyTensor *>(ct);
     if (pt)
@@ -293,18 +282,19 @@ Tensor::Tensor(const Tensor &t)
     }
     m_data = ct->m_data;
     m_device_data = ct->m_device_data;
-    m_owner = ct->m_owner;
     m_data_offset = ct->m_data_offset;
     m_shape = ct->m_shape;
     m_type = ct->m_type;
     (*m_offset) = (*ct->m_offset);
     ref_count = ct->ref_count;
+    m_owner_host = ct->m_owner_host;
+    m_owner_device = ct->m_owner_device;
     m_name = ct->m_name;
     if (ref_count)
     {
         ref_count->fetch_add(1, std::memory_order_relaxed);
     }
-    m_io = ct->m_io;
+    m_flag = ct->m_flag;
     // copy attrs
     m_attrs = ct->m_attrs;
     // Don't copy the owner
@@ -317,30 +307,8 @@ Tensor &Tensor::operator=(const Tensor &t)
     {
         return *this;
     }
-    if (ref_count)
-    {
-        if (ref_count->load(std::memory_order_acquire) > 0)
-        {
-            ref_count->fetch_sub(1, std::memory_order_acq_rel);
-        }
-        if (ref_count->load(std::memory_order_acquire) == 0)
-        {
-            if (m_data && owns_m_data)
-            {
-                delete[] m_data;
-            }
-            m_data = nullptr;
+    _clean_data();
 
-            if (m_device_data && owns_m_device_data)
-            {
-                delete[] m_device_data;
-            }
-            m_device_data = nullptr;
-
-            delete ref_count;
-            ref_count = nullptr;
-        }
-    }
     Tensor *ct = (Tensor *)(&t);
     auto pt = dynamic_cast<ProxyTensor *>(ct);
     if (pt)
@@ -349,12 +317,13 @@ Tensor &Tensor::operator=(const Tensor &t)
     }
     m_data = ct->m_data;
     m_device_data = ct->m_device_data;
-    m_owner = ct->m_owner;
     m_data_offset = ct->m_data_offset;
     m_shape = ct->m_shape;
     m_type = ct->m_type;
     (*m_offset) = (*ct->m_offset);
     ref_count = ct->ref_count;
+    m_owner_host = ct->m_owner_host;
+    m_owner_device = ct->m_owner_device;
     m_name = ct->m_name;
     if (ref_count)
     {
@@ -373,37 +342,15 @@ void Tensor::share_data_from(Tensor &t)
     {
         ct = pt->proxied_tensor(true).get();
     }
-    if (ref_count)
-    {
-        if (ref_count->load(std::memory_order_acquire) > 0)
-        {
-            ref_count->fetch_sub(1, std::memory_order_acq_rel);
-        }
-        if (ref_count->load(std::memory_order_acquire) == 0)
-        {
-            if (m_data && owns_m_data)
-            {
-                delete[] m_data;
-            }
-            m_data = nullptr;
-
-            if (m_device_data && owns_m_device_data)
-            {
-                delete[] m_device_data;
-            }
-            m_device_data = nullptr;
-
-            delete ref_count;
-            ref_count = nullptr;
-        }
-    }
+    _clean_data();
 
     m_data = ct->m_data;
     m_device_data = ct->m_device_data;
-    m_owner = ct->m_owner;
     m_data_offset = ct->m_data_offset;
     m_offset->size = ct->m_offset->size;
     ref_count = ct->ref_count;
+    m_owner_host = ct->m_owner_host;
+    m_owner_device = ct->m_owner_device;
     m_name = ct->m_name;
     if (ref_count)
     {
@@ -431,45 +378,19 @@ void Tensor::set_name(const std::string &name)
     m_name = new_name;
 }
 
-void Tensor::_set_host_device_data(void *d, const uint32_t &size, const bool owner, const bool is_host)
+void Tensor::_set_host_device_data(void *d, const size_t &size, const bool owner, const bool is_host)
 {
-    // delete old data
-    if (ref_count)
-    {
-        if (ref_count->load(std::memory_order_acquire) > 0)
-        {
-            ref_count->fetch_sub(1, std::memory_order_acq_rel);
-        }
-        if (ref_count->load(std::memory_order_acquire) == 0)
-        {
-            if (m_data && owns_m_data)
-            {
-                delete[] m_data;
-            }
-            m_data = nullptr;
-
-            if (m_device_data && owns_m_device_data)
-            {
-                delete[] m_device_data;
-            }
-            m_device_data = nullptr;
-
-            delete ref_count;
-            ref_count = nullptr;
-        }
-    }
+    _clean_data();
 
     if (is_host)
     {
         m_data = (char *)(d);
         m_device_data = nullptr;
-        owns_m_data = owner;
     }
     else
     {
         m_device_data = (char *)(d);
         m_data = nullptr;
-        owns_m_device_data = owner;
     }
 
     m_data_offset = 0;
@@ -488,53 +409,81 @@ void Tensor::_set_host_device_data(void *d, const uint32_t &size, const bool own
     if (m_data || m_device_data)
     {
         m_offset->size = size;
-        ref_count = new std::atomic<int>(1);
+void Tensor::share_data_from(Tensor &t)
+{
+    Tensor *ct = (Tensor *)(&t);
+    auto pt = dynamic_cast<ProxyTensor *>(ct);
+    if (pt)
+    {
+        ct = pt->proxied_tensor(true).get();
+    }
+    _clean_data();
+
+    m_data = ct->m_data;
+    m_device_data = ct->m_device_data;
+    m_data_offset = ct->m_data_offset;
+    m_offset->size = ct->m_offset->size;
+    ref_count = ct->ref_count;
+    m_owner_host = ct->m_owner_host;
+    m_owner_device = ct->m_owner_device;
+    m_name = ct->m_name;
+    if (ref_count)
+    {
+        ref_count->fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void Tensor::set_name(const std::string &name)
+{
+    auto new_name = name;
+    if (new_name.empty())
+    {
+        new_name = "_t" + std::to_string(get_tensor_counter());
+    }
+    auto n = m_node.lock();
+    if (n)
+    {
+        auto g = n->graph();
+        if (g)
+        {
+            g->m_tensors.erase(m_name);
+            g->m_tensors[new_name] = shared_from_this();
+        }
+    }
+    m_name = new_name;
+}
+
+void Tensor::_set_host_device_data(void *d, const size_t &size, const bool owner, const bool is_host)
+{
+    _clean_data();
+
+    if (is_host)
+    {
+        m_data = (char *)(d);
+        m_device_data = nullptr;
     }
     else
     {
-        ref_count = nullptr;
+        m_device_data = (char *)(d);
+        m_data = nullptr;
     }
-}
 
-void Tensor::set_data(void *d, uint32_t size)
-{
-    // data_ptr, data_size, ownership, host_or_device_data_set
-    _set_host_device_data(d, size, true, true);
-}
-
-void Tensor::set_device_data(void *d, uint32_t size, const bool owner)
-{
-    // data_ptr, data_size, ownership, host_or_device_data_set
-    _set_host_device_data(d, size, owner, false);
-}
-
-size_t Tensor::mem_size() const
-{
-    size_t bytes = m_shape.size() * dtype_bits(m_type) / 8.0 + 0.5;
-    return bytes;
-}
-
-size_t Tensor::buffer_size() const
-{
-    if (!m_shape.is_continuous())
+    m_data_offset = 0;
+    m_offset->size = size;
+    if (m_shape.size() * dtype_bits(m_type) / 8.0 != size)
     {
-        size_t bytes = m_shape.strides().at(0) * m_shape[0] * dtype_bits(m_type) / 8.0 + 0.5;
-        return bytes;
+        if (node())
+        {
+            WARN() << "Setting a data with size = " << size << " to tensor " << m_name << "of node: " << node()->name() << " which mem size should be " << m_shape.size() * dtype_bits(m_type) / 8.0;
+        }
+        else
+        {
+            WARN() << "Setting a data with size = " << size << " to tensor " << m_name << " which mem size should be " << m_shape.size() * dtype_bits(m_type) / 8.0;
+        }
     }
-    return mem_size();
-}
-
-void Tensor::set_io_tensor(bool iot)
-{
-    m_io = iot;
-}
-
-bool Tensor::is_io_tensor() const
-{
-    return m_io;
-}
-
-void Tensor::compact()
+    if (m_data || m_device_data)
+    {
+        m_offset->size = size;
 {
     static std::map<Tensor::Dtype, std::function<void(Tensor *)>> DTYPE_TO_COMPACT_MAP =
         {
@@ -655,10 +604,6 @@ bool Tensor::operator==(const Tensor &other) const
         return false;
     }
     else if (other.m_type != m_type)
-    {
-        return false;
-    }
-    else if (other.m_owner != m_owner)
     {
         return false;
     }
@@ -856,7 +801,7 @@ void Tensor::make_memory_continuous()
         auto strides = m_shape.strides();
         m_shape = TensorShape(m_shape, m_shape.layout()); // clean strides
         auto m_s = m_shape.strides();
-        for (int32_t i = 0; i < m_shape.size(); ++i)
+        for (size_t i = 0; i < m_shape.size(); ++i)
         {
             auto offset = index_to_offset(offset_to_index(i, m_s), strides);
             for (uint32_t j = 0; j < eltsize; ++j)
@@ -878,7 +823,7 @@ void Tensor::monopolize_data() // make no tensor share this data
     {
         return;
     }
-    if (m_shape.is_continuous())
+    if (m_shape.is_continuous() || !*m_owner_host)
     {
         char *data = new char[mem_size()];
         memcpy(data, m_data + m_data_offset, mem_size());

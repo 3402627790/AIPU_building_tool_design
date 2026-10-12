@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -18,7 +18,7 @@
  * @Author: Neo Wang 
  * @Date: 2021-02-05 13:52:58 
  * @Last Modified by: Neo Wang
- * @Last Modified time: 2024-08-26 14:36:35
+ * @Last Modified time: 2024-08-26 14:36:36
  */
 #include "core/any.h"
 #include <cstdint>

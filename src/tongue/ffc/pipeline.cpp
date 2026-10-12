@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -18,9 +18,9 @@
  * @Author: Neo Wang
  * @Date: 2024-11-20 10:19:05
  * @Last Modified by: Neo Wang
- * @Last Modified time: 2024-12-18 14:56:49
+ * @Last Modified time: 2026-06-25 17:15:27
  */
-#include "pipeline.h"
+#include "tongue/ffc/pipeline.h"
 #include "core/logger.h"
 #include <iostream>
 
@@ -84,6 +84,23 @@ static bool split_oc(const TensorDesc &td, TensorDesc &res0, TensorDesc &res1)
     return false;
 }
 
+static bool split_n(const TensorDesc &td, TensorDesc &res0, TensorDesc &res1)
+{
+    if (td.layout == Layout::NHWC ||
+        td.layout == Layout::NCHWC16 || td.layout == Layout::NCHWC32)
+    {
+        res0 = td;
+        res1 = td;
+        if (td.shape[0] >= 2)
+        {
+            res0.shape[0] /= 2;
+            res1.shape[0] -= res0.shape[0];
+        }
+        return true;
+    }
+    return false;
+}
+
 Pipeline::Pipeline(const std::string &arch)
 {
     resource = AIFFResource::create(arch);
@@ -139,19 +156,24 @@ void Pipeline::build()
 
 bool Pipeline::reallocate()
 {
-    static const std::set<uOp> tile_h_ops = {
+    static const std::set<uOp> split_h_ops = {
         uOp::Add,
         uOp::Sub,
         uOp::Mul,
         uOp::Lut,
-        uOp::ReduceMax,
-        uOp::ReduceSum,
+        uOp::Max,
+        uOp::Sum,
     };
-    static const std::set<uOp> tile_oc_ops = {
+    static const std::set<uOp> split_oc_ops = {
         uOp::Conv,
         uOp::Add,
         uOp::Sub,
         uOp::Mul,
+        uOp::Cast,
+        uOp::LayoutCvt,
+    };
+    static const std::set<uOp> split_n_ops = {
+        uOp::MatMul,
         uOp::Cast,
         uOp::LayoutCvt,
     };
@@ -161,34 +183,38 @@ bool Pipeline::reallocate()
 
     if (!mtp0->is_pipe_free() && mtp1->is_pipe_free())
     {
-        std::array<bool, 2> status = {true, true};
+        std::array<bool, 3> status = {true, true, true};
         for (auto t : m_tensors)
         {
-            if (!tile_h_ops.count(t->type))
+            if (!split_h_ops.count(t->type))
             {
                 status[0] = false;
             }
-            if (!tile_oc_ops.count(t->type))
+            if (!split_oc_ops.count(t->type))
             {
                 status[1] = false;
             }
+            if (!split_n_ops.count(t->type))
+            {
+                status[2] = false;
+            }
         }
 
-        int tile_type = 0; // none
-        if (status[0])
+        int split_type = 0;
+        for (size_t i = 0; i < status.size(); ++i)
         {
-            tile_type = 2; // split h
-        }
-        else if (status[1])
-        {
-            tile_type = 1; // split oc
+            if (status[i])
+            {
+                split_type = i + 1;
+                break;
+            }
         }
         for (auto t : m_tensors)
         {
-            t->params["tile_type"] = tile_type;
+            t->params["split_type"] = split_type;
         }
 
-        if (tile_type == 2) // split h
+        if (split_type == 1) // split h
         {
             TensorDesc input0, input1;
             split_h(m_tensors[0]->inputs[0]->output, input0, input1);
@@ -207,7 +233,7 @@ bool Pipeline::reallocate()
             mtp0->infer_pipe(input0, other_input0);
             mtp1->infer_pipe(input1, other_input1);
         }
-        else if (tile_type == 1) // split oc
+        else if (split_type == 2) // split oc
         {
             TensorDesc input = m_tensors[0]->inputs[0]->output;
             std::map<int, TensorDesc> other_input0, other_input1;
@@ -224,6 +250,25 @@ bool Pipeline::reallocate()
             }
             mtp0->infer_pipe(input, other_input0);
             mtp1->infer_pipe(input, other_input1);
+        }
+        else if (split_type == 3) // split n
+        {
+            TensorDesc input0, input1;
+            split_n(m_tensors[0]->inputs[0]->output, input0, input1);
+            std::map<int, TensorDesc> other_input0, other_input1;
+            for (auto t : m_tensors)
+            {
+                for (auto inp : t->inputs)
+                {
+                    if (inp != m_tensors[0]->inputs[0] && !contains(m_tensors, inp))
+                    {
+                        split_n(inp->output, other_input0[inp->id], other_input1[inp->id]);
+                    }
+                }
+                mtp1->feed_pipe(t);
+            }
+            mtp0->infer_pipe(input0, other_input0);
+            mtp1->infer_pipe(input1, other_input1);
         }
         else // none
         {
@@ -269,7 +314,7 @@ Symbol Pipeline::get_symbol(const std::string &name) const
 
 bool Pipeline::create_symbols()
 {
-    int tile_type = m_tensors[0]->params["tile_type"];
+    int split_type = m_tensors[0]->params["split_type"];
     m_symbols.clear();
 
     int in_cnt = 0;
@@ -303,9 +348,16 @@ bool Pipeline::create_symbols()
                 t->exprs["in" + std::to_string(j) + "_addr"] = inp->exprs.at("out_addr");
             }
         }
-        if (i == m_tensors.size() - 1 ||
-            (i + 1 == m_tensors.size() - 1 &&
-             (m_tensors[i + 1]->type == uOp::ReduceMax || m_tensors[i + 1]->type == uOp::ReduceSum)))
+        bool has_reduce_output = false;
+        if (i + 1 == m_tensors.size() - 1)
+        {
+            auto t = m_tensors[i + 1];
+            if ((t->type == uOp::Max || t->type == uOp::Sum) && t->inputs.size() == 1)
+            {
+                has_reduce_output = true;
+            }
+        }
+        if (i == m_tensors.size() - 1 || has_reduce_output)
         {
             auto name = "out" + std::to_string(out_cnt++) + "_addr";
             if (t->name.size())
@@ -321,11 +373,12 @@ bool Pipeline::create_symbols()
         }
     }
 
-    if (tile_type == 2) // split h
+    if (split_type == 1) // split h
     {
         for (auto t : m_tensors)
         {
-            if (t->type == uOp::Add || t->type == uOp::Sub || t->type == uOp::Mul)
+            if (t->type == uOp::Add || t->type == uOp::Sub ||
+                t->type == uOp::Mul || t->type == uOp::Max)
             {
                 if (t->inputs.size() == 2)
                 {
@@ -400,7 +453,7 @@ bool Pipeline::create_symbols()
             t->exprs["step_h1"] = Expr::select(step_h1 == 0, ih1, step_h1);
         }
     }
-    else if (tile_type == 1) // split oc
+    else if (split_type == 2) // split oc
     {
         auto out = m_tensors[m_tensors.size() - 1];
         int out_es = out->output.element_size();
@@ -482,6 +535,89 @@ bool Pipeline::create_symbols()
             Expr oc1 = Expr::select(oc >= align * 2, oc - oc.floordiv(align).floordiv(2) * align, oc);
             t->exprs["oc0"] = oc0;
             t->exprs["oc1"] = oc1;
+        }
+    }
+    else if (split_type == 3) // split n
+    {
+        for (auto t : m_tensors)
+        {
+            if (t->type == uOp::MatMul)
+            {
+                int trans_b = t->params["trans_b"];
+                auto out = t->inputs[1]->output;
+                int in1_iw = out.shape[3];
+                int in1_ic = out.shape[1] * out.shape[4];
+                t->exprs["in1_iw"] = set_symbol("in1_iw", in1_iw);
+                t->exprs["in1_ic"] = set_symbol("in1_ic", in1_ic);
+                t->exprs["trans_b"] = set_symbol("trans_b", trans_b);
+            }
+        }
+
+        for (auto t : m_tensors)
+        {
+            auto inp = t->inputs[0];
+            int n = inp->output.shape[0];
+            int ih = inp->output.shape[2];
+            int iw = inp->output.shape[3];
+            int ic = inp->output.shape[1] * inp->output.shape[4];
+            int step_h = ih, step_w = iw;
+            int real_iw = iw;
+            if (t->params.count("real_iw"))
+            {
+                real_iw = t->params["real_iw"];
+            }
+            int real_ihw = ih * iw;
+            if (t->params.count("real_ihw"))
+            {
+                real_ihw = t->params["real_ihw"];
+            }
+            int real_ic = ic;
+            if (t->params.count("real_ic"))
+            {
+                real_ic = t->params["real_ic"];
+            }
+
+            DEBUG() << t->to_string();
+            DEBUG() << "n: " << n << ", ih: " << ih << ", iw: " << iw << ", ic: " << ic;
+
+            t->exprs["real_iw"] = set_symbol("real_iw", real_iw);
+            t->exprs["real_ihw"] = set_symbol("real_ihw", real_ihw);
+            t->exprs["real_ic"] = set_symbol("real_ic", real_ic);
+            t->exprs["n"] = set_symbol("n", n);
+            t->exprs["ih"] = set_symbol("ih", ih);
+            t->exprs["iw"] = set_symbol("iw", iw);
+            t->exprs["ic"] = set_symbol("ic", ic);
+            t->exprs["step_h"] = set_symbol("step_h", step_h);
+            t->exprs["step_w"] = set_symbol("step_w", step_w);
+        }
+
+        if (m_tensors[0]->type == uOp::MatMul)
+        {
+            auto t = m_tensors[0];
+            Expr in1_iw = t->exprs.at("in1_iw");
+            Expr in1_ic = t->exprs.at("in1_ic");
+            Expr trans_b = t->exprs.at("trans_b");
+            Expr oc = Expr::select(trans_b, in1_iw, in1_ic);
+            for (auto t : m_tensors)
+            {
+                t->exprs["oc"] = oc;
+                t->exprs["real_oc"] = oc;
+            }
+        }
+
+        for (auto t : m_tensors)
+        {
+            Expr ih = t->exprs.at("ih");
+            Expr iw = t->exprs.at("iw");
+
+            t->exprs["real_ow"] = iw;
+            t->exprs["real_ohw"] = ih * iw;
+
+            Expr step_h = t->exprs.at("step_h");
+            Expr step_w = t->exprs.at("step_w");
+
+            t->exprs["step_h"] = Expr::select(step_h == 0, ih, step_h);
+            t->exprs["step_w"] = Expr::select(step_w == 0, iw, step_w);
         }
     }
     return true;

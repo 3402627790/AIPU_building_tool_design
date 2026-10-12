@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -29,32 +29,29 @@ namespace aipubt
 {
 namespace ops
 {
-    TensorPtrList nonzero(TensorPtr input)
+    TensorPtr nonzero(TensorPtr input)
     {
         auto g = input->node()->graph();
-        TensorShape Y1_shape(input->shape().dim(), input->shape().size());
-        TensorShape Y2_shape(1);
-        Tensor::Dtype Y1_dtype = Tensor::UINT8;
+        TensorShape out_shape(input->shape().dim(), input->shape().size());
+        Tensor::Dtype out_dtype = Tensor::UINT8;
         if (input->shape().size() < 256)
         {
-            Y1_dtype = Tensor::UINT8;
+            out_dtype = Tensor::UINT8;
         }
         else if (input->shape().size() < 65536)
         {
-            Y1_dtype = Tensor::UINT16;
+            out_dtype = Tensor::UINT16;
         }
         else
         {
-            Y1_dtype = Tensor::INT32;
+            out_dtype = Tensor::UINT32;
         }
-        auto Y1 = std::make_shared<Tensor>(g->get_valid_tensor_name("nonzero/Y1"), Y1_shape, Y1_dtype);
-        auto Y2 = std::make_shared<Tensor>(g->get_valid_tensor_name("nonzero/Y2"), Y2_shape, Tensor::INT32);
+        auto out = std::make_shared<Tensor>(g->get_valid_tensor_name("nonzero/Y1"), out_shape, out_dtype);
         auto node = Node::create(g->get_valid_node_name("nonzero"), OpType_NonZero);
         node->add_input(input);
-        node->add_output(Y1);
-        node->add_output(Y2);
+        node->add_output(out);
         g->add_node(node);
-        return {Y1, Y2};
+        return out;
     }
 } // namespace ops
 } // namespace aipubt

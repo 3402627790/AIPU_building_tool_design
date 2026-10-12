@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies
@@ -320,6 +320,22 @@ OPTYPE_REGISTER(OpType_ScaledDotProductAttention);
 OPTYPE_REGISTER(OpType_Trilu);
 OPTYPE_REGISTER(OpType_ParamUpdate);
 OPTYPE_REGISTER(OpType_FusedMoELoop);
+OPTYPE_REGISTER(OpType_NumaConvert);
+OPTYPE_REGISTER(OpType_Min);
+OPTYPE_REGISTER(OpType_Max);
+OPTYPE_REGISTER(OpType_BevPoolV2);
+OPTYPE_REGISTER(OpType_MoERouter);
+OPTYPE_REGISTER(OpType_SharedExpert);
+OPTYPE_REGISTER(OpType_MoEPermute);
+OPTYPE_REGISTER(OpType_GroupedExperts);
+OPTYPE_REGISTER(OpType_MoEUnPermute);
+OPTYPE_REGISTER(OpType_MoEFinalize);
+OPTYPE_REGISTER(OpType_LinearAttention);
+OPTYPE_REGISTER(OpType_DynamicQuantize);
+OPTYPE_REGISTER(OpType_PagedCacheUpdate);
+OPTYPE_REGISTER(OpType_PagedAttention);
+OPTYPE_REGISTER(OpType_Fold);
+OPTYPE_REGISTER(OpType_Unfold);
 
 OPTYPE_REGISTER(OpType_BatchToDepth);
 OPTYPE_REGISTER(OpType_DepthToBatch);

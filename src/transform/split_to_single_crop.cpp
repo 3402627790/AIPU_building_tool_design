@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -15,42 +15,43 @@
 //
 //--------------------------------------------------------------------------------
 /*
- * @Author: Yuxian Chen
- * @Date: 2024-01-19 09:48:33
- * @Last Modified by: Yuxian Chen
- * @Last Modified time: 2024-01-19 09:48:33
+ * @Author: Neo Wang
+ * @Date: 2020-05-26 17:25:56
+ * @Last Modified by: Neo Wang
+ * @Last Modified time: 2022-04-28 14:21:07
  */
+#include "builder/lowering/lowering.h"
 #include "core/core.h"
 #include "core/ops/ops.h"
 #include <algorithm>
-#include <numeric>
 #include <set>
+#include <vector>
 
 namespace aipubt
 {
-static inline bool criteria(NodePtr n, uint32_t &valid_out_port)
+static bool criteria(const std::vector<NodePtr> &nodes)
 {
-    if (n->type() == OpType_Split)
+    auto reshape = nodes[0];
+    auto add = nodes[1];
+    if (reshape->outputs()[0]->is_io_tensor())
     {
-        auto outputs_cnt = n->outputs().size();
-        if (outputs_cnt > 1)
-        {
-            std::vector<uint32_t> valid_out_ports;
-            for (uint32_t i = 0; i < outputs_cnt; i++)
-            {
-                auto out = n->outputs()[i];
-                if (contains(n->graph()->get_output_tensors(), out) || out->consumers().size() > 0)
-                {
-                    valid_out_ports.push_back(i);
-                }
-            }
-            if (valid_out_ports.size() == 1)
-            {
-                valid_out_port = valid_out_ports[0];
-                return true;
-            }
-        }
+        return false;
     }
+
+    auto add_in0_shape = add->inputs()[0]->shape();
+    auto add_in1_shape = add->inputs()[1]->shape();
+    auto add_out_shape = add->outputs()[0]->shape();
+    auto reshape_in_shape = reshape->inputs()[0]->shape();
+    auto reshape_out_shape = reshape->outputs()[0]->shape();
+    if (add_out_shape != reshape_out_shape)
+    {
+        return false;
+    }
+    if (add_in0_shape == add_out_shape)
+    {
+        // broad_cast add_in1
+        // support [C]
+        // support [1], not [1,1,1,1]
     return false;
 }
 
@@ -68,7 +69,7 @@ static bool split2crop(NodePtr n, uint32_t valid_out_port)
     // fill params
     auto inp_shape = n->inputs()[0]->shape();
     int axis = n->params()["axis"];
-    aipu_assert(axis <= inp_shape.size());
+    aipu_assert(axis <= (int)inp_shape.size());
     std::vector<std::pair<int32_t, int32_t>> crop_params;
     for (auto s : inp_shape)
     {

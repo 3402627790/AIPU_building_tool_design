@@ -1,3 +1,20 @@
+//-------------------------------------------------------------------------------
+// This file is CONFIDENTIAL and any use by you is subject to the terms of the
+// agreement between you and Arm China or the terms of the agreement between you
+// and the party authorised by Arm China to disclose this file to you.
+// The confidential and proprietary information contained in this file may only
+// be used by a person authorised under and to the extent permitted by a
+// subsisting licensing agreement from Arm China.
+//
+//        (C) Copyright 2026 Arm Technology (China) Co. Ltd.
+//                    All rights reserved.
+//
+// This entire notice must be reproduced on all copies of this file and copies of
+// this file may only be made by a person if such person is permitted to do so
+// under the terms of a subsisting license agreement from Arm China.
+//
+//--------------------------------------------------------------------------------
+
 //===- Passes.h - AIPU Passes Definition -----------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -28,7 +45,8 @@ namespace aipugc
     void registerLowerToTOSAPass();
     std::unique_ptr<Pass> createLowerToTOSAPass();
     std::unique_ptr<Pass> createConvertTosaToLinalg();
-    std::unique_ptr<Pass> createConvertAffineToLLVM();
+    std::unique_ptr<Pass> createConvertAffineToLLVM(bool useBarePtrCallConv = false);
+    std::unique_ptr<Pass> createKernelABIPass();
     std::unique_ptr<Pass> createSetSPIRVABIAttrsPass();
     void registerSetSPIRVABIAttrsPass();
     std::unique_ptr<Pass> createSimplifyGPULaunchPass();

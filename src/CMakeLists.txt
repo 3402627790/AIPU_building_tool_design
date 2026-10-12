@@ -7,7 +7,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wdeprecated-declarations  -fno-st
 include_directories("${ROOT_DIR}/src")
 include_directories("${ROOT_DIR}/include")
 include_directories("${ROOT_DIR}/3rdparty")
-include_directories("${ROOT_DIR}/modules/btrt/include")
+include_directories("${ROOT_DIR}/src/mlir/include")
 
 set(AIPUBuildLIB ${AIPUBuildLIB} m dl Threads::Threads)
 
@@ -94,6 +94,10 @@ endmacro()
 
 
 add_library(M_ALLOBJECTS OBJECT ${SRCS})
+target_compile_definitions(M_ALLOBJECTS PRIVATE
+  AIPU_LLIR_TOOL_LIB_PATH="${CMAKE_CURRENT_BINARY_DIR}/mlir/llir_tool_capi/libAIPULLIRToolC.so"
+  AIPU_ADD_KERNEL_OBJ_PATH="${ROOT_DIR}/src/mlir/build/add_kernel.o"
+)
 embedfiles(${PROJECT_SOURCE_DIR}/statistic/cost_model_x3p.txt)
 embedfiles(${PROJECT_SOURCE_DIR}/statistic/cost_model_x3p.cbin)
 # add_library(aipubuildtool_static STATIC $<TARGET_OBJECTS:M_ALLOBJECTS>)
@@ -124,7 +128,7 @@ add_custom_command(
 endif()
 
 add_link_options($<$<CONFIG:RELEASE>:-s>)
-target_link_libraries(aipubuildtool ${AIPUBuildLIB} aipubtrt)
+target_link_libraries(aipubuildtool ${AIPUBuildLIB})
 
 install(TARGETS aipubuildtool
         RUNTIME DESTINATION bin

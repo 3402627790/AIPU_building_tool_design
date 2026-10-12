@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -113,7 +113,7 @@ void Dataset::generate_data(void)
         auto r_max = m_ranges[2 * ss];
         auto r_min = m_ranges[2 * ss + 1];
         float_t *inp_data = new float_t[shape.size()];
-        for (int i = 0; i < shape.size(); ++i)
+        for (size_t i = 0; i < shape.size(); ++i)
         {
             *(inp_data + i) = r_min + (r_max - r_min) * rand() / (float)RAND_MAX;
         }

@@ -1,13 +1,32 @@
+//-------------------------------------------------------------------------------
+// This file is CONFIDENTIAL and any use by you is subject to the terms of the
+// agreement between you and Arm China or the terms of the agreement between you
+// and the party authorised by Arm China to disclose this file to you.
+// The confidential and proprietary information contained in this file may only
+// be used by a person authorised under and to the extent permitted by a
+// subsisting licensing agreement from Arm China.
+//
+//        (C) Copyright 2026 Arm Technology (China) Co. Ltd.
+//                    All rights reserved.
+//
+// This entire notice must be reproduced on all copies of this file and copies of
+// this file may only be made by a person if such person is permitted to do so
+// under the terms of a subsisting license agreement from Arm China.
+//
+//--------------------------------------------------------------------------------
+
 #include "aipugc/Passes.h"
 #include "aipugc/Dialect.h"
 #include "aipugc/QuantUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/STLExtras.h"
@@ -20,31 +39,6 @@ using namespace mlir::aipugc;
 
 namespace {
 
-Value convertToF32(ConversionPatternRewriter &rewriter, Location loc, Value value) {
-  Type valueType = value.getType();
-  if (auto tensorType = dyn_cast<TensorType>(valueType)) {
-    Type elementType = tensorType.getElementType();
-    if (auto quantType = dyn_cast<QuantizedType>(elementType)) {
-      Type newType = RankedTensorType::get(
-        tensorType.getShape(),
-        quantType.getExpressedType()
-      );
-      return rewriter.create<UnrealizedConversionCastOp>(loc, newType, value).getResult(0);
-    }
-  }
-  return value;
-}
-
-Value convertToQuant(ConversionPatternRewriter &rewriter, Location loc, Value value, Type origType) {
-  if (auto origTensorType = dyn_cast<TensorType>(origType)) {
-    Type origElementType = origTensorType.getElementType();
-    if (isa<QuantizedType>(origElementType)) {
-      return rewriter.create<UnrealizedConversionCastOp>(loc, origType, value).getResult(0);
-    }
-  }
-  return value;
-}
-
 class QuantizeOpLowering : public OpConversionPattern<aipugc::QuantizeOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -52,10 +46,7 @@ public:
   LogicalResult matchAndRewrite(
       aipugc::QuantizeOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    Value input = adaptor.getInput();
-    Value output = op.getOutput();
-    rewriter.replaceOp(op, input);
+    rewriter.replaceOp(op, adaptor.getInput());
     return success();
   }
 };
@@ -101,31 +92,16 @@ public:
     Value lhs = adaptor.getLhs();
     Value rhs = adaptor.getRhs();
 
-    Type origResultType = op.getType();
-
-    lhs = convertToF32(rewriter, loc, lhs);
-    rhs = convertToF32(rewriter, loc, rhs);
-
-    Type f32ResultType = origResultType;
-
-    if (auto origTensorType = dyn_cast<TensorType>(origResultType)) {
-      if (auto quantType = dyn_cast<QuantizedType>(origTensorType.getElementType())) {
-        f32ResultType = RankedTensorType::get(
-          origTensorType.getShape(),
-          quantType.getExpressedType()
-        );
-      }
-    }
+    Type resultType = getTypeConverter()->convertType(op.getType());
 
     auto tosaAdd = rewriter.create<tosa::AddOp>(
       loc,
-      f32ResultType,
+      resultType,
       lhs,
       rhs
     );
 
     Value result = tosaAdd.getResult();
-    result = convertToQuant(rewriter, loc, result, origResultType);
     rewriter.replaceOp(op, result);
 
     return success();
@@ -144,63 +120,6 @@ public:
     rewriter.eraseOp(op);
     return success();
   }
-};
-
-class FunctionArgLowering : public OpConversionPattern<func::FuncOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(
-      func::FuncOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
-
-    SmallVector<Type> newArgTypes;
-    for (Type argType : op.getFunctionType().getInputs()) {
-      if (auto tensorType = dyn_cast<TensorType>(argType)) {
-        if (auto quantType = dyn_cast<QuantizedType>(tensorType.getElementType())) {
-          newArgTypes.push_back(RankedTensorType::get(
-            tensorType.getShape(),
-            quantType.getExpressedType()));
-          continue;
-        }
-      }
-      newArgTypes.push_back(argType);
-    }
-
-    SmallVector<Type> newResultTypes;
-    for (Type resultType : op.getFunctionType().getResults()) {
-      if (auto tensorType = dyn_cast<TensorType>(resultType)) {
-        if (auto quantType = dyn_cast<QuantizedType>(tensorType.getElementType())) {
-          newResultTypes.push_back(RankedTensorType::get(
-            tensorType.getShape(),
-            quantType.getExpressedType())
-          );
-          continue;
-        }
-      }
-      newResultTypes.push_back(resultType);
-    }
-
-    auto newFuncType = FunctionType::get(getContext(), newArgTypes, newResultTypes);
-
-    auto newFunc = rewriter.create<func::FuncOp>(
-        op.getLoc(),
-        op.getName(),
-        newFuncType,
-        op->getAttrs()
-    );
-
-    rewriter.inlineRegionBefore(op.getBody(), newFunc.getBody(), newFunc.end());
-
-    Block &entryBlock = newFunc.getBody().front();
-    for (unsigned i = 0; i < newArgTypes.size(); ++i) {
-      if (i < entryBlock.getNumArguments()) {
-        entryBlock.getArgument(i).setType(newArgTypes[i]);
-      }
-    }
-
-    rewriter.eraseOp(op);
-    return success();}
 };
 
 class ConstantOpLowering : public OpConversionPattern<aipugc::ConstantOp> {
@@ -326,18 +245,6 @@ private:
   }
 };
 
-
-// class AbsOpLowering : public OpConversionPattern<aipugc::ActivationOp> {
-//   using OpConversionPattern<aipugc::ActivationOp>::OpConversionPattern;
-
-//   LogicalResult
-//   matchAndRewrite(aipugc::ActivationOp op, OpAdaptor adaptor,
-//                   ConversionPatternRewriter &rewriter) const final {
-//     rewriter.modifyOpInPlace(op, [&] { op->setOperands(adaptor.getOperands()); });
-//     return success();
-//   }
-// };
-
 class AbsOpLowering : public OpConversionPattern<aipugc::AbsOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -357,6 +264,64 @@ public:
     );
 
     rewriter.replaceOp(op, tosaAbs.getResult());
+    return success();
+  }
+};
+
+class EltwiseOpLowering : public OpConversionPattern<aipugc::EltwiseOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(
+      aipugc::EltwiseOp op, OpAdaptor adaptor,
+      ConversionPatternRewriter &rewriter) const override {
+
+    if (op.getMethod() != "ADD")
+      return failure();
+
+    Location loc = op.getLoc();
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+
+    Type resultType = getTypeConverter()->convertType(op.getType());
+
+    auto tosaAdd = rewriter.create<tosa::AddOp>(
+      loc,
+      resultType,
+      lhs,
+      rhs
+    );
+
+    rewriter.replaceOp(op, tosaAdd.getResult());
+    return success();
+  }
+};
+
+class ActivationOpLowering : public OpConversionPattern<aipugc::ActivationOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(
+      aipugc::ActivationOp op, OpAdaptor adaptor,
+      ConversionPatternRewriter &rewriter) const override {
+
+    if (op.getMethod() != "RELU")
+      return failure();
+
+    Location loc = op.getLoc();
+    Value input = adaptor.getInput();
+
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    Type elemType = getElementTypeOrSelf(resultType);
+
+    auto f32Type = cast<FloatType>(elemType);
+    auto minVal = rewriter.getFloatAttr(f32Type, 0.0);
+    auto maxVal = rewriter.getFloatAttr(
+        f32Type, APFloat::getLargest(f32Type.getFloatSemantics()));
+
+    rewriter.replaceOpWithNewOp<tosa::ClampOp>(
+        op, resultType, input, minVal, maxVal);
+
     return success();
   }
 };
@@ -405,30 +370,61 @@ struct LowerToTOSAPass
       }
     }
 
-    // Phase 2: Full conversion
+    // Phase 2: Full conversion with a TypeConverter that maps quantized tensor
+    // types to their expressed (f32) tensor types.
     {
+      TypeConverter typeConverter;
+      typeConverter.addConversion([](Type type) {
+        if (auto tt = dyn_cast<TensorType>(type)) {
+          if (auto quantType = dyn_cast<QuantizedType>(tt.getElementType())) {
+            return std::optional<Type>(
+                RankedTensorType::get(tt.getShape(), quantType.getExpressedType()));
+          }
+        }
+        return std::optional<Type>(type);
+      });
+      typeConverter.addSourceMaterialization(
+          [](OpBuilder &builder, Type type, ValueRange inputs, Location loc) {
+            return builder.create<UnrealizedConversionCastOp>(loc, type, inputs)
+                .getResult(0);
+          });
+      typeConverter.addTargetMaterialization(
+          [](OpBuilder &builder, Type type, ValueRange inputs, Location loc) {
+            return builder.create<UnrealizedConversionCastOp>(loc, type, inputs)
+                .getResult(0);
+          });
+
       ConversionTarget target(getContext());
       RewritePatternSet patterns(&getContext());
 
       target.addLegalDialect<tosa::TosaDialect>();
       target.addLegalDialect<func::FuncDialect>();
       target.addLegalOp<ModuleOp>();
-      target.addLegalOp<func::FuncOp>();
-      target.addLegalOp<func::ReturnOp>();
       target.addLegalOp<UnrealizedConversionCastOp>();
-      target.addDynamicallyLegalOp<aipugc::AbsOp>([](aipugc::AbsOp op){return true;});
+
+      // func.func / func.return are legal once their signatures (and return
+      // operand types) no longer contain quantized types.
+      target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
+        return typeConverter.isSignatureLegal(op.getFunctionType());
+      });
+      target.addDynamicallyLegalOp<func::ReturnOp>([&](func::ReturnOp op) {
+        return typeConverter.isLegal(op.getOperandTypes());
+      });
 
       target.addIllegalDialect<aipugc::AIPUDialect>();
-    //   target.addDynamicallyLegalOp<aipugc::AbsOp>([](aipugc::AbsOp op) {
-    //     return true;
-    //   });
+      target.addIllegalOp<aipugc::ConstantOp, aipugc::AddOp, aipugc::QuantizeOp,
+                           aipugc::AbsOp, aipugc::EltwiseOp,
+                           aipugc::ActivationOp>();
 
-      target.addIllegalOp<aipugc::ConstantOp, aipugc::AddOp, aipugc::QuantizeOp, aipugc::AbsOp>();
-      patterns.add<FunctionArgLowering>(&getContext());
-      patterns.add<AddOpLowering>(&getContext());
-      patterns.add<ConstantOpLowering>(&getContext());
-      patterns.add<QuantizeOpLowering>(&getContext());
-      patterns.add<AbsOpLowering>(&getContext());
+      populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
+          patterns, typeConverter);
+      populateReturnOpTypeConversionPattern(patterns, typeConverter);
+      patterns.add<AddOpLowering>(typeConverter, &getContext());
+      patterns.add<ConstantOpLowering>(typeConverter, &getContext());
+      patterns.add<QuantizeOpLowering>(typeConverter, &getContext());
+      patterns.add<AbsOpLowering>(typeConverter, &getContext());
+      patterns.add<EltwiseOpLowering>(typeConverter, &getContext());
+      patterns.add<ActivationOpLowering>(typeConverter, &getContext());
 
       if (failed(applyFullConversion(module, target, std::move(patterns)))) {
         LLVM_DEBUG({

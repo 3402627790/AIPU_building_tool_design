@@ -10,7 +10,7 @@ set(AIPUGC_ROOT_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR})
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 cmake_policy(SET CMP0003 NEW)
 
-set(INTERNAL_LLVM_DIR "/project/ai/scratch01/qidson01/code/AIPU_llvm_design/build")
+set(INTERNAL_LLVM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/llvm_mlir_sdk")
 set(MLIR_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/mlir" CACHE PATH "Path to internal MLIR config" FORCE)
 set(LLVM_DIR "${INTERNAL_LLVM_DIR}/lib/cmake/llvm" CACHE PATH "Path to internal LLVM config" FORCE)
 
@@ -45,8 +45,8 @@ get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
 set(CMAKE_CXX_FLAGS "-g -O0 -std=c++17 -fPIC")
 
-FILE(GLOB_RECURSE MLIR_SRCS CONFIGURE_DEPENDS ${AIPUGC_ROOT_DIR}/mlir/**.cpp )
-FILE(GLOB_RECURSE TARGET_SRCS CONFIGURE_DEPENDS ${AIPUGC_ROOT_DIR}/Target/**.cpp )
+FILE(GLOB_RECURSE MLIR_SRCS ${AIPUGC_ROOT_DIR}/mlir/**.cpp )
+FILE(GLOB_RECURSE TARGET_SRCS ${AIPUGC_ROOT_DIR}/Target/**.cpp )
 add_llvm_library(libAIPUMLIR MODULE
   ${MLIR_SRCS}
   ${TARGET_SRCS}
@@ -70,16 +70,20 @@ add_llvm_library(libAIPUMLIR MODULE
     MLIRTargetLLVMIRImport
     LLVMCore
     LLVMIRReader
+    LLVMBitReader
+    LLVMBitstreamReader
     LLVMAsmParser
     ${AIPUBT_LIB}
   )
 
 add_subdirectory(include/aipugc)
 add_subdirectory(externalPass)
+add_subdirectory(llir_tool_capi)
 add_subdirectory(tool/aipugc)
 add_custom_target(libexternalPassLink ALL)
 add_custom_command(
   TARGET   libexternalPassLink
+  COMMAND  rm -rf ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
   COMMAND  mkdir -p ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
   COMMAND  ln -sf ${AIPUGC_ROOT_BIN_DIR}/externalPass/libexternalPass.so ${AIPUGC_ROOT_BIN_DIR}/tool/aipugc/Plugin
   COMMAND  ln -sf ${AIPUGC_ROOT_BIN_DIR}/libAIPUMLIR.so ${AIPUGC_ROOT_BIN_DIR}/../../../python/src/AIPUBuilder/_C/

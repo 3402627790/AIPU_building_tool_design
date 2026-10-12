@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2021 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2021-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire !ice must be reproduced on all copies of this file and copies of
@@ -51,7 +51,6 @@ GSim::GSim()
         FPass_fuse_reshape,
         FPass_eliminate_reshape,
         FPass_eliminate_crop,
-        FPass_full_shape_add_sub_mul_to_eltwise,
         FPass_binary_op_broadcast,
         FPass_div_const_to_mul,
         FPass_fuse_constant_eltwise_to_leakyrelu,
@@ -59,7 +58,8 @@ GSim::GSim()
         FPass_fuse_constant_matmul_to_fc,
         FPass_gatherelements_to_gather>());
     add("lower_and_fuse_transpose",
-        [](GraphPtr g) -> bool {
+        [](GraphPtr g) -> bool
+        {
             bool ret = false;
             // CSE will fuse failed duplicated node
             // atomic flag in it will stop when -f
@@ -67,7 +67,6 @@ GSim::GSim()
             ret = lower_transpose(g) || ret;
             ret = lower_trans_trans_concat(g) || ret;
             ret = fuse_transpose(g) || ret;
-            ret = full_shape_add_sub_mul_to_eltwise(g) || ret;
             ret = lower_trans_mul_or_add_or_sub(g) || ret;
             ret = lower_trans_trans_eltwise(g) || ret;
 
@@ -133,7 +132,8 @@ GSim::GSim()
             FPass_fuse_pad_crop,
             FPass_fuse_pad_conv_pool>(),
         "fuse_all_pad",
-        [](GraphPtr g) {
+        [](GraphPtr g)
+        {
             bool ret = false;
             while (swap_pad_crop(g))
             {
@@ -148,7 +148,8 @@ GSim::GSim()
             FPass_fuse_concat,
             FPass_fuse_concat_split>(),
         "concat_split_with_arithmetic",
-        [](GraphPtr g) {
+        [](GraphPtr g)
+        {
             bool ret = false;
             while (concat_split_with_arithmetic(g))
             {
@@ -157,7 +158,8 @@ GSim::GSim()
             return ret;
         });
     add("fuse_slice_concat",
-        [](GraphPtr g) {
+        [](GraphPtr g)
+        {
             if (fuse_slice_concat(g))
             {
                 fuse_transpose(g);
@@ -174,7 +176,8 @@ GSim::GSim()
         FPass_fuse_fc_bn>());
     add(
         "fuse_activation",
-        [](GraphPtr g) {
+        [](GraphPtr g)
+        {
             if (!GSim::is_float_ir(g))
             {
                 return fuse_activation(g);
@@ -202,7 +205,8 @@ GSim::GSim()
             FPass_lift_activation,
             FPass_fuse_transpose_matmul>(),
         "fuse_activation",
-        [](GraphPtr g) {
+        [](GraphPtr g)
+        {
             if (!GSim::is_float_ir(g))
             {
                 return fuse_activation(g);
@@ -223,7 +227,8 @@ GSim::GSim()
                         FPass_lift_crop,
                         FPass_fuse_fc_crop>(),
         "fuse_quantize_cast_pattern",
-        [](GraphPtr g) {
+        [](GraphPtr g)
+        {
             bool ret = false;
             while (fuse_quantize_cast(g))
             {
@@ -241,11 +246,13 @@ GSim::GSim()
         });
     add(make_pass_tuple<
         FPass_fuse_same_constant,
+        FPass_CSE_subnode,
         FPass_fuse_equal_not,
         FPass_split_matmul_for_large_inc,
         FPass_lift_rmsnorm_reshape,
         FPass_global_avg_pool_3d_to_2d,
-        FPass_binary_op_broadcast>());
+        FPass_binary_op_broadcast,
+        FPass_where_broadcast>());
 }
 
 bool GSim::is_float_ir(GraphPtr g)

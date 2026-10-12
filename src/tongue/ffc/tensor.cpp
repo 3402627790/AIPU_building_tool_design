@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -18,9 +18,9 @@
  * @Author: Neo Wang
  * @Date: 2024-11-15 14:36:32
  * @Last Modified by: Neo Wang
- * @Last Modified time: 2024-12-03 14:00:54
+ * @Last Modified time: 2026-06-25 17:16:34
  */
-#include "tensor.h"
+#include "tongue/ffc/tensor.h"
 
 namespace ffc
 {
@@ -81,8 +81,8 @@ std::ostream &operator<<(std::ostream &oss, uOp &op)
         "Lut",
         "Pool",
         "Resize",
-        "ReduceMax",
-        "ReduceSum",
+        "Max",
+        "Sum",
         "Slice",
         "StrideSlice",
         "LayoutCvt",
@@ -107,7 +107,8 @@ static Tensor eltwise(uOp op,
                       int real_ihw,
                       int ihw_offset)
 {
-    auto infer_shape = [](std::vector<uint32_t> a, std::vector<uint32_t> b) {
+    auto infer_shape = [](std::vector<uint32_t> a, std::vector<uint32_t> b)
+    {
         std::vector<uint32_t> ret;
         auto max_size = std::max(a.size(), b.size());
         if (max_size == 0)
@@ -266,16 +267,29 @@ Tensor Tensor::matmul(Tensor a,
     if (a->output.layout == Layout::NCHWC16 && b->output.layout == Layout::NCHWC16 &&
         a->output.type == DType::FP16 && b->output.type == DType::FP16 &&
         a->output.shape.size() == 5 && b->output.shape.size() == 5 &&
-        !trans_a && trans_b)
+        !trans_a)
     {
         // MK * KN -> MN
-        ret->output.shape = {
-            a->output.shape[0],
-            b->output.shape[3] / 16,
-            a->output.shape[2],
-            a->output.shape[3],
-            16,
-        };
+        if (trans_b)
+        {
+            ret->output.shape = {
+                a->output.shape[0],
+                b->output.shape[3] / 16,
+                a->output.shape[2],
+                a->output.shape[3],
+                16,
+            };
+        }
+        else
+        {
+            ret->output.shape = {
+                a->output.shape[0],
+                b->output.shape[1],
+                a->output.shape[2],
+                a->output.shape[3],
+                b->output.shape[4],
+            };
+        }
         ret->output.type = DType::FP16;
         ret->output.layout = Layout::NCHWC16;
     }
@@ -303,7 +317,8 @@ Tensor Tensor::conv2d(Tensor input,
                       int real_oc,
                       int oc_offset)
 {
-    auto infer_shape = [](int fm, int k, int s, int d, int p0, int p1) -> uint32_t {
+    auto infer_shape = [](int fm, int k, int s, int d, int p0, int p1) -> uint32_t
+    {
         auto new_k = k + (k - 1) * (d - 1);
         return (fm - 1) * s - p0 - p1 + new_k;
     };
@@ -323,7 +338,7 @@ Tensor Tensor::conv2d(Tensor input,
          weight->output.type == DType::FP4E2M1FN) &&
         weight->output.shape.size() == 4 &&
         (out_layout == Layout::NCHWC32 || out_layout == Layout::NCHWC16 || out_layout == Layout::NHWC) &&
-        (out_dtype == DType::FP16 || out_dtype == DType::FP8E4M3FN || out_dtype == DType::FP8E5M2))
+        (out_dtype == DType::FP16 || out_dtype == DType::BFP16 || out_dtype == DType::FP8E4M3FN || out_dtype == DType::FP8E5M2))
     {
         uint32_t align = 32 / input->output.element_size();
         conv->output.shape = {
@@ -460,22 +475,30 @@ Tensor Tensor::silu(Tensor input,
     Tensor silu_input({input->output.shape, input->output.type, input->output.layout});
     return eltwise(uOp::Mul, add1, silu_input, real_iw, real_ihw, ihw_offset);
 }
-Tensor Tensor::reduce_max(Tensor input,
-                          const std::vector<int> &axis,
-                          const std::string &with_sfu,
-                          int real_iw,
-                          int real_ihw,
-                          int ihw_offset)
+Tensor Tensor::max(Tensor a,
+                   Tensor b,
+                   int real_iw,
+                   int real_ihw,
+                   int ihw_offset)
 {
-    return reduce(uOp::ReduceMax, input, axis, with_sfu, real_iw, real_ihw, ihw_offset);
+    return eltwise(uOp::Max, a, b, real_iw, real_ihw, ihw_offset);
 }
-Tensor Tensor::reduce_sum(Tensor input,
-                          const std::vector<int> &axis,
-                          const std::string &with_sfu,
-                          int real_iw,
-                          int real_ihw,
-                          int ihw_offset)
+Tensor Tensor::max(Tensor input,
+                   const std::vector<int> &axis,
+                   const std::string &with_sfu,
+                   int real_iw,
+                   int real_ihw,
+                   int ihw_offset)
 {
-    return reduce(uOp::ReduceSum, input, axis, with_sfu, real_iw, real_ihw, ihw_offset);
+    return reduce(uOp::Max, input, axis, with_sfu, real_iw, real_ihw, ihw_offset);
+}
+Tensor Tensor::sum(Tensor input,
+                   const std::vector<int> &axis,
+                   const std::string &with_sfu,
+                   int real_iw,
+                   int real_ihw,
+                   int ihw_offset)
+{
+    return reduce(uOp::Sum, input, axis, with_sfu, real_iw, real_ihw, ihw_offset);
 }
 } // namespace ffc

@@ -1,3 +1,20 @@
+//-------------------------------------------------------------------------------
+// This file is CONFIDENTIAL and any use by you is subject to the terms of the
+// agreement between you and Arm China or the terms of the agreement between you
+// and the party authorised by Arm China to disclose this file to you.
+// The confidential and proprietary information contained in this file may only
+// be used by a person authorised under and to the extent permitted by a
+// subsisting licensing agreement from Arm China.
+//
+//        (C) Copyright 2026 Arm Technology (China) Co. Ltd.
+//                    All rights reserved.
+//
+// This entire notice must be reproduced on all copies of this file and copies of
+// this file may only be made by a person if such person is permitted to do so
+// under the terms of a subsisting license agreement from Arm China.
+//
+//--------------------------------------------------------------------------------
+
 #include "Plugin/PluginLoader.h"
 #include "Target/Compass/CompassEmitter.h"
 #include "aipugc/Dialect.h"
@@ -123,6 +140,12 @@ static cl::opt<std::string> dump(
   cl::value_desc("save mlir file name")
 );
 
+static cl::opt<std::string> llvmTarget(
+  "llvm-target",
+  cl::desc("Target for llvm lowering: cpu or zhouyi."),
+  cl::init("zhouyi")
+);
+
 int main(int argc, const char **argv) {
   // Register any command line options.
   mlir::registerAsmPrinterCLOptions();
@@ -173,7 +196,9 @@ int main(int argc, const char **argv) {
     bool isLoweringToLinalg = emitAction >= Action::DumpLinalg;
     bool isLoweringToAffine = emitAction >= Action::DumpAffine;
     // Backend Targets
-    bool isCpuPath = emitAction == Action::DumpCPU;         // CPU Path: Affine -> LLVM
+    // bool isCpuPath = emitAction == Action::DumpCPU;         // CPU Path: Affine -> LLVM
+    bool isLoweringToLLVM = emitAction == Action::DumpCPU 
+                          || emitAction == Action::DumpLL;  // CPU/Zhouyi Path: Affine -> LLVM
     bool isCudaPath = emitAction == Action::DumpCUDA;       // CUDA Path: Affine -> NVVM -> PTX -> LLVM
     bool isVulkanPath = emitAction == Action::DumpVulkan;   // Vulkan Path: Affine -> GPU -> SPIRV
     // bool isRunJit = emitAction >= Action::RunJIT;
@@ -204,11 +229,15 @@ int main(int argc, const char **argv) {
 
       pm.addPass(mlir::createCanonicalizerPass());
       pm.addPass(mlir::createConvertLinalgToAffineLoopsPass());
+      if (llvmTarget == "zhouyi")
+        pm.nest<mlir::func::FuncOp>().addPass(mlir::aipugc::createKernelABIPass());
     }
 
-    if (isCpuPath) {
+    // if (isCpuPath) {
+    if (isLoweringToLLVM) {
       /* isLoweringToLLVM */ {
-        pm.addPass(mlir::aipugc::createConvertAffineToLLVM());
+        bool useBarePtrCallConv = llvmTarget == "zhouyi";
+        pm.addPass(mlir::aipugc::createConvertAffineToLLVM(useBarePtrCallConv));
         pm.addPass(mlir::createReconcileUnrealizedCastsPass());
       }
     }
@@ -325,7 +354,7 @@ int main(int argc, const char **argv) {
   llvm::outs() << "\n";
 
   if (emitAction == Action::DumpLL) {
-    dumpLLVMIR(*module, dump);
+    dumpLLVMIR(*module, dump, llvmTarget);
   }
 
   if (emitAction == Action::RunJIT) {
