@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -37,9 +37,8 @@ class KernelAdapter
 public:
     bool set_graph(GraphPtr g);
     void kernel_adapt();
-    std::vector<ConstTensorPtr> get_const_tensors();
+    std::vector<TensorPtr> get_const_tensors();
     std::map<NodePtr, std::set<TensorPtr>> get_ws_map();
-    std::map<TensorPtr, NodePtr> get_surface_tensors();
     const std::map<std::string, std::string> &get_device_lib() const;
     const std::map<std::string, std::string> &get_host_lib() const;
 
@@ -47,5 +46,10 @@ private:
     void record_tensors(NodePtr n, const BuilderParams &params);
 
     GraphPtr m_graph;
-    std::vector<ConstTensorPtr> m_const_tensors;
+    std::vector<TensorPtr> m_const_tensors;
     std::map<NodePtr, std::set<TensorPtr>> m_ws_map;
+    std::map<std::string, std::string> m_device_lib;
+    std::map<std::string, std::string> m_host_lib;
+};
+} // namespace aipubt
+#endif //!BUILDER_KERNEL_ADAPTOR_H

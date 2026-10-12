@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -274,10 +274,15 @@ RO_GENERATOR(OpType_LayoutConvertor)
         {
             auto sgnode = node;
             INFO() << "Building " << sgnode->name() << "...";
-            for (auto p : plugin->generate_params(sgnode, m))
+            auto params = plugin->generate_params(sgnode, m);
+            std::string error_msg;
+            if (get_target()->isainfo().type >= ISA_ZYv5 &&
+                !check_params(params, error_msg))
             {
-                ro.push_back(p);
+                ERROR() << "Failed to check params: " << error_msg << "\n"
+                        << "Node: " << sgnode->name();
             }
+            ro.insert(ro.end(), params.begin(), params.end());
             // DEBUG() << "Using layoutconverter plugin";
             return;
         }

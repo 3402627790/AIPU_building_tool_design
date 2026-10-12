@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -304,8 +304,7 @@ public:
     void push_offset(int32_t offset);
 
     void set_min(float f_min);
-    // void set_mins(const std::vector<float> &f_mins);
-    // std::vector<float> mins(void) const;
+
     void set_mins(const ComputeTensor &fmins = ComputeTensor(std::vector<float>())) { m_min = ComputeTensor(fmins); }
     ComputeTensor mins() const
     {
@@ -428,8 +427,16 @@ public:
         return m_extra_info;
     }
 
+    static NodeParamValue get_value_from_extra_info(const std::map<std::string, NodeParamValue> &m, const std::string &key, NodeParamValue &&default_val = NodeParamValue{})
+    {
+        auto it = m.find(key);
+        return (it != m.end()) ? it->second : default_val;
+    }
+
     Quantization &set_method(const std::string &method);
     const std::string method() const;
+
+    void serialize(std::ostream &oss, std::ostream &wt_oss, std::string key);
 
     friend std::ostream &operator<<(std::ostream &os, const Quantization &qinfo);
     friend std::ostream &operator<<(std::ostream &os, const Quantization::Scheme &sh);
@@ -438,6 +445,18 @@ public:
     friend std::ostream &operator<<(std::ostream &os, const Quantization::RoundMode &rm);
 
 private:
+    void do_serialize(std::ostream &oss,
+                      std::ostream &wt_oss,
+                      std::string key);
+
+    void do_dynamic_serialize(std::ostream &oss,
+                              std::ostream &wt_oss,
+                              std::string key);
+
+    void do_static_serialize(std::ostream &oss,
+                             std::ostream &wt_oss,
+                             std::string key);
+
     ComputeTensor m_scales;
     ComputeTensor m_offsets;
     ComputeTensor m_min;

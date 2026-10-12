@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -37,10 +37,11 @@ enum BuildStage
     SCHEDULE,
     KERNEL_ADAPT,
     MEM_ALLOC,
-    CODE_GEN,
+    DEVICE_CODE_GEN,
     ASSEMBLE,
+    HOST_CODE_GEN,
     GEN_OBJ,
-    DONE
+    DONE,
 };
 
 struct BuildPhase
@@ -59,7 +60,7 @@ public:
     bool build() override;
     GraphPtr get_graph() override;
     HybridELFPtr get_elf() override;
-    const std::string &get_header() const override;
+    const std::string get_header() const override;
 
     std::map<TensorPtr, uint32_t> get_tensor_index_map();
 
@@ -72,8 +73,9 @@ private:
     bool phase_schedule();
     bool phase_kernel_adapt();
     bool phase_mem_alloc();
-    bool phase_code_gen();
+    bool phase_device_code_gen();
     bool phase_assemble();
+    bool phase_host_code_gen();
     bool phase_gen_obj();
 };
 

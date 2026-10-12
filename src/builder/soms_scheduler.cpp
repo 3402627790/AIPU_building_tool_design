@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -103,17 +103,27 @@ inline size_t aligned(size_t s, size_t align = 256)
 //     return ret;
 // }
 
-std::vector<MemoryObjectPtr> SOMSScheduler::const_allocate(const std::set<ConstTensorPtr> &const_tensor)
+int SOMSScheduler::get_mem_id(TensorPtr t)
 {
-    auto get_mem_size = [](ConstTensorPtr t) -> uint32_t {
+    auto slice = std::dynamic_pointer_cast<TensorSlice>(t);
+    if (slice)
+    {
+        return slice->mem_id();
+    }
+    return -1;
+}
+
+std::vector<MemoryObjectPtr> SOMSScheduler::const_allocate(const std::vector<TensorPtr> &const_tensor)
+{
+    auto get_mem_size = [](TensorPtr t) -> uint64_t {
         auto ptr = t->memory_offset()->get_base_object();
-        auto size = std::max((uint64_t)ptr->size, (uint64_t)t->mem_size());
+        auto size = std::max(ptr->size, (uint64_t)t->mem_size());
         return size;
     };
 
     //reduce_constant
     std::map<std::string, ConstTensorPtr> constant_hash;
-    uint32_t reduce_size = 0;
+    uint64_t reduce_size = 0;
     for (auto constant : const_tensor)
     {
         std::string hash = utils::sha256_hex(constant->data<void>(), constant->mem_size());
@@ -136,47 +146,90 @@ std::vector<MemoryObjectPtr> SOMSScheduler::const_allocate(const std::set<ConstT
         INFO() << "Reduce constants memory size: " << utils::get_human_readable_size(reduce_size);
     }
 
-    //allocate_constant
-    std::vector<MemoryObjectPtr> constant_slots;
-    uint32_t buf_id = 0;
-    std::map<const void *, MemoryObjectPtr> constant_data;
+    std::set<MemoryObjectPtr> mem_ptr;
+    std::map<MemoryObjectPtr, size_t> memory_size;
+    std::map<MemoryObjectPtr, std::set<MemoryObjectPtr>> slot_map;
     for (auto constant : const_tensor)
     {
-        auto root_const = constant->memory_offset()->get_base_object();
-        if (root_const->m_base)
+        auto ptr = constant->memory_offset()->get_base_object();
+        if (ptr->m_base)
         {
             continue; //allocate root blob once for shared blobs
         }
-        auto data = constant->data<void>();
-        auto size = get_mem_size(constant);
-        if (constant_data.count(data))
-        {
-            auto memobject = constant_data[data];
-            if (memobject->size >= size)
-            {
-                // allocated
-                root_const->relative_offset = 0;
-                root_const->set_base_offset(memobject);
-                continue;
-            }
-        }
-
-        MemoryObjectPtr s = std::make_shared<MemoryObject>(0);
-        s->m_base = 0;
-        s->size = get_mem_size(constant);
-        s->align = root_const->align;
-
-        root_const->set_base_offset(s);
-        root_const->relative_offset = 0;
-        s->set_buf_type(MemoryObject::type::constant);
-        s->buffer_id = buf_id;
-        constant_data[data] = s;
-        buf_id++;
-        constant_slots.push_back(s);
-        // INFO() << constant->name() << " root const: " << root_const << " size: 0x" << std::hex << root_const->size << " buf: " << std::dec << s->buffer_id;
+        auto id = get_mem_id(constant);
+        ptr->set_mem_id(id);
+        mem_ptr.insert(ptr);
+        memory_size[ptr] = get_mem_size(constant);
     }
 
-    return constant_slots;
+    //allocate_constant
+    std::set<MemoryObjectPtr> assigned_ptr;
+    std::set<MemoryObjectPtr> unassigned_ptr;
+    std::set<MemoryObjectPtr> total_assigned_ptr;
+    std::map<MemoryObjectPtr, uint64_t> offset_map;
+    if (m_numa_cfg.mem_size().size() > 0)
+    {
+        for (size_t i = 0; i < m_numa_cfg.mem_size().size(); ++i)
+        {
+            MemoryObjectPtr numa_s = std::make_shared<MemoryObject>(0);
+            numa_s->size = m_numa_cfg.mem_size()[i];
+            if (numa_s->size == 0)
+            {
+                continue;
+            }
+            numa_s->align = 0;
+            numa_s->set_mem_id(i);
+            auto used_size = offset_assignment(numa_s, memory_size, std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>>(), orderbydefault, true, 1, Linear, mem_ptr, assigned_ptr, unassigned_ptr, offset_map, total_assigned_ptr);
+            if (used_size)
+            {
+                numa_s->size = used_size;
+                slot_map[numa_s] = assigned_ptr;
+            }
+            mem_ptr = unassigned_ptr;
+            assigned_ptr.clear();
+            unassigned_ptr.clear();
+        }
+    }
+
+    MemoryObjectPtr const_s = std::make_shared<MemoryObject>(0);
+    const_s->size = 0xe0000000;
+    const_s->align = 0;
+    const_s->set_mem_id(-1);
+    const_s->set_buf_type(MemoryObject::type::constant);
+    auto used_size = offset_assignment(const_s, memory_size, std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>>(), orderbydefault, true, 1, Linear, mem_ptr, assigned_ptr, unassigned_ptr, offset_map, total_assigned_ptr);
+    if (used_size)
+    {
+        const_s->size = used_size;
+        slot_map[const_s] = assigned_ptr;
+    }
+    if (unassigned_ptr.size())
+    {
+        ERROR();
+    }
+
+    int cnt = 0;
+    std::vector<MemoryObjectPtr> slots;
+    for (auto s : slot_map)
+    {
+        // DEBUG() << "slot ";
+        if (s.first->size == 0)
+        {
+            ERROR() << "slot size is empty";
+        }
+        slots.push_back(s.first);
+        s.first->foot_print = 0;
+        s.first->buffer_id = cnt++;
+        for (auto m : s.second)
+        {
+            // DEBUG() << at.t->name() << " offset " << at.offset << " size " << at.size;
+            auto ptr = m;
+            ptr->set_base_offset(s.first);
+            ptr->relative_offset = offset_map[m];
+            s.first->foot_print += ptr->foot_print;
+        }
+    }
+
+    return slots;
 }
 
 std::vector<MemoryObjectPtr> SOMSScheduler::mem_allocate(const std::set<TensorPtr> &not_reuse_tensor, const std::set<TensorPtr> &inputs, const std::set<TensorPtr> &keeps_tensors, const std::set<TensorPtr> &skip_tensors)
@@ -187,6 +240,27 @@ std::vector<MemoryObjectPtr> SOMSScheduler::mem_allocate(const std::set<TensorPt
     }
 
     auto start = std::chrono::high_resolution_clock::now();
+
+    if (BuilderConfig::get<std::string>(Constants::load_prior_in_gm) != "" || BuilderConfig::get<bool>(Constants::softmax_prior_in_gm))
+    {
+        m_need_prior_gm = true;
+    }
+
+    for (auto &pair : m_ws_map)
+    {
+        if (m_need_prior_gm)
+        {
+            break;
+        }
+        for (auto &t : pair.second)
+        {
+            if (t->is_prior_tensor())
+            {
+                m_need_prior_gm = true;
+                break;
+            }
+        }
+    }
 
     // for (auto n : m_graph->nodes())
     // {
@@ -276,16 +350,7 @@ std::vector<MemoryObjectPtr> SOMSScheduler::mem_allocate(const std::set<TensorPt
     auto du2 = std::chrono::duration_cast<std::chrono::microseconds>(ti2 - ti1);
     INFO() << "[EVAL] unsafe check time t2: " << du2.count() << " us";
 
-    MemoryObjectPtr gm_s = std::make_shared<MemoryObject>(0); //slot 0 gm
-    gm_s->size = m_gm_size[0];
-    gm_s->align = 0x1000;
-
-    m_slots = offset_assignment(gm_s, conflict_map, all_mems, not_reuse_mem);
-    if (gm_s->size)
-    {
-        m_gm_region_slots.push_back(gm_s);
-        m_gm_size[0] = gm_s->size;
-    }
+    m_slots = mem_assignment(conflict_map, all_mems, not_reuse_mem);
 
     //offset allocation for many object
     auto ti3 = std::chrono::high_resolution_clock::now();
@@ -393,8 +458,38 @@ std::set<MemoryObjectPtr> SOMSScheduler::allocate_sm(std::set<MemoryObjectPtr> &
     return sm_mem;
 }
 
-NodePtr SOMSScheduler::update_gen_consume(GraphPtr g, int &node_stamp, std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &skip_mem, const int core_id)
+NodePtr SOMSScheduler::update_gen_consume(GraphPtr g, int &node_stamp, std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &skip_mem)
 {
+    auto update = [this, &skip_mem, &all_mems](TensorPtr t, NodePtr generator, std::vector<NodePtr> consumers, int mem_id) -> void {
+        auto ptr = t->memory_offset()->get_base_object();
+        // INFO() << "SG tensor " <<t->name() << " node " << t->node()->name() << " ptr " << ptr;
+        if (generator->type() != OpType_SubGraphInput)
+        {
+            if (generator->type() != OpType_Loop && generator->type() != OpType_If)
+            {
+                m_p_generators[ptr].push_back(generator);
+            }
+        }
+        for (auto c : consumers)
+        {
+            if (c->type() != OpType_Loop && c->type() != OpType_If)
+            {
+                m_p_consumers[ptr].push_back(c);
+            }
+        }
+        if (t->is_prior_tensor())
+        {
+            ptr->set_mem_flag(MemoryObject::flag::prior_in_gm);
+            INFO() << "prior in gm " << t->name();
+        }
+        if (!contains(skip_mem, ptr))
+        {
+            all_mems.insert(ptr);
+            m_tensor_map[ptr] = t;
+        }
+        ptr->set_mem_id(mem_id);
+    };
+
     NodePtr last_node;
     for (auto n : g->nodes())
     {
@@ -405,7 +500,7 @@ NodePtr SOMSScheduler::update_gen_consume(GraphPtr g, int &node_stamp, std::set<
         if (n->type() == OpType_Loop || n->type() == OpType_If)
         {
             auto sgn = SubGraphNode::from_node(n);
-            last_node = update_gen_consume(sgn->subgraph(), node_stamp, all_mems, skip_mem, core_id);
+            last_node = update_gen_consume(sgn->subgraph(), node_stamp, all_mems, skip_mem);
 
             for (auto t : n->outputs())
             {
@@ -432,61 +527,42 @@ NodePtr SOMSScheduler::update_gen_consume(GraphPtr g, int &node_stamp, std::set<
             }
         }
 
+        if (m_ws_map.count(n))
+        {
+            auto ws_set = m_ws_map[n];
+            for (auto ws : ws_set)
+            {
+                update(ws, n, {n}, -1);
+            }
+        }
+
         for (auto t : n->outputs())
         {
-            if (m_ws_map.count(n))
+            NumaTensorInfo info; // default dist_mode is UMA
+            if (t->attrs().count(Constants::numa))
             {
-                auto ws_set = m_ws_map[n];
-                for (auto ws : ws_set)
+                info = t->get_attr<NumaTensorInfo>(Constants::numa);
+            }
+            if (info.dist_mode == NumaDistMode::UMA)
+            {
+                update(t, n, t->consumers(), -1);
+            }
+            else if (info.dist_mode == NumaDistMode::LOCAL_SINGLE || info.dist_mode == NumaDistMode::REPLICATED)
+            {
+                ERROR() << "unsupoort";
+            }
+            else if (info.dist_mode == NumaDistMode::GRID_CENTRIC || info.dist_mode == NumaDistMode::BLOCK_CENTRIC)
+            {
+                for (size_t i = 0; i < info.slices.size(); ++i)
                 {
-                    auto ws_ptr = ws->memory_offset()->get_base_object();
-                    m_p_generators[ws_ptr].push_back(n);
-                    m_p_consumers[ws_ptr].push_back(n);
-                    all_mems.insert(ws_ptr);
-                    m_tensor_map[ws_ptr] = ws;
+                    auto s = info.slices[i];
+                    update(s, n, t->consumers(), s->mem_id());
                 }
             }
-            auto ptr = t->memory_offset()->get_base_object();
-            // INFO() << "SG tensor " <<t->name() << " node " << t->node()->name() << " ptr " << ptr;
-            if (n->type() != OpType_SubGraphInput)
+            else
             {
-                if (n->type() != OpType_Loop && n->type() != OpType_If)
-                {
-                    m_p_generators[ptr].push_back(n);
-                }
+                ERROR() << "unsupport mode";
             }
-            for (auto c : t->consumers())
-            {
-                if (c->type() != OpType_Loop && c->type() != OpType_If)
-                {
-                    m_p_consumers[ptr].push_back(c);
-                }
-            }
-            if (t->attrs().count("prior_in_gm"))
-            {
-                ptr->set_mem_flag(MemoryObject::flag::prior_in_gm);
-                INFO() << "prior in gm " << t->name();
-            }
-            if (!contains(skip_mem, ptr))
-            {
-                if (contains(g->get_output_tensors(), t))
-                {
-                    m_mem_core_map[ptr] = -1;
-                }
-                else
-                {
-                    if (!m_mem_core_map.count(ptr) || m_mem_core_map[ptr] != -1)
-                    {
-                        m_mem_core_map[ptr] = core_id;
-                    }
-                }
-                all_mems.insert(ptr);
-                m_tensor_map[ptr] = t;
-            }
-            // else
-            // {
-            //     INFO() << "skip " << t->node()->name() << " ptr " << ptr;
-            // }
         }
     }
     return last_node;
@@ -517,10 +593,39 @@ void SOMSScheduler::check_all_mems(GraphPtr g, const std::set<MemoryObjectPtr> &
 
         for (auto t : n->outputs())
         {
-            auto ptr = t->memory_offset()->get_base_object();
-            if (!contains(all_mems, ptr) && !contains(skip_mem, ptr))
+            NumaTensorInfo info; // default dist_mode is UMA
+            if (t->attrs().count(Constants::numa))
             {
-                ERROR() << "tensor not allocate " << t->name();
+                info = t->get_attr<NumaTensorInfo>(Constants::numa);
+            }
+
+            if (info.dist_mode == NumaDistMode::UMA)
+            {
+                auto ptr = t->memory_offset()->get_base_object();
+                if (!contains(all_mems, ptr) && !contains(skip_mem, ptr))
+                {
+                    ERROR() << "tensor not allocate " << t->name();
+                }
+            }
+            else if (info.dist_mode == NumaDistMode::LOCAL_SINGLE || info.dist_mode == NumaDistMode::REPLICATED)
+            {
+                ERROR() << "unsupoort";
+            }
+            else if (info.dist_mode == NumaDistMode::GRID_CENTRIC || info.dist_mode == NumaDistMode::BLOCK_CENTRIC)
+            {
+                for (size_t i = 0; i < info.slices.size(); ++i)
+                {
+                    auto s = info.slices[i];
+                    auto ptr = s->memory_offset()->get_base_object();
+                    if (!contains(all_mems, ptr) && !contains(skip_mem, ptr))
+                    {
+                        ERROR() << "tensor not allocate " << s->name();
+                    }
+                }
+            }
+            else
+            {
+                ERROR() << "unsupport mode";
             }
         }
     }
@@ -536,19 +641,10 @@ std::set<MemoryObjectPtr> SOMSScheduler::mem_live_init(const std::set<MemoryObje
         for (auto n : level)
         {
             n->set_attr(Constants::node_level, i);
-            int core_id = -1;
-            if (n->attrs().count(Constants::virtual_core_id))
-            {
-                core_id = (int32_t)n->attrs()[Constants::virtual_core_id];
-            }
-            else
-            {
-                ERROR() << "empty mem " << n->name();
-            }
             auto sgn = SubGraphNode::from_node(n);
             if (sgn)
             {
-                update_gen_consume(sgn->subgraph(), node_stamp, all_mems, skip_mem, core_id);
+                update_gen_consume(sgn->subgraph(), node_stamp, all_mems, skip_mem);
             }
             else
             {
@@ -574,7 +670,7 @@ std::set<MemoryObjectPtr> SOMSScheduler::mem_live_init(const std::set<MemoryObje
         }
     }
 
-    //check if all mems
+    // check if all mems
     for (size_t i = 0; i < m_levels.size(); ++i)
     {
         auto level = m_levels[i];
@@ -699,7 +795,7 @@ std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> SOMSScheduler::gen_mem_c
     return conflict_map;
 }
 
-static void print_child(NodePtr n, const std::map<uint32_t, MemoryObjectPtr> &mem_map, const std::map<MemoryObjectPtr, uint32_t> &offset_map, const std::map<MemoryObjectPtr, TensorPtr> &m_tensor_map, const std::map<MemoryObjectPtr, size_t> &mem_size, const std::map<std::pair<MemoryObjectPtr, MemoryObjectPtr>, uint32_t> &m_conflict_reason)
+static void print_child(NodePtr n, const std::map<uint64_t, MemoryObjectPtr> &mem_map, const std::map<MemoryObjectPtr, uint64_t> &offset_map, const std::map<MemoryObjectPtr, TensorPtr> &m_tensor_map, const std::map<MemoryObjectPtr, size_t> &mem_size, const std::map<std::pair<MemoryObjectPtr, MemoryObjectPtr>, uint32_t> &m_conflict_reason)
 {
     uint32_t id = n->attrs()["mem_id"];
     auto mem = mem_map.at(id);
@@ -725,26 +821,25 @@ static void print_child(NodePtr n, const std::map<uint32_t, MemoryObjectPtr> &me
     }
 }
 
-std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm_s, const std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> &conflict_map, const std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &not_reuse_mem)
+uint64_t SOMSScheduler::offset_assignment(MemoryObjectPtr pool, const std::map<MemoryObjectPtr, size_t> &memory_size, const std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> &conflict_map, AllocOrder s, bool intermediate_only, uint32_t opt_loop, AllocGoal opt_goal, const std::set<MemoryObjectPtr> &mem_ptr, std::set<MemoryObjectPtr> &assigned_ptr, std::set<MemoryObjectPtr> &unassigned_ptr, std::map<MemoryObjectPtr, uint64_t> &offset_map, std::set<MemoryObjectPtr> &total_assigned_ptr)
 {
-    std::map<MemoryObjectPtr, size_t> memory_size;
-    std::map<MemoryObjectPtr, uint32_t> offset_map;
+    std::set<MemoryObjectPtr> swapped_vec;
 
-    auto avoid = [&memory_size, &offset_map](MemoryObjectPtr p, const std::vector<MemoryObjectPtr> &assigned_mems, const std::unordered_set<MemoryObjectPtr> &conflict_m) -> std::vector<std::pair<uint32_t, uint32_t>> {
-        std::vector<std::pair<uint32_t, uint32_t>> ret;
+    auto avoid = [&memory_size](MemoryObjectPtr p, const std::set<MemoryObjectPtr> &assigned_mems, const std::unordered_set<MemoryObjectPtr> &conflict_m, const std::map<MemoryObjectPtr, uint64_t> &offset_map_pool) -> std::vector<std::pair<uint64_t, uint64_t>> {
+        std::vector<std::pair<uint64_t, uint64_t>> ret;
         for (auto m : assigned_mems)
         {
             if (conflict_m.count(m))
             {
                 // INFO() << "unsafe: " << a.t->node()->name();
-                ret.push_back(std::make_pair(offset_map[m], memory_size[m]));
+                ret.push_back(std::make_pair(offset_map_pool.at(m), memory_size.at(m)));
             }
         }
         return ret;
     };
 
-    auto merge = [](const std::vector<std::pair<uint32_t, uint32_t>> &intervals) -> std::vector<std::pair<uint32_t, uint32_t>> {
-        std::vector<std::pair<uint32_t, uint32_t>> ret;
+    auto merge = [](const std::vector<std::pair<uint64_t, uint64_t>> &intervals) -> std::vector<std::pair<uint64_t, uint64_t>> {
+        std::vector<std::pair<uint64_t, uint64_t>> ret;
         for (auto interval : intervals)
         {
             bool overlap = false;
@@ -759,8 +854,8 @@ std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm
                 {
                     if (i.first <= interval.first + interval.second)
                     {
-                        uint32_t size1 = i.first - interval.first + i.second;
-                        uint32_t size2 = interval.second;
+                        uint64_t size1 = i.first - interval.first + i.second;
+                        uint64_t size2 = interval.second;
                         i.first = interval.first;
                         i.second = std::max(size1, size2);
                         overlap = true;
@@ -770,8 +865,8 @@ std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm
                 {
                     if (i.first + i.second >= interval.first)
                     {
-                        uint32_t size1 = interval.first - i.first + interval.second;
-                        uint32_t size2 = i.second;
+                        uint64_t size1 = interval.first - i.first + interval.second;
+                        uint64_t size2 = i.second;
                         i.second = std::max(size1, size2);
                         overlap = true;
                     }
@@ -786,9 +881,9 @@ std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm
         return ret;
     };
 
-    auto fit = [](uint32_t size, uint32_t align, const std::vector<std::pair<uint32_t, uint32_t>> &intervals, uint32_t available_offset) -> uint32_t {
-        uint32_t ret = 0;
-        uint32_t start = 0;
+    auto fit = [](uint64_t size, uint64_t align, const std::vector<std::pair<uint64_t, uint64_t>> &intervals, uint64_t available_offset) -> uint64_t {
+        uint64_t ret = 0;
+        uint64_t start = 0;
         for (size_t i = 0; i < intervals.size(); ++i)
         {
             auto interval = intervals[i];
@@ -811,6 +906,359 @@ std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm
         return ret;
     };
 
+    auto switch_bottleneck = [&memory_size, &assigned_ptr, &unassigned_ptr, &swapped_vec](std::vector<MemoryObjectPtr> &sorted, bool flag) -> bool {
+        bool found = false;
+        MemoryObjectPtr swap_ptr;
+        std::vector<MemoryObjectPtr> v;
+        if (flag)
+        {
+            v.assign(assigned_ptr.begin(), assigned_ptr.end());
+        }
+        else
+        {
+            v.assign(unassigned_ptr.begin(), unassigned_ptr.end());
+        }
+
+        std::stable_sort(v.begin(), v.end(), [&memory_size](MemoryObjectPtr a, MemoryObjectPtr b) {
+            uint64_t s1 = memory_size.at(a);
+            uint64_t s2 = memory_size.at(b);
+            return s1 > s2;
+        });
+
+        for (size_t j = 0; j < v.size(); ++j)
+        {
+            auto ptr = v[j];
+            if (contains(swapped_vec, ptr))
+            {
+                continue;
+            }
+            found = true;
+            swap_ptr = ptr;
+        }
+
+        if (!found)
+        {
+            // INFO() << "not found!";
+            return false;
+        }
+
+        swapped_vec.insert(swap_ptr);
+        auto it = std::find(sorted.begin(), sorted.end(), swap_ptr);
+        if (it != sorted.end())
+        {
+            sorted.erase(it);
+            if (flag)
+            {
+                sorted.push_back(swap_ptr);
+            }
+            else
+            {
+                sorted.insert(sorted.begin(), swap_ptr);
+            }
+        }
+        else
+        {
+            ERROR();
+        }
+
+        return true;
+    };
+
+    auto gen_bottleneck = [&memory_size](MemoryObjectPtr ptr, uint32_t mem_id, std::map<uint64_t, MemoryObjectPtr> &mem_map, GraphPtr mem_graph, uint64_t offset, const std::vector<std::pair<uint64_t, uint64_t>> &avoid_internals, const std::unordered_set<MemoryObjectPtr> &conflict_list, const std::map<MemoryObjectPtr, uint64_t> &offset_map_pool) -> void {
+        mem_id++;
+        mem_map[mem_id] = ptr;
+        NodePtr new_node = Node::create(std::to_string(mem_id), OpType_NoOp);
+        new_node->set_attr("mem_id", mem_id);
+        TensorPtr out = std::make_shared<Tensor>(std::to_string(mem_id) + "out", TensorShape(0), Tensor::Dtype::UINT8);
+        new_node->add_output(out);
+        mem_graph->add_node(new_node);
+        // INFO() << "add node " << m_tensor_map[ptr] << " offset: 0x" std::hex << offset;
+        for (auto interval : avoid_internals)
+        {
+            auto end = interval.first + interval.second;
+            // INFO() << "end: 0x" << std::hex << end;
+            auto end_aligned = aligned(end, ptr->align);
+            if (end_aligned == offset)
+            {
+                for (auto n : mem_graph->nodes())
+                {
+                    uint32_t id = n->attrs()["mem_id"];
+                    auto mem = mem_map[id];
+                    auto mem_offset = offset_map_pool.at(mem);
+                    auto mem_size = memory_size.at(mem);
+                    // INFO() << "id: " << id << m_tensor_map[mem] << " mem_offset: 0x" << std::hex << mem_offset << " size: 0x" << mem_size;
+                    if ((mem_offset + (uint64_t)mem_size == end) && conflict_list.count(mem))
+                    {
+                        n->add_input(out);
+                        // INFO() <<  m_tensor_map[mem] << " add input " << m_tensor_map[ptr];
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                }
+            }
+            else
+            {
+                continue;
+            }
+        }
+    };
+
+    auto show_bottleneck = [&memory_size](std::map<uint64_t, MemoryObjectPtr> &mem_map, GraphPtr mem_graph, const std::map<MemoryObjectPtr, TensorPtr> &tensor_map, const std::map<std::pair<MemoryObjectPtr, MemoryObjectPtr>, uint32_t> &conflict_reason, const std::map<MemoryObjectPtr, uint64_t> &offset_map_pool) {
+        NodePtr longest_n = 0;
+        uint64_t logest = 0;
+        for (auto n : mem_graph->nodes())
+        {
+            if (n->parents().size() == 0)
+            {
+                uint64_t id = n->attrs()["mem_id"];
+                auto mem = mem_map.at(id);
+                auto mem_offset = offset_map_pool.at(mem);
+                if (logest < mem_offset + memory_size.at(mem))
+                {
+                    logest = mem_offset + memory_size.at(mem);
+                    longest_n = n;
+                }
+            }
+        }
+
+        uint64_t id = longest_n->attrs()["mem_id"];
+        auto mem = mem_map.at(id);
+        auto mem_offset = offset_map_pool.at(mem);
+        auto t = tensor_map.at(mem);
+        INFO() << "memory bottleneck " << t->name() << " offset 0x" << std::hex << mem_offset;
+        print_child(longest_n, mem_map, offset_map_pool, tensor_map, memory_size, conflict_reason);
+    };
+
+    std::map<uint64_t, MemoryObjectPtr> mem_map;
+    uint64_t used_size = 0;
+    uint64_t available_size = pool->size;
+    uint64_t available_offset = 0;
+    std::vector<MemoryObjectPtr> sorted(mem_ptr.begin(), mem_ptr.end());
+    if (s == orderbysize)
+    {
+        std::stable_sort(sorted.begin(), sorted.end(), [&memory_size, this](MemoryObjectPtr a, MemoryObjectPtr b) {
+            uint64_t s1 = memory_size.at(a);
+            uint64_t s2 = memory_size.at(b);
+            return s1 == s2 ? m_tensor_map[a]->name() > m_tensor_map[b]->name() : s1 > s2;
+        });
+    }
+    else if (s == orderbylife)
+    {
+        auto stream = m_levels[0][0];
+        std::stable_sort(sorted.begin(), sorted.end(), [this, stream](MemoryObjectPtr a, MemoryObjectPtr b) {
+            uint64_t t1, t2;
+            t1 = end_time(a, stream) - start_time(a, stream);
+            t2 = end_time(b, stream) - start_time(b, stream);
+            return t1 == t2 ? m_tensor_map[a]->name() > m_tensor_map[b]->name() : t1 < t2;
+        });
+    }
+    else if (s == orderbyfp)
+    {
+        auto stream = m_levels[0][0];
+        std::stable_sort(sorted.begin(), sorted.end(), [this, stream](MemoryObjectPtr a, MemoryObjectPtr b) {
+            uint64_t f1 = a->foot_print;
+            uint64_t f2 = b->foot_print;
+            return f1 == f2 ? m_tensor_map[a]->name() > m_tensor_map[b]->name() : f1 > f2;
+        });
+    }
+    bool flag = false;
+    std::map<MemoryObjectPtr, uint64_t> best_offset_map;
+    uint64_t best_fp = 0;
+    // uint32_t best_i = 0;
+    for (size_t i = 0; i < opt_loop; ++i)
+    {
+        GraphPtr mem_graph = Graph::create();
+        int mem_id = 0;
+        std::map<uint64_t, MemoryObjectPtr> mem_map;
+        std::set<MemoryObjectPtr> assigned_ptr_pool;
+        std::set<MemoryObjectPtr> unassigned_ptr_pool;
+        uint64_t fp_pool = 0;
+        uint64_t used_size_pool = 0;
+        std::map<MemoryObjectPtr, uint64_t> offset_map_pool;
+
+        if (m_need_prior_gm)
+        {
+            std::stable_sort(sorted.begin(), sorted.end(), [](MemoryObjectPtr a, MemoryObjectPtr b) {
+                if (a->get_mem_flag() == MemoryObject::flag::prior_in_gm)
+                {
+                    // INFO() << "prior in gm: " << m_tensor_map[a]->name();
+                    return true;
+                }
+                return false;
+            });
+        }
+
+        for (auto ptr : sorted)
+        {
+            if (contains(assigned_ptr_pool, ptr))
+            {
+                WARN() << "already assigned";
+                continue;
+            }
+
+            if (intermediate_only && (contains(m_keep_mem, ptr) || contains(m_input_mem, ptr)))
+            {
+                unassigned_ptr_pool.insert(ptr);
+                continue;
+            }
+
+            if (pool->get_mem_id() != ptr->get_mem_id())
+            {
+                unassigned_ptr_pool.insert(ptr);
+                continue;
+            }
+
+            // INFO() << "assigning " << m_tensor_map[ptr]->name();
+
+            available_size = pool->size;
+            available_offset = 0;
+
+            uint64_t mem_size = 0;
+            if (memory_size.count(ptr))
+            {
+                mem_size = memory_size.at(ptr);
+                if (mem_size > available_size)
+                {
+                    unassigned_ptr_pool.insert(ptr);
+                    continue;
+                }
+            }
+            else
+            {
+                ERROR() << "no mem size";
+            }
+
+            uint64_t offset;
+            if (opt_goal == Linear)
+            {
+                offset = used_size_pool;
+            }
+            else
+            {
+                std::unordered_set<MemoryObjectPtr> conflict_list;
+                if (conflict_map.count(ptr))
+                {
+                    for (const auto &item : conflict_map.at(ptr))
+                    {
+                        conflict_list.insert(item);
+                    }
+                }
+                auto avoid_internals = avoid(ptr, assigned_ptr_pool, conflict_list, offset_map_pool);
+
+                std::stable_sort(avoid_internals.begin(), avoid_internals.end(), [](std::pair<uint32_t, uint32_t> a, std::pair<uint32_t, uint32_t> b) {
+                    return a.first < b.first;
+                });
+
+                // for (auto a : avoid_internals)
+                // {
+                //     INFO() << "avoid1: " << a.first << " " << a.second;
+                // }
+
+                avoid_internals = merge(avoid_internals);
+
+                // for (auto a : avoid_internals)
+                // {
+                //     INFO() << "avoid2: " << a.first << " " << a.second;
+                // }
+
+                offset = fit(mem_size, ptr->align, avoid_internals, available_offset);
+
+                if (aipubt::BuilderConfig::get<bool>(Constants::show_soms_bottleneck))
+                {
+                    gen_bottleneck(ptr, ++mem_id, mem_map, mem_graph, offset, avoid_internals, conflict_list, offset_map_pool);
+                }
+            }
+            uint64_t total_size = offset + mem_size;
+            if (total_size <= available_size)
+            {
+                if (used_size_pool < total_size)
+                    used_size_pool = total_size;
+                // INFO() << "total size for slot " << i << ": 0x" << std::hex << slots_used_size[i];
+                fp_pool += ptr->foot_print;
+                if (offset == 0)
+                {
+                    if (ptr->align > pool->align)
+                    {
+                        pool->align = ptr->align;
+                    }
+                }
+                // INFO() << m_tensor_map[ptr]->name() << " assigned to offset 0x" << std::hex << offset << " size 0x" << mem_size;
+                if (offset_map_pool.count(ptr))
+                {
+                    ERROR();
+                }
+                offset_map_pool[ptr] = offset;
+                assigned_ptr_pool.insert(ptr);
+                if (total_assigned_ptr.count(ptr))
+                {
+                    ERROR() << "duplicate assignment";
+                }
+            }
+            else
+            {
+                unassigned_ptr_pool.insert(ptr);
+            }
+        }
+
+        if (opt_goal == MaxFp)
+        {
+            if (best_fp == 0 || best_fp < fp_pool)
+            {
+                best_fp = fp_pool;
+                best_offset_map = offset_map_pool; //TODO
+                used_size = used_size_pool;
+                assigned_ptr = assigned_ptr_pool;
+                unassigned_ptr = unassigned_ptr_pool;
+                // best_i = i;
+            }
+        }
+        else //MinSpace
+        {
+            if (used_size == 0 || used_size > used_size_pool)
+            {
+                best_fp = fp_pool;
+                best_offset_map = offset_map_pool; //TODO
+                used_size = used_size_pool;
+                assigned_ptr = assigned_ptr_pool;
+                unassigned_ptr = unassigned_ptr_pool;
+                // best_i = i;
+            }
+        }
+
+        // INFO() << "loop " << i << " fp: " << utils::get_human_readable_size(fp_pool) << " used: 0x" << std::hex << used_size_pool;
+
+        if (!switch_bottleneck(sorted, flag))
+        {
+            break;
+        }
+
+        if (aipubt::BuilderConfig::get<bool>(Constants::show_soms_bottleneck))
+        {
+            show_bottleneck(mem_map, mem_graph, m_tensor_map, m_conflict_reason, offset_map_pool);
+        }
+    }
+
+    // DEBUG() << "get best opt " << best_i;
+
+    for (auto pair : best_offset_map)
+    {
+        if (offset_map.count(pair.first))
+        {
+            ERROR();
+        }
+        offset_map[pair.first] = pair.second;
+    }
+
+    total_assigned_ptr.insert(assigned_ptr.begin(), assigned_ptr.end());
+
+    return used_size;
+}
+
+std::vector<MemoryObjectPtr> SOMSScheduler::mem_assignment(const std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> &conflict_map, const std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &not_reuse_mem)
+{
+    std::map<MemoryObjectPtr, size_t> memory_size;
     graph_memory(memory_size, m_graph->nodes());
     for (auto ws_pair : m_ws_map)
     {
@@ -838,609 +1286,150 @@ std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm
         }
     }
 
-    std::vector<MemoryObjectPtr> slots;
-    std::vector<uint32_t> slots_used_size;
-    std::vector<MemoryObjectPtr> sorted(all_mems.begin(), all_mems.end());
-
-    int sg_size = 0;
-    for (auto level : m_levels)
-    {
-        for (auto n : level)
-        {
-            sg_size++;
-        }
-    }
-    if (sg_size == 1)
-    {
-        auto stream = m_levels[0][0];
-        std::stable_sort(sorted.begin(), sorted.end(), [this, stream](MemoryObjectPtr a, MemoryObjectPtr b) {
-            uint32_t t1, t2;
-            t1 = end_time(a, stream) - start_time(a, stream);
-            t2 = end_time(b, stream) - start_time(b, stream);
-            return t1 == t2 ? m_tensor_map[a]->name() > m_tensor_map[b]->name() : t1 < t2;
-            // return a->foot_print > b->foot_print;
-        });
-    }
-    else
-    {
-        std::stable_sort(sorted.begin(), sorted.end(), [&memory_size, this](MemoryObjectPtr a, MemoryObjectPtr b) {
-            // return conflict_map[a].size() > conflict_map[b].size();
-            uint32_t s1 = memory_size[a];
-            uint32_t s2 = memory_size[b];
-            return s1 == s2 ? m_tensor_map[a]->name() > m_tensor_map[b]->name() : s1 > s2;
-            // return a->foot_print > b->foot_print;
-        });
-    }
-
-    std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> slot_map;
-
-    std::vector<MemoryObjectPtr> assigned_ptr, max_assigned_ptr, unassigned_ptr;
-    std::vector<MemoryObjectPtr> gm_mems, max_gm_mems;
-    uint32_t gm_used_size = 0, max_gm_used_size = 0;
-    uint32_t gm_fp = 0, max_gm_fp = 0;
-    std::vector<MemoryObjectPtr> swapped_vec;
-
+    std::map<MemoryObjectPtr, uint64_t> offset_map;
+    std::set<MemoryObjectPtr> mem_ptr = all_mems;
+    std::set<MemoryObjectPtr> assigned_ptr;
+    std::set<MemoryObjectPtr> unassigned_ptr;
+    std::map<MemoryObjectPtr, std::set<MemoryObjectPtr>> slot_map;
+    std::set<MemoryObjectPtr> total_assigned_ptr;
     //for gm
-    std::map<MemoryObjectPtr, uint32_t> max_offset_map;
-    // uint32_t swap_idx = 0;
-    // uint32_t swapped_idx = 0;
-    // bool restore = false;
-    bool flag = true;
-    bool found = false;
-    uint32_t max_loop = 0;
-    uint32_t gm_available_size = gm_s->size;
-    uint32_t gm_available_offset = 0;
-    uint32_t loop_cnt = BuilderConfig::get<uint32_t>(Constants::soms_gm_loop);
-    if (gm_s->size == 0)
+    if (m_gm_size.size() && m_gm_size[0] > 0)
     {
-        loop_cnt = 1;
-    }
-    for (size_t i = 0; i < loop_cnt; ++i)
-    {
-        if (BuilderConfig::get<std::string>(Constants::load_prior_in_gm) != "" || BuilderConfig::get<bool>(Constants::softmax_prior_in_gm))
+        // DEBUG() << "assign mem gm";
+        MemoryObjectPtr gm_s = std::make_shared<MemoryObject>(0); //slot 0 gm
+        gm_s->size = m_gm_size[0];
+        gm_s->align = 0x1000;
+        gm_s->set_mem_id(-1);
+
+        uint32_t loop_cnt = BuilderConfig::get<uint32_t>(Constants::soms_gm_loop);
+
+        AllocOrder order = m_graph->nodes().size() > 1 ? orderbysize : orderbylife;
+
+        auto used_size = offset_assignment(gm_s, memory_size, conflict_map, order, true, loop_cnt, MaxFp, mem_ptr, assigned_ptr, unassigned_ptr, offset_map, total_assigned_ptr);
+
+        if (m_need_prior_gm)
         {
-            std::stable_sort(sorted.begin(), sorted.end(), [](MemoryObjectPtr a, MemoryObjectPtr b) {
-                if (a->get_mem_flag() == MemoryObject::flag::prior_in_gm)
+            for (auto s : unassigned_ptr)
+            {
+                if (s->get_mem_flag() == MemoryObject::flag::prior_in_gm)
                 {
-                    // INFO() << "prior in gm: " << m_tensor_map[a]->name();
-                    return true;
+                    WARN() << "prior tensor " << m_tensor_map[s]->name() << " is not assigned gm";
                 }
-                return false;
-            });
+            }
         }
 
-        // INFO() << "gm try: " << i;
-        gm_mems.clear();
-        gm_fp = 0;
-        gm_used_size = 0;
+        //shrink gm
+        if (!BuilderConfig::get<bool>(Constants::enable_gm_enhance) && !BuilderConfig::get<bool>(Constants::enable_dynamic_gm))
+        {
+            gm_s->size = used_size;
+        }
+
+        if (gm_s->size)
+        {
+            m_gm_region_slots.push_back(gm_s);
+            m_gm_size[0] = gm_s->size;
+            slot_map[gm_s] = assigned_ptr;
+        }
+
+        mem_ptr = unassigned_ptr;
         assigned_ptr.clear();
         unassigned_ptr.clear();
-        offset_map.clear();
-        for (auto m : sorted)
+    }
+
+    if (m_numa_cfg.mem_size().size() > 0)
+    {
+        for (size_t i = 0; i < m_numa_cfg.mem_size().size(); ++i)
         {
-            auto ptr = m;
-            if (contains(assigned_ptr, ptr))
+
+            MemoryObjectPtr numa_s = std::make_shared<MemoryObject>(0);
+            numa_s->size = m_numa_cfg.mem_size()[i];
+            if (numa_s->size == 0)
             {
                 continue;
             }
+            numa_s->align = 0;
+            numa_s->set_mem_id(i);
+            auto used_size = offset_assignment(numa_s, memory_size, conflict_map, orderbysize, true, 1, MinSpace, mem_ptr, assigned_ptr, unassigned_ptr, offset_map, total_assigned_ptr);
 
-            uint32_t mem_size = 0;
-            if (memory_size.count(ptr))
+            if (used_size)
             {
-                mem_size = memory_size[ptr];
-            }
-            else
-            {
-                ERROR() << "no mem size";
-            }
-
-            int core_id = m_mem_core_map[ptr];
-            if (core_id == -1)
-            {
-                gm_available_size = gm_s->size;
-                gm_available_offset = 0;
-            }
-            else
-            {
-                gm_available_size = gm_s->size / Target::get_the_target()->core_num();
-                gm_available_offset = core_id * gm_available_size;
+                numa_s->size = used_size;
+                slot_map[numa_s] = assigned_ptr;
             }
 
-            if (mem_size > gm_available_size)
-            {
-                continue;
-            }
-
-            // DEBUG() << "allocating gm " << m_tensor_map[m]->node()->name() << " " << mem_size;
-            // std::vector<MemoryObjectPtr> conflict_list;
-            std::unordered_set<MemoryObjectPtr> conflict_list;
-            if (conflict_map.count(ptr))
-            {
-                // conflict_list = conflict_map.at(ptr);
-                for (const auto &item : conflict_map.at(ptr))
-                {
-                    conflict_list.insert(item);
-                }
-            }
-            auto avoid_internals = avoid(ptr, gm_mems, conflict_list);
-
-            std::stable_sort(avoid_internals.begin(), avoid_internals.end(), [](std::pair<uint32_t, uint32_t> a, std::pair<uint32_t, uint32_t> b) {
-                return a.first < b.first;
-            });
-
-            // for(auto a : avoid_internals)
-            // {
-            //     INFO() << "avoid1: " << a.first << " " << a.second;
-            // }
-
-            avoid_internals = merge(avoid_internals);
-            // for(auto a : avoid_internals)
-            // {
-            //     INFO() << "avoid2: " << a.first << " " << a.second;
-            // }
-
-            auto offset = fit(mem_size, ptr->align, avoid_internals, gm_available_offset);
-
-            if (offset + mem_size <= gm_available_offset + gm_available_size) // first fit
-            {
-                // DEBUG() << at.t->node()->name() << " can allocate slot " << i << " offset: " << offset << " size: " << mem_size;
-
-                if (contains(m_keep_mem, ptr) || contains(m_input_mem, ptr)) //input and output will not in gm because bad sync performance
-                {
-                    // INFO() << "cannot assign to gm " << m_tensor_map[m]->node()->name() << " " << mem_size << " due to input or output";
-                    continue;
-                }
-                // DEBUG() << m_tensor_map[m]->node()->name() << " can allocate gm offset: " << offset << " size: " << mem_size;
-                gm_fp += ptr->foot_print;
-                if (offset + mem_size > gm_used_size)
-                {
-                    gm_used_size = offset + mem_size;
-                }
-
-                offset_map[ptr] = offset;
-                gm_mems.push_back(ptr);
-                assigned_ptr.push_back(ptr);
-            }
-            else
-            {
-                unassigned_ptr.push_back(ptr);
-            }
+            mem_ptr = unassigned_ptr;
+            assigned_ptr.clear();
+            unassigned_ptr.clear();
         }
-        if (gm_fp == 0)
+    }
+
+    if (BuilderConfig::get<uint64_t>(Constants::ocm_size) > 0)
+    {
+        // DEBUG() << "assign mem ocm";
+        MemoryObjectPtr ocm_s = std::make_shared<MemoryObject>(0);
+        uint64_t ocm_size = BuilderConfig::get<uint64_t>(Constants::ocm_size);
+        ocm_s->size = ocm_size;
+        ocm_s->align = 0x1000;
+        ocm_s->set_mem_id(-1);
+        offset_assignment(ocm_s, memory_size, conflict_map, orderbysize, true, 1, MinSpace, mem_ptr, assigned_ptr, unassigned_ptr, offset_map, total_assigned_ptr);
+        slot_map[ocm_s] = assigned_ptr;
+        mem_ptr = unassigned_ptr;
+        assigned_ptr.clear();
+        unassigned_ptr.clear();
+    }
+
+    while (!mem_ptr.empty())
+    {
+        // DEBUG() << "assign mem ddr";
+        MemoryObjectPtr ddr_s = std::make_shared<MemoryObject>(0);
+        ddr_s->size = 0x400000000000; //max size for ddr
+        ddr_s->align = 0;
+        ddr_s->set_mem_id(-1);
+        auto used_size = offset_assignment(ddr_s, memory_size, conflict_map, orderbysize, false, 1, MinSpace, mem_ptr, assigned_ptr, unassigned_ptr, offset_map, total_assigned_ptr);
+        ddr_s->size = used_size;
+        slot_map[ddr_s] = assigned_ptr;
+        mem_ptr = unassigned_ptr;
+        assigned_ptr.clear();
+        unassigned_ptr.clear();
+        if (used_size == 0)
         {
-            max_gm_fp = gm_fp;
-            max_gm_used_size = gm_used_size;
-            max_gm_mems = gm_mems;
-            max_assigned_ptr = assigned_ptr;
-            max_offset_map = offset_map;
+            ERROR() << "some data can not be assigned";
             break;
         }
-
-        // INFO() << "loop " << i << " gm_fp: " << utils::get_human_readable_size(gm_fp);
-        if (gm_fp > max_gm_fp)
-        {
-            max_gm_fp = gm_fp;
-            max_gm_used_size = gm_used_size;
-            max_gm_mems = gm_mems;
-            max_assigned_ptr = assigned_ptr;
-            max_offset_map = offset_map;
-            max_loop = i;
-            // swapped_vec.clear();
-        }
-        // else if (!restore && found)
-        // {
-        //     // std::swap(sorted[swap_idx], sorted[swapped_idx]);
-        //     if (flag)
-        //     {
-        //         auto element = sorted.back();
-        //         sorted.pop_back();
-        //         sorted.insert(sorted.begin() + swap_idx, element);
-        //         INFO() << "restore back to index " << swap_idx << " due to fp " << utils::get_human_readable_size(gm_fp);
-        //     }
-        //     else
-        //     {
-        //         auto element = sorted.front();
-        //         sorted.erase(sorted.begin());
-        //         sorted.insert(sorted.begin() + swap_idx, element);
-        //         INFO() << "restore front to index " << swap_idx << " due to fp " << utils::get_human_readable_size(gm_fp);
-        //     }
-        //     restore = true;
-        //     continue;
-        // }
-
-        // restore = false;
-
-        // INFO() << "fp in loop " << i << " " << utils::get_human_readable_size(gm_fp) << " " << assigned_ptr.size();
-
-        flag = !flag;
-        MemoryObjectPtr element;
-        MemoryObjectPtr swapped;
-        uint32_t idx1 = 0;
-        // uint32_t idx2 = 0;
-        found = false;
-        if (flag)
-        {
-            std::stable_sort(assigned_ptr.begin(), assigned_ptr.end(), [&memory_size, this](MemoryObjectPtr a, MemoryObjectPtr b) {
-                // return conflict_map.at(a).size() > conflict_map.at(b).size();
-                uint32_t s1 = memory_size[a];
-                uint32_t s2 = memory_size[b];
-                // return a->foot_print > b->foot_print;
-                return s1 == s2 ? m_tensor_map[a]->name() > m_tensor_map[b]->name() : s1 > s2;
-            });
-            for (size_t j = 0; j < assigned_ptr.size(); ++j)
-            {
-                auto ptr = assigned_ptr[j];
-                if (contains(swapped_vec, ptr))
-                {
-                    continue;
-                }
-                found = true;
-                idx1 = j;
-            }
-            if (!found)
-            {
-                INFO() << "not found!";
-                break;
-            }
-            element = assigned_ptr[idx1];
-
-            swapped_vec.push_back(element);
-            auto it = std::find(sorted.begin(), sorted.end(), element);
-            if (it != sorted.end())
-            {
-                // swap_idx = std::distance(sorted.begin(), it);
-                sorted.erase(it);
-                sorted.push_back(element);
-                // INFO() << "swap index " << swap_idx;
-            }
-            else
-            {
-                ERROR();
-            }
-            // INFO() << "put index " << swap_idx << " " << m_tensor_map[element]->node()->name() << " " << memory_size[element] << " to the end " << sorted.size();
-        }
-        else
-        {
-            // uint32_t conflict_size = 0;
-            std::stable_sort(unassigned_ptr.begin(), unassigned_ptr.end(), [&memory_size, this](MemoryObjectPtr a, MemoryObjectPtr b) {
-                // return conflict_map.at(a).size() < conflict_map.at(b).size();
-                uint32_t s1 = memory_size[a];
-                uint32_t s2 = memory_size[b];
-                // return a->foot_print > b->foot_print;
-                return s1 == s2 ? m_tensor_map[a]->name() > m_tensor_map[b]->name() : s1 > s2;
-            });
-            for (size_t j = 0; j < unassigned_ptr.size(); ++j)
-            {
-                auto ptr = unassigned_ptr[j];
-                int core_id = m_mem_core_map[ptr];
-
-                if (core_id == -1)
-                {
-                    gm_available_size = gm_s->size;
-                }
-                else
-                {
-                    gm_available_size = gm_s->size / Target::get_the_target()->core_num();
-                }
-
-                if (contains(swapped_vec, ptr))
-                {
-                    continue;
-                }
-                if (memory_size[ptr] <= gm_available_size)
-                {
-                    found = true;
-                    idx1 = j;
-                }
-            }
-            if (!found)
-            {
-                INFO() << "not found!";
-                break;
-            }
-            element = unassigned_ptr[idx1];
-            swapped_vec.push_back(element);
-            auto it = std::find(sorted.begin(), sorted.end(), element);
-            if (it != sorted.end())
-            {
-                // swap_idx = std::distance(sorted.begin(), it);
-                sorted.erase(it);
-                sorted.insert(sorted.begin(), element);
-            }
-            else
-            {
-                ERROR();
-            }
-            // INFO() << "put index " << swap_idx << " " << m_tensor_map[element]->node()->name() << " " << memory_size[element] << " to the fronts " << sorted.size();
-        }
     }
-
-    gm_fp = max_gm_fp;
-    gm_used_size = max_gm_used_size;
-    gm_mems = max_gm_mems;
-    assigned_ptr = max_assigned_ptr;
-    offset_map = max_offset_map;
-    DEBUG() << "get max in loop " << max_loop;
-
-    if (gm_used_size != 0)
-    {
-        slot_map[gm_s] = gm_mems;
-    }
-
-    //for ddr
-
-    GraphPtr mem_graph = Graph::create();
-    int mem_id = 0;
-    std::map<uint32_t, MemoryObjectPtr> mem_map;
-    if (sorted.size())
-    {
-        std::stable_sort(sorted.begin(), sorted.end(), [&memory_size](MemoryObjectPtr a, MemoryObjectPtr b) {
-            return memory_size[a] > memory_size[b];
-        });
-
-        //for ocm
-        MemoryObjectPtr ocm_s = std::make_shared<MemoryObject>(0);
-        if (BuilderConfig::get<uint64_t>(Constants::ocm_size))
-        {
-            uint32_t ocm_size = BuilderConfig::get<uint64_t>(Constants::ocm_size);
-            ocm_s->size = ocm_size;
-            ocm_s->align = 0x1000;
-            slots.push_back(ocm_s);
-            slots_used_size.push_back(0);
-        }
-
-        MemoryObjectPtr ddr_s = std::make_shared<MemoryObject>(0);
-        ddr_s->size = 0xe0000000; //max size for ddr
-        ddr_s->align = 0;
-        slots.push_back(ddr_s);
-        slots_used_size.push_back(0);
-
-        for (auto m : sorted)
-        {
-            auto ptr = m;
-            if (contains(assigned_ptr, ptr))
-            {
-                continue;
-            }
-
-            uint64_t mem_size = 0;
-            if (memory_size.count(ptr))
-            {
-                mem_size = memory_size[ptr];
-                if (mem_size >= 0xe0000000)
-                {
-                    ERROR() << "single tensor larger than 3.5G";
-                    return slots;
-                }
-            }
-            else
-            {
-                ERROR() << "no mem size";
-            }
-            // DEBUG() << "allocating " << m_tensor_map[m]->node()->name() << " 0x" << std::hex << mem_size;
-
-            // for (auto s : slots)
-            for (size_t i = 0; i < slots.size(); ++i)
-            {
-                auto s = slots[i];
-                if (s == ocm_s && (contains(m_keep_mem, ptr) || contains(m_input_mem, ptr)))
-                {
-                    continue;
-                }
-
-                auto assigneed_tensors = slot_map[s];
-                std::unordered_set<MemoryObjectPtr> conflict_list;
-                if (conflict_map.count(m))
-                {
-                    // conflict_list = conflict_map.at(m);
-                    for (const auto &item : conflict_map.at(m))
-                    {
-                        conflict_list.insert(item);
-                    }
-                }
-                auto avoid_internals = avoid(m, assigneed_tensors, conflict_list);
-
-                std::stable_sort(avoid_internals.begin(), avoid_internals.end(), [](std::pair<uint32_t, uint32_t> a, std::pair<uint32_t, uint32_t> b) {
-                    return a.first < b.first;
-                });
-
-                // for(auto a : avoid_internals)
-                // {
-                //     INFO() << "avoid1: " << a.first << " " << a.second;
-                // }
-
-                avoid_internals = merge(avoid_internals);
-
-                // for(auto a : avoid_internals)
-                // {
-                //     INFO() << "avoid2: " << a.first << " " << a.second;
-                // }
-
-                auto offset = fit(mem_size, ptr->align, avoid_internals, 0);
-
-                if (aipubt::BuilderConfig::get<bool>(Constants::show_soms_bottleneck))
-                {
-                    mem_id++;
-                    mem_map[mem_id] = ptr;
-                    NodePtr new_node = Node::create(std::to_string(mem_id), OpType_NoOp);
-                    new_node->set_attr("mem_id", mem_id);
-                    TensorPtr out = std::make_shared<Tensor>(std::to_string(mem_id) + "out", TensorShape(0), Tensor::Dtype::UINT8);
-                    new_node->add_output(out);
-                    mem_graph->add_node(new_node);
-                    // INFO() << "add node " << m_tensor_map[ptr] << " offset: 0x" std::hex << offset;
-                    for (auto interval : avoid_internals)
-                    {
-                        auto end = interval.first + interval.second;
-                        // INFO() << "end: 0x" << std::hex << end;
-                        auto end_aligned = aligned(end, ptr->align);
-                        if (end_aligned == offset)
-                        {
-                            for (auto n : mem_graph->nodes())
-                            {
-                                uint32_t id = n->attrs()["mem_id"];
-                                auto mem = mem_map[id];
-                                auto mem_offset = offset_map[mem];
-                                auto mem_size = memory_size[mem];
-                                // INFO() << "id: " << id << m_tensor_map[mem] << " mem_offset: 0x" << std::hex << mem_offset << " size: 0x" << mem_size;
-                                if ((mem_offset + (uint32_t)mem_size == end) && conflict_list.count(mem))
-                                {
-                                    n->add_input(out);
-                                    // INFO() <<  m_tensor_map[mem] << " add input " << m_tensor_map[ptr];
-                                }
-                                else
-                                {
-                                    continue;
-                                }
-                            }
-                        }
-                        else
-                        {
-                            continue;
-                        }
-                    }
-                }
-
-                uint64_t total_size = offset + mem_size;
-                if (total_size < s->size)
-                {
-                    if (slots_used_size[i] < total_size)
-                        slots_used_size[i] = total_size;
-                    // INFO() << "total size for slot " << i << ": 0x" << std::hex << slots_used_size[i];
-                    if (offset == 0)
-                    {
-                        if (ptr->align > s->align)
-                        {
-                            s->align = ptr->align;
-                        }
-                    }
-                    // INFO() << m_tensor_map[m]->name() << " assigned to slot " << i << " offset 0x" << std::hex << offset;
-                    // if(offset_map.count(ptr))
-                    // {
-                    //     ERROR();
-                    // }
-                    offset_map[ptr] = offset;
-                    // if(slot_map.count(ptr))
-                    // {
-                    //     ERROR();
-                    // }
-                    slot_map[s].push_back(ptr);
-                    assigned_ptr.push_back(ptr);
-                    break;
-                }
-
-                if (i == slots.size() - 1) //if this is the last slot then will create a new ddr slot)
-                {
-                    MemoryObjectPtr extra_ddr_s = std::make_shared<MemoryObject>(0);
-                    extra_ddr_s->size = 0xe0000000; //max size for ddr
-                    extra_ddr_s->align = 0;
-                    slots.push_back(extra_ddr_s);
-                    slots_used_size.push_back(0);
-                }
-            }
-        }
-
-        for (size_t i = 0; i < slots.size(); ++i)
-        {
-
-            if (slots_used_size[i] == 0)
-            {
-                slots.erase(slots.begin() + i);
-                slots_used_size.erase(slots_used_size.begin() + i);
-                i--;
-            }
-            else
-            {
-                slots[i]->size = slots_used_size[i];
-            }
-        }
-    }
-
-    if (aipubt::BuilderConfig::get<bool>(Constants::show_soms_bottleneck))
-    {
-        NodePtr longest_n = 0;
-        uint32_t logest = 0;
-        for (auto n : mem_graph->nodes())
-        {
-            if (n->parents().size() == 0)
-            {
-                uint32_t id = n->attrs()["mem_id"];
-                auto mem = mem_map.at(id);
-                auto mem_offset = offset_map.at(mem);
-                if (logest < mem_offset + memory_size[mem])
-                {
-                    logest = mem_offset + memory_size[mem];
-                    longest_n = n;
-                }
-            }
-        }
-
-        uint32_t id = longest_n->attrs()["mem_id"];
-        auto mem = mem_map.at(id);
-        auto mem_offset = offset_map.at(mem);
-        auto t = m_tensor_map.at(mem);
-        INFO() << "memory bottleneck " << t->name() << " offset 0x" << std::hex << mem_offset;
-        print_child(longest_n, mem_map, offset_map, m_tensor_map, memory_size, m_conflict_reason);
-    }
-
-    assigned_ptr.clear();
 
     for (auto ptr : not_reuse_mem)
     {
-        if (contains(assigned_ptr, ptr))
+        if (!memory_size.count(ptr) || memory_size[ptr] == 0)
         {
             continue;
         }
-        uint32_t mem_size = 0;
-        if (memory_size.count(ptr))
-        {
-            mem_size = memory_size[ptr];
-        }
-        else
+        // DEBUG() << "assign mem not reuse";
+        MemoryObjectPtr ddr_s = std::make_shared<MemoryObject>(0);
+        ddr_s->size = memory_size[ptr];
+        ddr_s->align = 0;
+        mem_ptr.insert(ptr);
+        offset_assignment(ddr_s, memory_size, conflict_map, orderbysize, false, 1, MinSpace, mem_ptr, assigned_ptr, unassigned_ptr, offset_map, total_assigned_ptr);
+        slot_map[ddr_s] = assigned_ptr;
+        assigned_ptr.clear();
+        mem_ptr.clear();
+        if (unassigned_ptr.size())
         {
             ERROR();
         }
-
-        if (mem_size == 0)
-        {
-            WARN() << m_tensor_map[ptr] << " memory size is " << 0;
-            continue;
-        }
-
-        // DEBUG() << t->name() << " can allocate new slot " << slots.size();
-        MemoryObjectPtr s = std::make_shared<MemoryObject>(0);
-        s->size = mem_size;
-        s->align = ptr->align;
-        // if(offset_map.count(ptr))
-        // {
-        //     ERROR() << m_tensor_map[ptr]->name() << " already assigned";
-        // }
-        offset_map[ptr] = 0;
-        // if(slot_map.count(ptr))
-        // {
-        //     ERROR();
-        // }
-        slot_map[s].push_back(ptr);
-        slots.push_back(s);
-
-        assigned_ptr.push_back(ptr);
     }
 
-    // for (auto pair : slot_map)
-    // {
-    //     INFO() << "new slot";
-    //     auto vec = pair.second;
-    //     for (auto v : vec)
-    //     {
-    //         if (m_tensor_map[v])
-    //         {
-    //             DEBUG() << "allocating " << m_tensor_map[v]->name() << " offset 0x" << std::hex << offset_map[v] << " size: 0x" << memory_size[v];
-    //         }
-    //     }
-    // }
-
+    int cnt = 0;
+    std::vector<MemoryObjectPtr> slots;
     for (auto s : slot_map)
     {
         // DEBUG() << "slot ";
+        if (s.first->size == 0)
+        {
+            ERROR() << "slot size is empty";
+        }
+        slots.push_back(s.first);
+        s.first->buffer_id = cnt++;
         s.first->foot_print = 0;
         for (auto m : s.second)
         {
@@ -1450,17 +1439,6 @@ std::vector<MemoryObjectPtr> SOMSScheduler::offset_assignment(MemoryObjectPtr gm
             ptr->relative_offset = offset_map[m];
             s.first->foot_print += ptr->foot_print;
         }
-    }
-
-    //shrink gm
-    if (!BuilderConfig::get<bool>(Constants::enable_gm_enhance) && !BuilderConfig::get<bool>(Constants::enable_dynamic_gm))
-    {
-        gm_s->size = gm_used_size;
-    }
-
-    if (gm_s->size)
-    {
-        slots.insert(slots.begin(), gm_s);
     }
 
     return slots;
@@ -1881,6 +1859,11 @@ void SOMSScheduler::disable_sm()
 void SOMSScheduler::set_ws(std::map<NodePtr, std::set<TensorPtr>> &ws_map)
 {
     m_ws_map = ws_map;
+}
+
+void SOMSScheduler::set_numacfg(const NumaCfg &numa_cfg)
+{
+    m_numa_cfg = numa_cfg;
 }
 
 }; // namespace aipubt

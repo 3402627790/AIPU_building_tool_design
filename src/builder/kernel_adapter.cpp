@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -41,17 +41,37 @@ void KernelAdapter::record_tensors(NodePtr n, const BuilderParams &params)
 {
     for (auto &p : params)
     {
-        if (p.const_tensor && !contains(m_const_tensors, p.const_tensor)) //is constant
+        if (p.tensor && p.tensor->is_const_tensor()) //is constant slice
         {
-            m_const_tensors.push_back(p.const_tensor);
+            if (contains(m_const_tensors, p.tensor))
+            {
+                continue;
+            }
+            m_const_tensors.push_back(p.tensor);
+        }
+        if (p.const_tensor) //is constant
+        {
+            TensorPtr t = std::static_pointer_cast<Tensor>(std::shared_ptr<ConstTensor>(p.const_tensor));
+            if (contains(m_const_tensors, t))
+            {
+                continue;
+            }
+            m_const_tensors.push_back(t);
         }
         else if (p.tensor && p.tensor->attrs().count(Constants::is_workspace_tensor)) //is workspace
         {
             m_ws_map[n].insert(p.tensor);
         }
-        else if (p.surface)
+        else if (p.surface) // is surface
         {
-            m_surface_tensors[p.surface] = n;
+            if (p.surface->is_const_tensor())
+            {
+                if (contains(m_const_tensors, p.surface))
+                {
+                    continue;
+                }
+                m_const_tensors.push_back(p.surface);
+            }
         }
     }
 }
@@ -95,17 +115,26 @@ void KernelAdapter::kernel_adapt()
                     continue;
                 }
 
-                if (n->type() == OpType_ParamUpdate)
+                if(n->type() == OpType_Constant)
                 {
+                    auto wt = n->constants()["weights"];
+                    auto t = n->outputs()[0];
+                    t->memory_offset()->set_base_offset(wt->memory_offset());
+                    m_const_tensors.push_back(wt);
                     continue;
                 }
 
                 if (n->attrs().count(Constants::plugin_impl))
                 {
-                    auto plugin_impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
+                    auto impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
+                    if (std::dynamic_pointer_cast<GopDSCodeImpl>(impl))
+                    {
+                        continue;
+                    }
+
                     auto kernel_infos = n->get_attr<KernelInfos>(Constants::kernel_infos);
                     auto is_host_impl = n->get_attr<bool>(Constants::is_host_impl);
-                    auto lib_name = plugin_impl->kernel_cpsbin();
+                    auto lib_name = impl->kernel_cpsbin();
                     for (auto info : kernel_infos)
                     {
                         INFO() << "kernel for " << n << " " << info.kernel_name;
@@ -145,7 +174,7 @@ void KernelAdapter::kernel_adapt()
     }
 }
 
-std::vector<ConstTensorPtr> KernelAdapter::get_const_tensors()
+std::vector<TensorPtr> KernelAdapter::get_const_tensors()
 {
     return m_const_tensors;
 }
@@ -153,11 +182,6 @@ std::vector<ConstTensorPtr> KernelAdapter::get_const_tensors()
 std::map<NodePtr, std::set<TensorPtr>> KernelAdapter::get_ws_map()
 {
     return m_ws_map;
-}
-
-std::map<TensorPtr, NodePtr> KernelAdapter::get_surface_tensors()
-{
-    return m_surface_tensors;
 }
 
 const std::map<std::string, std::string> &KernelAdapter::get_device_lib() const

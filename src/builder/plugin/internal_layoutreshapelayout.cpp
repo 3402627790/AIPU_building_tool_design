@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -16,6 +16,7 @@
 //--------------------------------------------------------------------------------
 #include "builder/lowering/lowering.h"
 #include "builder/optimizer.h"
+#include "builder/ro_generator.h"
 #include "builder/target.h"
 #include <builder/plugin.h>
 #include <core/graph.h>
@@ -31,37 +32,37 @@ namespace aipubt
 namespace
 {
 
-static std::vector<int> integer_factorize(int n)
-{
-    std::vector<int> ret;
-    int f = 2;
-    while (f * f <= n)
+    static std::vector<int> integer_factorize(int n)
     {
-        while (n % f == 0)
+        std::vector<int> ret;
+        int f = 2;
+        while (f * f <= n)
         {
-            ret.push_back(f);
-            n = n / f;
+            while (n % f == 0)
+            {
+                ret.push_back(f);
+                n = n / f;
+            }
+            f += 1;
         }
-        f += 1;
+        if (n > 1)
+        {
+            ret.push_back(n);
+        }
+        return ret;
     }
-    if (n > 1)
-    {
-        ret.push_back(n);
-    }
-    return ret;
-}
 
-static int prod(TensorShape &s)
-{
-    int p = 1;
-    for (auto i : s)
+    static int prod(TensorShape &s)
     {
-        p *= i;
+        int p = 1;
+        for (auto i : s)
+        {
+            p *= i;
+        }
+        return p;
     }
-    return p;
-}
 
-/**
+    /**
  * @brief Determines if a reshape operation requires a physical memory reordering (transpose) 
  * by analyzing dimension factor decomposition.
  * * This function attempts to decompose the dimensions of shape0 and shape1 into a common 
@@ -73,96 +74,96 @@ static int prod(TensorShape &s)
  * @return true If a valid factor-based decomposition is found (enabling Reshape+Transpose lowering).
  * @return false If dimension boundaries are misaligned or factors cannot be matched.
  */
-static bool is_strides_changed(TensorShape &shape0, TensorShape &shape1, std::vector<int> &split)
-{
-    std::vector<std::vector<int>> a, b;
-    for (auto i : shape0)
+    static bool is_strides_changed(TensorShape &shape0, TensorShape &shape1, std::vector<int> &split)
     {
-        a.push_back(integer_factorize(i));
-    }
-    for (auto i : shape1)
-    {
-        b.push_back(integer_factorize(i));
-    }
-    auto p = prod(shape0);
-    int s = 1;
-    while (a.size() > 0 && b.size() > 0 && s != p)
-    {
-        int v = 1;
-        auto a0 = a[0];
-        for (auto i : a0)
+        std::vector<std::vector<int>> a, b;
+        for (auto i : shape0)
         {
-            if (contains(b[0], i))
+            a.push_back(integer_factorize(i));
+        }
+        for (auto i : shape1)
+        {
+            b.push_back(integer_factorize(i));
+        }
+        auto p = prod(shape0);
+        int s = 1;
+        while (a.size() > 0 && b.size() > 0 && s != p)
+        {
+            int v = 1;
+            auto a0 = a[0];
+            for (auto i : a0)
             {
-                v *= i;
-                s *= i;
-                b[0].erase(std::find(b[0].begin(), b[0].end(), i));
-                a[0].erase(std::find(a[0].begin(), a[0].end(), i));
+                if (contains(b[0], i))
+                {
+                    v *= i;
+                    s *= i;
+                    b[0].erase(std::find(b[0].begin(), b[0].end(), i));
+                    a[0].erase(std::find(a[0].begin(), a[0].end(), i));
+                }
+            }
+            if (v != 1)
+            {
+                split.push_back(v);
+            }
+            bool res = false;
+            if (a[0].size() == 0)
+            {
+                a.erase(a.begin());
+                res = true;
+            }
+            if (b[0].size() == 0)
+            {
+                b.erase(b.begin());
+                res = true;
+            }
+            if (!res)
+            {
+                return false;
             }
         }
-        if (v != 1)
-        {
-            split.push_back(v);
-        }
-        bool res = false;
-        if (a[0].size() == 0)
-        {
-            a.erase(a.begin());
-            res = true;
-        }
-        if (b[0].size() == 0)
-        {
-            b.erase(b.begin());
-            res = true;
-        }
-        if (!res)
-        {
-            return false;
-        }
+        return true;
     }
-    return true;
-}
 
-// split a shape into vector of vector
-std::vector<std::vector<int>> split_shape(const std::vector<int> &split, TensorShape &shape)
-{
-    uint32_t idx = 0;
-    std::vector<std::vector<int>> ret;
-    for (auto i : shape)
+    // split a shape into vector of vector
+    std::vector<std::vector<int>> split_shape(const std::vector<int> &split, TensorShape &shape)
     {
-        if (i == 1)
+        uint32_t idx = 0;
+        std::vector<std::vector<int>> ret;
+        for (auto i : shape)
         {
-            ret.push_back({1});
-            continue;
-        }
-        int p = 1;
-        std::vector<int> spl;
-        for (; idx < split.size();)
-        {
-            p *= split[idx];
-            spl.push_back(split[idx]);
-            ++idx;
-            if (p == i)
+            if (i == 1)
             {
-                ret.push_back(spl);
-                break;
+                ret.push_back({1});
+                continue;
+            }
+            int p = 1;
+            std::vector<int> spl;
+            for (; idx < split.size();)
+            {
+                p *= split[idx];
+                spl.push_back(split[idx]);
+                ++idx;
+                if (p == i)
+                {
+                    ret.push_back(spl);
+                    break;
+                }
             }
         }
+        return ret;
     }
-    return ret;
-}
 
-static bool is_perm_consistent(const std::vector<int> &perm)
-{
-    for (size_t i = 0; i < perm.size(); i++)
+    static bool is_perm_consistent(const std::vector<int> &perm)
     {
-        if ((int)i != perm[i])
+        for (size_t i = 0; i < perm.size(); i++)
         {
-            return false;
+            if ((int)i != perm[i])
+            {
+                return false;
+            }
         }
+        return true;
     }
-    return true;
-}
 
 } // namespace
 
@@ -260,7 +261,7 @@ public:
 
         // Build the 5-D "NHWCG" shapes that the LC transposes see.
         // NCHWC[N, Cg, H, W, c] after perm0=[0,2,3,1,4] becomes NHWCG[N, H, W, Cg, c].
-        std::vector<int> s5d_in  = {in_shape[0],  in_shape[2],  in_shape[3],  in_shape[1],  in_shape[4]};
+        std::vector<int> s5d_in = {in_shape[0], in_shape[2], in_shape[3], in_shape[1], in_shape[4]};
         std::vector<int> s5d_out = {out_shape[0], out_shape[2], out_shape[3], out_shape[1], out_shape[4]};
         TensorShape ts5d_in(s5d_in);
         TensorShape ts5d_out(s5d_out);
@@ -420,7 +421,7 @@ public:
     // 2. Invoke the callback with the plugin and the node list
     // 3. Restore the shapes
     // -----------------------------------------------------------------------
-    template<typename Fn>
+    template <typename Fn>
     auto invoke_as_flat_transpose(BaseNodePtr sgnode, Fn &&fn)
         -> decltype(fn(std::declval<BuilderOpPlugin *>(),
                        std::declval<BaseNodePtrList &>()))
@@ -444,7 +445,8 @@ public:
         if (!res)
         {
             ERROR() << "[InternalLayoutReshapeLayout] TransposePlugin check_params/"
-                       "set_target failed for " << sgnode->name();
+                       "set_target failed for "
+                    << sgnode->name();
             return R{};
         }
 
@@ -472,7 +474,7 @@ public:
         auto result = fn(plugin, m);
 
         // ── Step 4: restore original shapes and dtype.
-        sgnode->inputs()[0]->shape()  = orig_in_shape;
+        sgnode->inputs()[0]->shape() = orig_in_shape;
         sgnode->outputs()[0]->shape() = orig_out_shape;
         sgnode->inputs()[0]->set_type(dtype);
         sgnode->outputs()[0]->set_type(dtype);
@@ -486,7 +488,15 @@ public:
             return BuilderParams();
 
         return invoke_as_flat_transpose(sgnode, [&](BuilderOpPlugin *plugin, BaseNodePtrList &m) {
-            return plugin->generate_params(sgnode, m);
+            auto params = plugin->generate_params(sgnode, m);
+            std::string error_msg;
+            if (get_target()->isainfo().type >= ISA_ZYv5 &&
+                !aipubt::check_params(params, error_msg))
+            {
+                ERROR() << "Failed to check params: " << error_msg << "\n"
+                        << "Node: " << sgnode->name();
+            }
+            return params;
         });
     }
 
@@ -523,9 +533,9 @@ public:
     }
 
 private:
-    bool m_need_transpose = false;       // true if a real Transpose kernel is required
-    std::vector<int> m_new_perm;         // effective perm on the expanded flat shape
-    std::vector<int> m_new_reshape0;     // expanded flat input sizes the transpose kernel reads
+    bool m_need_transpose = false;   // true if a real Transpose kernel is required
+    std::vector<int> m_new_perm;     // effective perm on the expanded flat shape
+    std::vector<int> m_new_reshape0; // expanded flat input sizes the transpose kernel reads
 };
 
 REGISTER_PLUGIN(InternalLayoutReshapeLayout, 0x01010000, BUILDERPLUGIN_TYPE | GBPlugin_Internal);

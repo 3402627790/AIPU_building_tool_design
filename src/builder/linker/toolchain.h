@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -35,5 +35,8 @@ int aipuld(const std::vector<std::string> &objs, const std::string &out);
 int aipuocc(const std::string &c_file, const std::string &out);
 int cpsld(const std::vector<std::string> &objs, const std::string &out);
 int cpscc(const std::string &c_file, const std::string &out);
-int cpshostcc(const std::string &c_file, const std::string &out);
+int cpshostcc(const std::string &c_file,
+              const std::vector<std::string> &objs,
+              const std::string &out);
+std::string get_devkit_path();
 } //namespace aipubt

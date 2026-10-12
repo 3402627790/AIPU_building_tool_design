@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -49,6 +49,11 @@ void ObjectGenerator::set_slots(const std::vector<MemoryObjectPtr> &slots)
     m_slots = slots;
 }
 
+void ObjectGenerator::set_const_slots(const std::vector<MemoryObjectPtr> &slots)
+{
+    m_const_slots = slots;
+}
+
 void ObjectGenerator::set_constant(const std::vector<ConstTensorPtr> &constant)
 {
     m_constant = constant;
@@ -74,11 +79,6 @@ void ObjectGenerator::set_tensor_index_map(const std::map<TensorPtr, uint32_t> &
     m_tensor_index_map = tensor_index_map;
 }
 
-void ObjectGenerator::set_const_index_map(const std::map<ConstTensorPtr, uint32_t> &const_index_map)
-{
-    m_const_index_map = const_index_map;
-}
-
 void ObjectGenerator::set_graph(const GraphPtr g)
 {
     m_graph = g;
@@ -91,7 +91,7 @@ bool ObjectGenerator::gen(CpsElfPtr elf)
     for (size_t i = 0; i < m_slots.size(); ++i)
     {
         const auto &s = m_slots[i];
-        elf->set_buffer(BUF_TYPE_SLOT, s->buffer_id, s->size, s->align);
+        elf->set_buffer(BUF_TYPE_SLOT, s->buffer_id, s->size, s->align, s->get_mem_id());
         DEBUG() << "set slot as buf " << (int)BUF_TYPE_SLOT << " index " << s->buffer_id << " size: 0x" << std::hex << s->size << " align: 0x" << s->align;
         buf_map[s] = buf_loc_t{BUF_TYPE_SLOT, (uint32_t)s->buffer_id, 0};
     }
@@ -116,6 +116,10 @@ bool ObjectGenerator::gen(CpsElfPtr elf)
     auto stream3_ptr = stream3_tensor->memory_offset()->get_base_object();
     buf_map[stream3_ptr] = buf_loc_t{BUF_TYPE_STREAM, 3, 0};
 
+    auto print_tensor = m_graph->global_tensors()["print"];
+    auto print_ptr = print_tensor->memory_offset()->get_base_object();
+    buf_map[print_ptr] = buf_loc_t{BUF_TYPE_PRINT, 0, 0};
+
     elf->set_param_tab(m_param_offset_table);
 
     elf->set_graph(m_streams);
@@ -128,12 +132,21 @@ bool ObjectGenerator::gen(CpsElfPtr elf)
     size_t params_size = m_params.size() * sizeof(uint32_t);
     char *params_buf = new char[params_size];
     std::memcpy(params_buf, m_params.data(), params_size);
-    elf->set_buffer(BUF_TYPE_PARAM, 0, params_size, 1, params_buf);
+    elf->set_buffer(BUF_TYPE_PARAM, 0, params_size, 1, -1, params_buf);
     DEBUG() << "set param as buf " << (int)BUF_TYPE_PARAM << " index 0 size: 0x" << std::hex << params_size;
+
+    elf->set_buffer(BUF_TYPE_PRINT, 0, print_tensor->mem_size(), 8, -1);
+    DEBUG() << "set print as buf " << (int)BUF_TYPE_PRINT << " index 0 size: 0x" << std::hex << print_tensor->mem_size();
 
     std::multimap<uint8_t, tensor_info_t> tt;
     for (auto t : m_graph->get_input_tensors())
     {
+        auto ptr = t->memory_offset()->get_base_object();
+        if (contains(m_const_slots, ptr))
+        {
+            continue;
+        }
+
         if (!m_tensor_index_map.count(t))
         {
             WARN() << t->name() << " not exist in index map";
@@ -176,52 +189,39 @@ bool ObjectGenerator::gen(CpsElfPtr elf)
 
     elf->set_tensor_tab(tt);
 
-    if (m_constant.size())
+    std::map<MemoryObjectPtr, char *> const_buf;
+    for (auto s : m_const_slots)
     {
-        uint64_t size = 0;
-        std::map<uint32_t, uint64_t> wt_tab;
-        std::map<MemoryObjectPtr, uint64_t> assigned;
-
-        for (auto t : m_constant)
-        {
-            auto ptr = t->memory_offset()->get_base_object();
-            auto index = m_const_index_map.at(t);
-            if (!assigned.count(ptr))
-            {
-                size = aligned(size, ptr->align);
-                assigned[ptr] = size;
-                size += ptr->size;
-            }
-            wt_tab[index] = assigned[ptr];
-            DEBUG() << "weight: " << index << " " << t->name() << " is assigned slot " << ptr->buffer_id << " offset 0x" << std::hex << assigned[ptr] << " size: 0x" << ptr->size;
-        }
-
         char *wt;
-        wt = new char[size];
-        memset(wt, 0, sizeof(char) * size);
+        wt = new char[s->size];
+        memset(wt, 0, sizeof(char) * s->size);
+        const_buf[s] = wt;
+    }
 
-        MemoryObjectPtr weight_ptr = std::make_shared<MemoryObject>(0);
-        weight_ptr->m_base = 0;
-        weight_ptr->size = size;
-        weight_ptr->align = m_constant[0]->memory_offset()->get_base_object()->align;
-
-        for (auto t : m_constant)
+    for (auto t : m_constant)
+    {
+        auto s = t->memory_offset()->get_base_object();
+        auto offset = t->offset();
+        if (!const_buf.count(s))
         {
-            auto index = m_const_index_map.at(t);
-            auto offset = wt_tab[index];
-            memcpy(wt + offset, t->data<char>(), t->mem_size());
-
-            auto ptr = t->memory_offset()->get_base_object();
-            ptr->set_base_offset(weight_ptr);
-            ptr->relative_offset = offset;
-
-            tensor_offset_map[index] = buf_loc_t{BUF_TYPE_WEIGHT, 0, offset};
-            // DEBUG() << "weight: " << t->name() << " in " << offset << " size 0x" << std::hex << t->mem_size();
+            ERROR();
         }
+        auto wt = const_buf[s];
+        if (offset + t->mem_size() > s->size)
+        {
+            ERROR();
+        }
+        memcpy(wt + offset, t->data<char>(), t->mem_size());
+        // DEBUG() << "weight: " << t->name() << " in " << offset << " size 0x" << std::hex << t->mem_size();
+    }
 
-        elf->set_buffer(BUF_TYPE_WEIGHT, 0, size, weight_ptr->align, wt);
-        buf_map[weight_ptr] = buf_loc_t{BUF_TYPE_WEIGHT, 0, size};
-        DEBUG() << "set weight as buf " << (int)BUF_TYPE_WEIGHT << " index 0 size: 0x" << std::hex << size;
+    for (auto buf : const_buf)
+    {
+        auto s = buf.first;
+        auto wt = buf.second;
+        elf->set_buffer(BUF_TYPE_WEIGHT, (uint32_t)s->buffer_id, s->size, s->align, s->get_mem_id(), wt);
+        buf_map[s] = buf_loc_t{BUF_TYPE_WEIGHT, (uint32_t)s->buffer_id, s->size};
+        DEBUG() << "set weight as buf " << (int)BUF_TYPE_WEIGHT << " index " << (uint32_t)s->buffer_id << " size: 0x" << std::hex << s->size;
     }
 
     for (auto &pair : m_tensor_index_map)
@@ -239,7 +239,7 @@ bool ObjectGenerator::gen(CpsElfPtr elf)
 
         auto buf_info = buf_map[base_ptr];
 
-        // DEBUG() << "tensor: " << tensor_idx << " " << tensor->name() << " is assigned buf " << buf_info.type << " index " << buf_info.index << " offset 0x" << std::hex << offset << " size: 0x" << tensor->mem_size();
+        DEBUG() << "tensor: " << tensor_idx << " " << tensor->name() << " is assigned buf " << (int)buf_info.type << " index " << buf_info.index << " offset 0x" << std::hex << offset << " size: 0x" << tensor->mem_size();
         tensor_offset_map[tensor_idx] = buf_loc_t{buf_info.type, buf_info.index, offset};
     }
 
@@ -283,6 +283,8 @@ bool ObjectGenerator::gen(CpsElfPtr elf)
     //         ERROR();
     //     }
     // }
+
+    elf->set_event_tab(m_streams);
 
     return true;
 }

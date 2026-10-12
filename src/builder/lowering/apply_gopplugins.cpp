@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -45,13 +45,14 @@ struct ImplInfo
 {
     GopImplPtr impl;
     std::vector<NodePtr> nodes;
+    bool is_host_impl = false;
 };
 
 static const std::vector<GopPluginInfo *> &get_gopplugins()
 {
-
-    auto target = get_target()->name();
     static std::vector<GopPluginInfo *> ret;
+    auto disable_plugins = BuilderConfig::get<std::vector<std::string>>(Constants::disable_plugins);
+    auto target = get_target()->name();
 
     PluginLoader *m_plugin_loader = PluginLoader::get_instance();
     pid_t pid = getpid();
@@ -65,7 +66,11 @@ static const std::vector<GopPluginInfo *> &get_gopplugins()
         GopPluginInfo *plugin = reinterpret_cast<GopPluginInfo *>(plugin_);
         auto opt = plugin->init_handle();
         std::string name = plugin->name;
-
+        if (contains(disable_plugins, name))
+        {
+            DEBUG() << "Disbaled Plugin:" << name;
+            continue;
+        }
         // INFO() << "plugin name " << name;
         // INFO() << "set target " << target;
         if (opt->set_target(target.c_str()))
@@ -80,8 +85,22 @@ static const std::vector<GopPluginInfo *> &get_gopplugins()
 
 static std::vector<ImplInfo> plugin_match(GopPluginInfo *plugin, NodePtr n)
 {
-    std::vector<ImplInfo> impl_info;
+    bool is_dynamic_plugin = false;
+    if (plugin->plugin_type & GBPlugin_DS)
+    {
+        is_dynamic_plugin = true;
+    }
+    bool is_host_plugin = false;
+    if (plugin->plugin_type & GBPlugin_Host)
+    {
+        is_host_plugin = true;
+    }
+    if (n->is_dynamic() && !is_dynamic_plugin)
+    {
+        return std::vector<ImplInfo>();
+    }
 
+    std::vector<ImplInfo> impl_info;
     auto opt = plugin->init_handle();
     auto patterns = opt->patterns();
     for (auto pattern : patterns)
@@ -98,7 +117,7 @@ static std::vector<ImplInfo> plugin_match(GopPluginInfo *plugin, NodePtr n)
             auto impl = opt->get_impl(nodes, pattern);
             if (impl)
             {
-                ImplInfo info{impl, nodes};
+                ImplInfo info{impl, nodes, is_host_plugin};
                 impl_info.push_back(info);
             }
         }
@@ -134,7 +153,6 @@ static ImplInfo get_best_impl(NodePtr n, std::set<GopPluginInfo *> &plugins)
                                        {
                                            return true;
                                        }
-
                                        return a.impl->score() < b.impl->score();
                                    });
 
@@ -162,7 +180,7 @@ static bool apply_gopplugin_(GraphPtr g,
     std::set<NodePtr> fused;
     for (auto n : nodes)
     {
-        if (n->type() == OpType_Input)
+        if (n->type() == OpType_Input || n->type() == OpType_Constant)
         {
             continue;
         }
@@ -179,11 +197,15 @@ static bool apply_gopplugin_(GraphPtr g,
         if (!info.impl)
         {
             ERROR() << "no plugin impl for " << n->name();
-            return false;
+            continue;
         }
-        INFO() << "get best impl for " << n;
+        DEBUG() << "get best impl for " << n;
+        auto impl_type = info.is_host_impl ? "host" : "device";
+        DEBUG() << "impl type: " << impl_type;
 
         auto sg_nodes = info.nodes;
+        std::shared_ptr<GopDSCodeImpl> ds_impl = nullptr;
+        NodePtr invld_src_node = nullptr;
         if (BuilderConfig::get<bool>(Constants::enable_ds))
         {
             auto it = std::find_if(info.nodes.begin(), info.nodes.end(), [](NodePtr n) {
@@ -195,14 +217,21 @@ static bool apply_gopplugin_(GraphPtr g,
                 TensorPtr out = std::make_shared<Tensor>(out_name, TensorShape{0}, Tensor::UINT8);
                 auto update_node = Node::create(g->get_valid_node_name("paramupdate"), OpType_ParamUpdate);
                 update_node->add_output(out);
-                update_node->set_attr("_match_list", std::vector<NodePtr>{update_node});
-                update_node->set_attr(Constants::plugin_impl, std::make_shared<GopDSCodeImpl>());
                 g->add_node(update_node);
                 fused.insert(update_node);
 
                 auto dummy_node = ops::dummy({out})[0]->node();
                 sg_nodes.push_back(dummy_node);
                 fused.insert(dummy_node);
+
+                ds_impl = std::make_shared<GopDSCodeImpl>();
+                auto sg = SubGraph::create(g, {update_node});
+                auto node = sg->as_node(true, false); // no need sg input
+                node->set_unified_view(unified_view);
+                node->set_attr("_match_list", std::vector<NodePtr>{update_node});
+                node->set_attr(Constants::plugin_impl, ds_impl);
+                node->set_attr(Constants::is_host_impl, false);
+                invld_src_node = node;
             }
         }
 
@@ -211,8 +240,14 @@ static bool apply_gopplugin_(GraphPtr g,
         node->set_unified_view(unified_view);
         node->set_attr("_match_list", info.nodes);
         node->set_attr(Constants::plugin_impl, info.impl);
+        node->set_attr(Constants::is_host_impl, info.is_host_impl);
         info.impl->update_prefer_cfg("prefer_cfg", true);
         fused.insert(info.nodes.begin(), info.nodes.end());
+        if (ds_impl)
+        {
+            ds_impl->nodes().push_back(node);
+            node->set_attr("invld_src", NodeRef(invld_src_node));
+        }
     }
 
     return true;

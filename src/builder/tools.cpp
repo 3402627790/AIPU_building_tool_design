@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -384,7 +384,6 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
         Constants::native_float_simulator,
         Constants::dump_addr_cfg,
         Constants::disable_separate_gm,
-        Constants::enable_separate_gm,
         Constants::datalayout_schedule_debug,
         Constants::put_desc_gm,
         Constants::put_ws_gm,
@@ -392,6 +391,7 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
         Constants::random_init,
         Constants::use_amat_scheduler,
         Constants::softmax_prior_in_gm,
+        Constants::force_prior_in_gm,
         Constants::disable_dependency,
         Constants::set_l2_flush,
         Constants::prefetch_desc,
@@ -407,6 +407,7 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
         Constants::print_emitter_var,
         Constants::dump_constant_info,
         Constants::dump_lora_info,
+        Constants::two_stage_compilation,
     };
     for (auto key : global_switches)
     {
@@ -815,8 +816,8 @@ bool actions_before_build(std::map<std::string, aipubt::Any> &arg_map, int &retc
     return false;
 }
 
-void insert_node_shape_params(GraphPtr graph,
-                              const std::map<std::string, std::vector<int>> &shapes)
+static void insert_node_shape_params(GraphPtr graph,
+                                     const std::map<std::string, std::vector<int>> &shapes = {})
 {
     graph->walk_on_node([&shapes](NodePtr n) {
         if (n->type() == OpType_SubGraphInput ||
@@ -902,7 +903,8 @@ void insert_node_shape_params(GraphPtr graph,
         if (exprs.size())
         {
             n->params()["ds_top_shape"] = exprs;
-        } });
+        }
+    });
 }
 
 static void serialize_graph(GraphPtr g, std::map<std::string, aipubt::Any> &arg_map)
@@ -918,21 +920,36 @@ static void serialize_graph(GraphPtr g, std::map<std::string, aipubt::Any> &arg_
 
 bool infer_real_shape(GraphPtr graph,
                       const std::vector<int> &dump_shape_dims, // data-aware
-                      const std::vector<std::vector<int>> &input_shapes)
+                      const std::vector<std::vector<int>> &input_shapes,
+                      std::map<std::string, std::vector<int>> &shapes)
 {
     bool ret = true;
     auto &symbols = graph->symbols();
     std::vector<int> input_dims;
-    for (auto &s : input_shapes)
+    if (input_shapes.empty())
     {
-        if (s.empty())
+        auto input_tensors = graph->get_input_tensors();
+        for (auto t : input_tensors)
         {
-            input_dims.push_back(1);
-            continue;
+            auto s = get_base_shape(t->shape());
+            for (auto d : s)
+            {
+                input_dims.push_back(d);
+            }
         }
-        input_dims.insert(input_dims.end(), s.begin(), s.end());
     }
-    std::map<std::string, std::vector<int>> shapes;
+    else
+    {
+        for (auto &s : input_shapes)
+        {
+            if (s.empty())
+            {
+                input_dims.push_back(1);
+                continue;
+            }
+            input_dims.insert(input_dims.end(), s.begin(), s.end());
+        }
+    }
 
     auto eval_expr = [&](Expr expr) -> int {
         std::map<Symbol, Symbol::Value> args;
@@ -1021,7 +1038,8 @@ bool infer_real_shape(GraphPtr graph,
             {
                 n->params()[new_param_name] = values;
             }
-        } });
+        }
+    });
 
     insert_node_shape_params(graph, shapes);
 
@@ -1090,9 +1108,10 @@ GraphPtr infershape(GraphPtr g,
 
     if (input_shapes.size() || dump_dims.size())
     {
-        if (!infer_real_shape(new_g, dump_dims, input_shapes))
+        std::map<std::string, std::vector<int>> shapes;
+        if (!infer_real_shape(new_g, dump_dims, input_shapes, shapes))
         {
-            ERROR() << "Infer real shapes of raw graph failed!";
+            ERROR() << "Failed to infer the real shapes of raw graph.";
         }
     }
 

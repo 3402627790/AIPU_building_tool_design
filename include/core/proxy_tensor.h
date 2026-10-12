@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -105,7 +105,7 @@ public:
      *
      * @return uint32_t offset
      */
-    uint32_t offset() override;
+    uint64_t offset() override;
 
     /**
      * @brief Set the data to the tensor, then the data's memory ownership will transer to tensor
@@ -113,7 +113,7 @@ public:
      * @param d the data
      * @param size size of data
      */
-    void set_data(void *d, uint32_t size) override;
+    void set_data(void *d, size_t size) override;
     // free old data and share a new data of t
     /**
      * @brief share data from other tensor
@@ -205,6 +205,20 @@ public:
      * @return bool 
      */
     bool is_io_tensor() const override;
+
+    /**
+     * @brief set the tensor's attribute to be an input or output tensor
+     * 
+     * @param bool true for fake tensor, false for other tensor
+     */
+    void set_fake_tensor(bool fake) override;
+
+    /**
+     * @brief check the tensor is a fake tensor
+     * 
+     * @return bool 
+     */
+    bool is_fake_tensor() const override;
 
     /**
      * @brief get the attributes map of this tensor

@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -232,6 +232,36 @@ public:
         }
         return 8 << (((dt & 0xe) >> 1) - 1);
     }
+
+    static size_t dtype_actual_bits(Tensor::Dtype dt)
+    {
+        if (dt <= 1)
+        {
+            return (dt & 0x1) * 1;
+        }
+        if (is_aligned(dt) || is_compact(dt))
+        {
+            int32_t offset = 0;
+            if (dt <= Tensor::FP4E2M1FN)
+                offset = 0xe;
+            return (1 << ((((dt + offset) & 0x23) & 0xe) >> 1)) * 8 - 4;
+        }
+        if (is_float(dt))
+        {
+            switch (dt)
+            {
+            case BFP16:
+                return 16;
+            case FP8E4M3FN:
+            case FP8E5M2:
+                return 8;
+            default:
+                return (1 << (dt - Tensor::FP16)) * 16;
+            }
+        }
+        return 8 << (((dt & 0xe) >> 1) - 1);
+    }
+
     static size_t dtype_size(Tensor::Dtype dt)
     {
         return dtype_bits(dt) / 8.0f + 0.5f;
@@ -362,7 +392,7 @@ public:
      *
      * @return uint32_t offset
      */
-    virtual uint32_t offset()
+    virtual uint64_t offset()
     {
         return m_offset->offset();
     }
@@ -373,8 +403,8 @@ public:
      * @param d the data
      * @param size size of data
      */
-    virtual void set_data(void *d, uint32_t size);
-    virtual void set_data(void *d, uint32_t size, bool is_owner);
+    virtual void set_data(void *d, size_t size);
+    virtual void set_data(void *d, size_t size, bool is_owner);
     /**
      * @brief Set the device data to the tensor, then the  data's memory ownership is indicated by owner parameter
      *
@@ -382,7 +412,7 @@ public:
      * @param size size of data
      * @param owner the owner of device_data: if true, owned by this Tensor, otherwise, owned by others
      */
-    virtual void set_device_data(void *d, uint32_t size, const bool owner = true);
+    virtual void set_device_data(void *d, size_t size, const bool owner = true);
     bool is_owns_host_data() const
     {
         return *m_owner_host;
@@ -516,6 +546,48 @@ public:
     virtual bool is_io_tensor() const;
 
     /**
+     * @brief set the tensor's attribute to be a fake tensor
+     *
+     * @param bool true for fake tensor, false for other tensor
+     */
+    virtual void set_fake_tensor(bool fake);
+
+    /**
+     * @brief check the tensor is a fake tensor
+     *
+     * @return bool
+     */
+    virtual bool is_fake_tensor() const;
+
+    /**
+     * @brief set the tensor's attribute to be a prior in gm tensor
+     *
+     * @param bool true for io tensor, false for other tensor
+     */
+    virtual void set_prior_tensor(bool iot);
+
+    /**
+     * @brief check the tensor is a prior in gm tensor
+     *
+     * @return bool
+     */
+    virtual bool is_prior_tensor() const;
+
+    /**
+     * @brief set the tensor's attribute to be a const tensor
+     *
+     * @param bool true for const tensor, false for other tensor
+     */
+    virtual void set_const_tensor(bool iot);
+
+    /**
+     * @brief check the tensor is a const tensor
+     *
+     * @return bool
+     */
+    virtual bool is_const_tensor() const;
+
+    /**
      * @brief get the attributes map of this tensor
      *
      * @return std::map<std::string, Any>& attributes map
@@ -602,7 +674,7 @@ public:
     bool transfer_ownership(bool is_host = true);
 
 protected:
-    void _set_host_device_data(void *d, const uint32_t &size, const bool owner, const bool is_host);
+    void _set_host_device_data(void *d, const size_t &size, const bool owner, const bool is_host);
     void _clean_data();
 
     template <Tensor::Dtype dtype>
@@ -615,7 +687,7 @@ protected:
     std::string m_name;
     char *m_data = nullptr;
     char *m_device_data = nullptr;
-    uint32_t m_data_offset = 0;
+    size_t m_data_offset = 0;
     // check m_data ref
     std::atomic<int> *ref_count = nullptr;
     std::atomic<bool> *m_owner_host = nullptr;
@@ -626,7 +698,11 @@ protected:
     std::map<std::string, Any> m_attrs;
     NodeRef m_node;
     std::vector<NodeRef> m_consumers;
-    bool m_io = false;
+    //0 : io
+    //1 : fake
+    //2 : prior
+    //3 : ConstTensor
+    uint64_t m_flag = 0;
     friend Node;
     friend ComputeTensor;
 };

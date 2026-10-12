@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -16,276 +16,929 @@
 //--------------------------------------------------------------------------------
 /*
  * @Author: Neo Wang 
- * @Date: 2020-01-29 14:26:48 
- * @Last Modified by: Tom Gao
- * @Last Modified time: 2022-11-27 17:48:02
+ * @Date: 2020-01-29 14:26:57 
+ * @Last Modified by: Neo Wang
+ * @Last Modified time: 2026-06-25 17:04:33
  */
-#include "mem_allocator.h"
-#include "amat_allocator.h"
+#include "builder/mmu_allocator.h"
 #include "builder/target.h"
 #include "core/config.h"
-#include <algorithm>
+#include "core/constants.h"
+#include "core/logger.h"
+#include "utils/utils.h"
 
-#define SLOT_ALIGNED_SIZE 512
-#define ALIGNED(x) ((x + (SLOT_ALIGNED_SIZE)-1) & ~((SLOT_ALIGNED_SIZE)-1))
+#define SRAMBASE 0xf0000000
+#define GSRAM0_BASE 0xf8000000
+#define GSRAM0_SIZE 0x20000
+
+#define GSRAM1_BASE 0xf8800000
+#define GSRAM1_SIZE 0x20000
+
+#define LSRAM_BASE 0xf0000000
+#define LSRAM_SIZE 0x8000
+#define LSRAM_MAX_SIZE 0x80000
+#define LSRAM_RESERVE 0x100000
+#define NUM_TEC 4
+
+#define MMU_BASE 0xe0000000
+#define MMU_MAX_SIZE 0x4000000
+
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+#define RED_COLOR "\033[1;31m"
+#define GREEN_COLOR "\033[1;32m"
+#define COLOR_END "\033[0m"
 namespace aipubt
 {
-MemoryAllocator::MemoryAllocator()
-{
-    //add default memory
-    //for test
-    // m_soc_sram.push_back(std::make_shared<Memory>(0xc2000000, 0x400000));
-    m_enable_sram = false;
-}
 
-MemoryAllocator::~MemoryAllocator()
+namespace SegementMMUAllocator
 {
-    for (auto slot : m_slots)
+
+    static SRAMFactory sram_factory;
+
+    inline bool is_free(MemoryObjectPtr o)
     {
-        if (slot)
-        {
-            // delete slot;
-        }
+        return o && o->mask == MemS_FREE;
     }
-}
-
-void MemoryAllocator::add_soc_sram(uint32_t base, uint32_t size, MemoryAllocator::SRAMLevel l)
-{
-    for (auto sram : m_soc_sram)
+    inline void MemoryObject_set_status(MemoryObjectPtr o, MemStatus status)
     {
-        if (sram->rootblk()->m_base == base)
+        o->mask = status;
+    }
+    inline MemStatus mem_status(MemoryObjectPtr o)
+    {
+        return (MemStatus)o->mask;
+    }
+    uint32_t free_size(MemoryObjectPtr o)
+    {
+        uint32_t s = 0;
+        aipu_assert(o);
+        if (o->next_block)
         {
-            WARN() << "The SOC SRAM's base" << std::hex << base << " has be occupied.";
+            s = free_size(o->next_block);
+        }
+        if (is_free(o))
+        {
+            s += o->size;
+        }
+        return s;
+    }
+
+    uint32_t max_free_block(MemoryObjectPtr o)
+    {
+        uint32_t s = 0;
+        aipu_assert(o);
+        if (o->next_block)
+        {
+            s = max_free_block(o->next_block);
+        }
+        if (is_free(o))
+        {
+            s = MAX(s, o->size);
+        }
+        return s;
+    }
+
+    MemoryObjectPtr split_block(MemoryObjectPtr o, uint32_t size)
+    {
+        if (!o)
+        {
+            return o;
+        }
+        auto right = MemoryObjectPtr(new MemoryObject(o, size));
+        right->size = o->size - size;
+        if (o->next_block)
+        {
+            auto next = o->next_block;
+            next->relative_offset = right->size;
+            next->base_offset = right;
+            right->next_block = next;
+        }
+        right->base_offset = o;
+        o->next_block = right;
+        o->size = size;
+        return o;
+    }
+    void merge_block(MemoryObjectPtr blk)
+    {
+        if (!blk)
             return;
-        }
-    }
-    auto sram = std::make_shared<MemoryObject>(base);
-    sram->size = size;
-    add_soc_sram(sram, l);
-}
-void MemoryAllocator::add_soc_sram(MemoryObjectPtr sram, SRAMLevel l)
-{
-    if (sram->base_offset != nullptr)
-    {
-        WARN() << "The SOC SRAM object is a shared object, the object's base must be null.";
-        return;
-    }
-    for (auto s : m_soc_sram)
-    {
-        if (s->rootblk()->get_base_object() == sram)
+        if (blk->base_offset && (blk->base_offset->next_block == blk) // check if the base is prev link
+            && is_free(blk->base_offset) && is_free(blk))
         {
-            WARN() << "The SOC SRAM's base" << std::hex << sram << " has be occupied.";
-            return;
-        }
-    }
-    m_soc_sram.push_back(std::make_shared<Memory>(sram, sram->size));
-}
+            auto prev = blk->base_offset;
+            prev->next_block = blk->next_block;
+            prev->size += blk->size;
+            if (prev->next_block)
+            {
+                prev->next_block->base_offset = prev;
+                prev->next_block->relative_offset = prev->size;
+            }
+            // delete blk;
+            blk->reset(); //for free avoid cycle ref
 
-void MemoryAllocator::remove_soc_sram(uint32_t base)
-{
-    for (uint32_t i = 0; i < m_soc_sram.size(); ++i)
-    {
-        if (m_soc_sram[i]->rootblk()->m_base == base)
+            blk = prev;
+        }
+        if (is_free(blk) && blk->next_block && is_free(blk->next_block))
         {
-            m_soc_sram.erase(m_soc_sram.begin() + i);
-            break;
+            blk->size += blk->next_block->size;
+            auto next = blk->next_block;
+            blk->next_block = next->next_block;
+            if (blk->next_block)
+            {
+                blk->next_block->base_offset = blk;
+                blk->next_block->relative_offset = blk->size;
+            }
+            // delete next;
+            next->reset();
         }
     }
-}
 
-void MemoryAllocator::remove_soc_sram(MemoryObjectPtr base)
-{
-    for (uint32_t i = 0; i < m_soc_sram.size(); ++i)
+    MemoryObjectPtr find_best_block(MemoryObjectPtr o, uint32_t size)
     {
-        if (m_soc_sram[i]->rootblk()->get_base_object() == base)
+        MemoryObjectPtr ret = nullptr;
+        aipu_assert(o);
+        if (is_free(o) && o->size >= size)
         {
-            m_soc_sram.erase(m_soc_sram.begin() + i);
-            break;
+
+            ret = o;
+        }
+        else if (o->next_block)
+        {
+            ret = find_best_block(o->next_block, size);
+        }
+        return ret;
+    }
+
+    Memory::Memory(uint32_t base, uint32_t size)
+    {
+        root = MemoryObjectPtr(new MemoryObject(base, 0));
+        root->size = size;
+    }
+
+    Memory::Memory(MemoryObjectPtr base, uint32_t size)
+    {
+        root = MemoryObjectPtr(new MemoryObject(base, 0));
+        root->size = size;
+    }
+
+    Memory::~Memory()
+    {
+        auto next = root;
+        while (next)
+        {
+            auto nnext = next->next_block;
+            next->reset();
+            next = nnext;
+        }
+        root = nullptr;
+    }
+
+    MemoryObjectPtr Memory::allocate(uint32_t size)
+    {
+        auto blk = find_best_block(root, size);
+        auto alloc = split_block(blk, size);
+        if (alloc)
+        {
+            MemoryObject_set_status(alloc, MemS_USED);
+        }
+        return alloc;
+    }
+
+    void Memory::merge_free_blks()
+    {
+        auto blk = root;
+        while (blk)
+        {
+            if (is_free(blk) && blk->next_block && is_free(blk->next_block))
+            {
+                blk->size += blk->next_block->size;
+                auto next = blk->next_block;
+                blk->next_block = next->next_block;
+                if (blk->next_block)
+                {
+                    blk->next_block->base_offset = blk;
+                    blk->next_block->relative_offset = blk->size;
+                }
+                // delete next;
+                next->reset();
+            }
+            else
+            {
+                blk = blk->next_block;
+            }
+        }
+    }
+
+    //change the block status
+    // mark the root->offset()+offset as Status with size=size
+    void change_blk_status(MemoryObjectPtr root, uint32_t off, uint32_t size, MemStatus status)
+    {
+        uint32_t offset = root->offset() + off;
+        auto blk = root;
+        while (blk && blk->offset() < offset && blk->next_block)
+        {
+            blk = blk->next_block;
+        }
+        if (blk->offset() != offset)
+        {
+            split_block(blk, offset - blk->offset());
+            blk = blk->next_block;
+        }
+        if (blk->size < size)
+        {
+            auto next = blk->next_block;
+            while (next && blk->size < size)
+            {
+                blk->size += next->size;
+                blk->next_block = next->next_block;
+                if (blk->next_block)
+                {
+                    blk->next_block->base_offset = blk;
+                    blk->next_block->relative_offset = blk->size;
+                }
+                // delete next;
+                next->reset();
+                next = blk->next_block;
+            }
+        }
+        if (blk->size > size)
+        {
+            blk = split_block(blk, size);
+        }
+        MemoryObject_set_status(blk, status);
+    }
+
+    void Memory::free(MemoryObjectPtr ptr)
+    {
+        MemoryObject_set_status(ptr, MemS_FREE);
+        merge_block(ptr);
+    }
+
+    SegMMU::SegMMU(uint32_t base, std::vector<Memory *> mems_) : Memory(base, 0), mems(mems_)
+    {
+        uint32_t size = 0;
+        for (auto mem : mems)
+        {
+            m_interval.push_back({size, size + mem->root->size, mem});
+            size += mem->root->size;
+        }
+        root->size = size;
+        sync();
+    }
+
+    SegMMU::~SegMMU()
+    {
+
+        auto next = root;
+        while (next)
+        {
+            auto nnext = next->next_block;
+            next->reset();
+            next = nnext;
+        }
+        root = nullptr;
+    }
+    void SegMMU::sync()
+    {
+        //sync the shadow memory and phy memory
+        for (auto inter : m_interval)
+        {
+            auto blk = inter.mem->root;
+            uint32_t base = blk->offset();
+            while (blk)
+            {
+                change_blk_status(root, blk->offset() - base + inter.start, blk->size, mem_status(blk));
+                blk = blk->next_block;
+            }
+        }
+        merge_free_blks();
+    }
+    MemoryObjectPtr SegMMU::allocate(uint32_t size)
+    {
+        sync();
+        auto blk = Memory::allocate(size);
+        uint32_t begin = blk->offset() - root->offset();
+        uint32_t end = begin + blk->size;
+        bool not_end = false;
+        for (auto inter : m_interval)
+        {
+            if (begin >= inter.start && begin < inter.end)
+            {
+                if (end < inter.end)
+                {
+                    change_blk_status(inter.mem->root, begin - inter.start, size, MemS_USED);
+                    break;
+                }
+                else
+                {
+                    not_end = true;
+                    change_blk_status(inter.mem->root, begin - inter.start, inter.end - begin + inter.start, MemS_USED);
+                    continue;
+                }
+            }
+            if (not_end)
+            {
+                if (end > inter.end)
+                {
+                    change_blk_status(inter.mem->root, 0, inter.end - inter.start, MemS_USED);
+                }
+                else
+                {
+                    not_end = false;
+                    change_blk_status(inter.mem->root, 0, end - inter.start, MemS_USED);
+                }
+            }
+        }
+        return blk;
+    }
+
+    uint32_t SegMMU::get_free_size(uint32_t mem_idx)
+    {
+        if (mem_idx >= mems.size())
+        {
+            return 0;
+        }
+        auto mem = mems[mem_idx];
+        uint32_t s = 0;
+        uint32_t max_size = 0;
+        bool last_blk_is_free = false;
+        auto blk = mem->rootblk();
+        if (is_free(blk))
+        {
+            max_size = blk->size;
+            s = blk->size;
+            last_blk_is_free = true;
+        }
+        while (blk->next_block)
+        {
+            blk = blk->next_block;
+            if (is_free(blk))
+            {
+                if (last_blk_is_free)
+                {
+                    s += blk->size;
+                }
+                else
+                {
+                    s = blk->size;
+                }
+
+                last_blk_is_free = true;
+            }
+            else
+            {
+                last_blk_is_free = false;
+                s = 0;
+            }
+            if (s > max_size)
+            {
+                max_size = s;
+            }
+        }
+        return max_size;
+    }
+
+    uint32_t SegMMU::get_mem_size(uint32_t mem_idx)
+    {
+        if (mem_idx >= mems.size())
+        {
+            return 0;
+        }
+        auto mem = mems[mem_idx];
+        uint32_t s = 0;
+        auto blk = mem->rootblk();
+        s = blk->size;
+        while (blk->next_block)
+        {
+            blk = blk->next_block;
+            s += blk->size;
+        }
+        return s;
+    }
+    void SegMMU::free(MemoryObjectPtr ptr)
+    {
+        sync();
+        MemoryObject_set_status(ptr, MemS_FREE);
+        uint32_t begin = ptr->offset() - root->offset();
+        uint32_t end = begin + ptr->size;
+        bool not_end = false;
+        for (auto inter : m_interval)
+        {
+            if (begin >= inter.start && begin < inter.end)
+            {
+                if (end < inter.end)
+                {
+                    change_blk_status(inter.mem->root, begin - inter.start, ptr->size, MemS_FREE);
+                    break;
+                }
+                else
+                {
+                    not_end = true;
+                    change_blk_status(inter.mem->root, begin - inter.start, inter.end - begin + inter.start, MemS_FREE);
+                    continue;
+                }
+            }
+            if (not_end)
+            {
+                if (end > inter.end)
+                {
+                    change_blk_status(inter.mem->root, 0, inter.end - inter.start, MemS_FREE);
+                }
+                else
+                {
+                    not_end = false;
+                    change_blk_status(inter.mem->root, 0, end - inter.start, MemS_FREE);
+                }
+            }
+            inter.mem->merge_free_blks();
+        }
+        sync();
+    }
+
+    std::ostream &operator<<(std::ostream &os, const Memory &mem)
+    {
+        auto blk = mem.rootblk();
+        os << "[" << std::hex;
+        while (blk)
+        {
+            if (is_free(blk))
+            {
+                os << GREEN_COLOR;
+            }
+            else
+            {
+                os << RED_COLOR;
+            }
+
+            os << "0x" << blk->size << COLOR_END << "|";
+            blk = blk->next_block;
+        }
+        os << "]";
+        return os;
+    }
+
+    SRAMFactory::~SRAMFactory()
+    {
+        // for (auto kv : this->m_sram)
+        // {
+        //     if (kv.second)
+        //     {
+        //         // delete kv.second;
+        //     }
+        // }
+        m_sram.clear();
+    }
+    MemoryObjectPtr SRAMFactory::get_sram_by_addr(size_t addr)
+    {
+        if (m_sram.count(addr))
+        {
+            return m_sram[addr];
+        }
+        //check the address is  legal
+        if (addr >= SRAMBASE && !(addr & 0x7fff))
+        {
+            auto target = get_target();
+            size_t sram_size = 0;
+            if (addr & 0x8000000) //gsram
+            {
+                sram_size = target->gsram_size();
+            }
+            else
+            {
+                sram_size = target->lsram_size();
+            }
+            if (sram_size > 0)
+            {
+                auto obj = MemoryObjectPtr(new MemoryObject((uint32_t)addr, 0));
+                obj->size = sram_size;
+                m_sram[addr] = obj;
+                return obj;
+            }
+        }
+        return nullptr;
+    }
+    MemoryObjectPtr SRAMFactory::generate_memory(size_t addr, size_t sram_size)
+    {
+        if (sram_size > 0)
+        {
+            auto obj = MemoryObjectPtr(new MemoryObject((uint32_t)addr, 0));
+            obj->size = sram_size;
+            m_sram[addr] = obj;
+            return obj;
+        }
+        return nullptr;
+    }
+}; //namespace SegementMMUAllocator
+
+using namespace SegementMMUAllocator;
+MMUAllocator::MMUAllocator(TensorPtr workspace, size_t ddr_size) : m_workspace(workspace)
+{
+    init_memory(ddr_size);
+}
+MMUAllocator::~MMUAllocator()
+{
+    for (auto mem : m_mem)
+    {
+        if (mem)
+        {
+            delete mem;
+        }
+    }
+    for (auto ddr : m_ddr)
+    {
+        if (ddr)
+        {
+            delete ddr;
+        }
+    }
+    for (auto seg : m_seg)
+    {
+        if (seg)
+        {
+            delete seg;
+        }
+    }
+    for (auto seg : m_ddr_seg)
+    {
+        if (seg)
+        {
+            delete seg;
         }
     }
 }
-
-std::vector<MemoryObjectPtr> MemoryAllocator::get_allocated()
+MemoryObjectPtr MMUAllocator::allocate(unsigned int size, MemoryObjectPtr ptr)
 {
-    return m_allocated;
+    return allocate(size, ptr, {});
 }
-
-static inline size_t get_align(size_t x, size_t align = SLOT_ALIGNED_SIZE)
+MemoryObjectPtr MMUAllocator::allocate(unsigned int size, MemoryObjectPtr ptr, const std::set<MemoryObjectPtr> &slow_objects)
 {
-    size_t ret;
-    auto target = Target::get_the_target();
-    if (target->isainfo().type != ISA_ZY)
-    {
-        align = std::max(align, size_t(16 * 1024));
-    }
-    ret = (x + (align)-1) & ~((align)-1);
-    return ret;
-}
-
-MemoryObjectPtr MemoryAllocator::allocate(unsigned int size, MemoryObjectPtr ptr)
-{
-    size = get_align(size);
     if (!ptr)
     {
-        ptr = MemoryObjectPtr(new MemoryObject(0));
+        return nullptr;
     }
-    ptr->size = size;
-    // try allocate in soc sram
-    if (m_enable_sram)
+    auto mem = find_best_memory(size, ptr->align, slow_objects);
+    if (mem)
     {
-        for (auto &mem : m_soc_sram)
+        auto blk = mem->allocate(size);
+        uint32_t mod = blk->offset() % ptr->align;
+        uint32_t extra_for_align = mod == 0 ? 0 : (ptr->align - mod);
+        if (extra_for_align)
         {
-            auto alloc = mem->allocate(size);
-            if (alloc)
-            {
-                // INFO() << "allocating soc sram:" << size;
-                m_allocated_sram[ptr] = {mem, alloc};
-                ptr->set_base_offset(alloc->offset());
-                m_allocated.push_back(ptr);
-                return ptr;
-            }
+            mem->free(blk);
+            size += extra_for_align;
+            blk = mem->allocate(size);
         }
-    }
-
-    // INFO() << "request size: " << (size >> 10) << " KB";
-    auto it = std::find(m_availability.begin(), m_availability.end(), true);
-    int idx = 0;
-    int num_slots = m_slots.size();
-    if (!num_slots || it == m_availability.end())
-    {
-        // no available memory
-        // MemoryObjectPtr slot = new MemoryObject(m_slots[num_slots - 1].first, m_slots[num_slots - 1].second);
-        MemoryObjectPtr slot = MemoryObjectPtr(new MemoryObject(0));
-        slot->size = size;
-        slot->foot_print = ptr->foot_print;
-        m_slots.push_back(slot);
-        m_availability.push_back(false);
-        idx = num_slots;
-    }
-    else
-    {
-        //find the best slot
-        int idx_up = -1;
-        int idx_down = -1;
-        size_t dis_up = INT32_MAX;
-        size_t dis_down = INT32_MAX;
-        idx = std::distance(m_availability.begin(), it);
-        for (auto i = idx; i < num_slots; i++)
+        if (contains(m_mem, mem))
         {
-            auto slot_size = m_slots[i]->size;
-            if (m_availability[i])
-            {
-                // up
-                if (slot_size >= size && (slot_size - size) < dis_up)
-                {
-                    dis_up = slot_size - size;
-                    idx_up = i;
-                }
-                if (slot_size < size && (size - slot_size) < dis_down)
-                {
-                    dis_down = size - slot_size;
-                    idx_down = i;
-                }
-            }
-        }
-        // INFO() << "idx_up: " << idx_up << ", idx_down: " << idx_down << ", dis_up: " << dis_up << ", dis_down: " << dis_down;
-        const size_t ratio_up = 95;
-        const size_t ratio_down = 95;
-        const size_t retio_up_down = 60;
-        // up
-        if (idx_up >= 0 && (dis_up * 100 / (dis_up + size) <= ratio_up) && (idx_down == -1 || dis_up <= dis_down * retio_up_down))
-        {
-            idx = idx_up;
-            m_slots[idx]->foot_print += ptr->foot_print;
-            m_availability[idx] = false;
-            // INFO() << "up, " << (dis_up * 100 / (dis_up + size));
-        }
-        // down
-        else if (idx_down >= 0 && (dis_down * 100 / size <= ratio_down) && (idx_up == -1 || dis_up > dis_down * retio_up_down))
-        {
-            idx = idx_down;
-            m_slots[idx]->size = size;
-            m_slots[idx]->foot_print += ptr->foot_print;
-            m_availability[idx] = false;
-            // INFO() << "down," << (dis_down * 100 / size);
+            ptr->m_base = blk->offset();
+            ptr->relative_offset = extra_for_align;
         }
         else
         {
-            MemoryObjectPtr slot = MemoryObjectPtr(new MemoryObject(0));
-            slot->size = size;
-            slot->foot_print = ptr->foot_print;
-            m_slots.push_back(slot);
-            m_availability.push_back(false);
-            idx = num_slots;
-            // INFO() << "new";
+            ptr->relative_offset = blk->offset() - mem->rootblk()->offset() + extra_for_align;
+            auto segmem = static_cast<SegMMU *>(mem);
+            ptr->base_offset = segmem->memories()[0]->rootblk()->base_offset;
+            ptr->next_block = segmem->memories()[1]->rootblk()->base_offset;
         }
+        m_allocated[ptr] = {blk, mem, size};
+        // DEBUG() << "allocator size: 0x" << std::hex << size << " \toffset:0x" << blk->offset()
+        //         << " ptr: " << ptr << std::dec;
+        // INFO() << *(m_mem[0]) << "\t" << *(m_mem[1]);
+        // INFO() << *(m_seg[0]);
     }
-    // INFO() << "idx: " << idx;
-    ptr->set_base_offset(m_slots[idx]);
-    m_allocated.push_back(ptr);
+    else
+    {
+        // DEBUG() << std::hex << "!!!cannot allocate  size: 0x" << size;
+        return nullptr;
+    }
     return ptr;
 }
-
-void MemoryAllocator::free(MemoryObjectPtr ptr)
+void MMUAllocator::free(MemoryObjectPtr ptr)
 {
-    if (!ptr)
+    if (ptr)
     {
-        return;
-    }
-    if (m_allocated_sram.count(ptr))
-    {
-        // INFO() << "free soc sram";
-        auto p = m_allocated_sram[ptr];
-        p.first->free(p.second);
-    }
-    for (unsigned int i = 0; i < m_availability.size(); ++i)
-    {
-        if (ptr->base_offset && ptr->base_offset == m_slots[i])
+        if (m_allocated.count(ptr))
         {
-            m_availability[i] = true;
-            return;
+            auto pointer = m_allocated[ptr];
+            // the memory splits to two blocks
+            if (ptr->next_block && pointer.size > pointer.blk->size && pointer.blk->next_block)
+            {
+                pointer.mem->free(pointer.blk->next_block);
+            }
+            pointer.mem->free(pointer.blk);
+            m_allocated.erase(ptr);
+            // DEBUG() << std::hex << "free size: 0x" << pointer.size << " ptr: " << ptr << " offset: 0x" << pointer.blk->offset();
+            // INFO() << *(m_mem[0]) << "\t" << *(m_mem[1]);
+            // INFO() << *(m_seg[0]);
+            // INFO() << "free:" << *pointer.mem;
+        }
+        else
+        {
+            // DEBUG() << "cannot free pointer:" << ptr;
+        }
+    }
+}
+
+static std::set<MemoryObjectPtr> get_all_objects(MemoryObjectPtr ptr)
+{
+    std::set<MemoryObjectPtr> all_objects;
+    if (ptr->base_offset)
+    {
+        auto objects = get_all_objects(ptr->base_offset);
+        for (auto obj : objects)
+        {
+            all_objects.insert(obj);
+        }
+    }
+    if (ptr->next_block)
+    {
+        auto objects = get_all_objects(ptr->next_block);
+        for (auto obj : objects)
+        {
+            all_objects.insert(obj);
+        }
+    }
+    all_objects.insert(ptr);
+    return all_objects;
+}
+
+Memory *MMUAllocator::find_best_memory(uint32_t size, uint32_t align, const std::set<MemoryObjectPtr> &slow_objects, bool sram_only)
+{
+    using block_pair = std::pair<MemoryObjectPtr, Memory *>;
+    std::vector<block_pair> available_block;
+    // try sram
+    for (auto mem : m_mem)
+    {
+        auto block = find_best_block(mem->rootblk(), size);
+        if (block)
+        {
+            available_block.push_back({block, mem});
+        }
+    }
+    if (!sram_only)
+    {
+        //try sram mmu
+        if (available_block.empty())
+        {
+            for (auto mem : m_seg)
+            {
+                mem->sync();
+                auto block = find_best_block(mem->rootblk(), size);
+                if (block)
+                {
+                    available_block.push_back({block, mem});
+                }
+            }
+        }
+        //try ddr mmu
+        if (available_block.empty())
+        {
+            std::pair<MemoryObjectPtr, Memory *> best_block = {0, 0};
+            int best_sram_size = 0;
+            for (auto mem : m_ddr_seg)
+            {
+                mem->sync();
+                auto block = find_best_block(mem->rootblk(), size);
+                // if the relative_offset!=0, this is a ddr region
+                if (block)
+                {
+                    int sram_size = mem->get_mem_size(0) - (block->offset() - mem->rootblk()->offset());
+                    if (sram_size > 0 && best_block.first == 0)
+                    {
+                        best_block = {block, mem};
+                    }
+                    if (sram_size > best_sram_size)
+                    {
+                        best_block = {block, mem};
+                        best_sram_size = sram_size;
+                    }
+                }
+            }
+            if (best_block.first)
+            {
+                return best_block.second;
+            }
         }
     }
 
-    // auto mmu = ptr->get_mmu_object();
-    // INFO()<<"cannot free ptr , 0x"<<std::hex << ptr->offset();
-    // if (mmu)
-    // {
-    //     INFO() << "base: 0x" << std::hex << mmu->base_offset->offset()
-    //            << ", next: 0x" << std::hex << mmu->next_block->offset();
-    //     INFO() << "";
-    // }
-    // m_availability[m_availability.size() - 1] = true;
+    if (available_block.empty())
+    {
+        return nullptr;
+    }
+    std::vector<block_pair> fast_blocks;
+
+    std::set<MemoryObjectPtr> all_slow_ojbects;
+    for (auto ptr : slow_objects)
+    {
+        auto all_objects = get_all_objects(ptr);
+        for (auto obj : all_objects)
+        {
+            //INFO() << obj;
+            all_slow_ojbects.insert(obj);
+        }
+    }
+    auto mem_to_srams = [](Memory *mem, MMUAllocator *allocator) -> std::set<Memory *> {
+        std::set<Memory *> srams;
+        if (allocator->is_sram_mem(mem))
+        {
+            srams.insert(mem);
+        }
+        else
+        {
+            auto seg = static_cast<SegMMU *>(mem);
+            for (size_t i = 0; i < 2; i++)
+            {
+                if (allocator->is_sram_mem(seg->memories()[i]))
+                {
+                    srams.insert(seg->memories()[i]);
+                }
+            }
+        }
+        return srams;
+    };
+    std::set<Memory *> slow_srams;
+    for (auto ptr : all_slow_ojbects)
+    {
+        if (ptr && m_allocated.count(ptr))
+        {
+            auto srams = mem_to_srams(m_allocated[ptr].mem, this);
+            for (auto sram : srams)
+            {
+                slow_srams.insert(sram);
+            }
+        }
+    }
+    for (auto block : available_block)
+    {
+        bool is_fast_block = true;
+        for (auto sram : mem_to_srams(block.second, this))
+        {
+            if (slow_srams.count(sram))
+            {
+                is_fast_block = false;
+                break;
+            }
+        }
+        if (is_fast_block)
+        {
+            fast_blocks.push_back(block);
+        }
+    }
+    auto find_smallest_block = [size](std::vector<block_pair> block, uint32_t align) -> block_pair {
+        block_pair ret = {0, 0};
+        size_t actual_size = size;
+        for (unsigned int i = 0; i < block.size(); ++i)
+        {
+            auto mod = block[i].first->offset() % align;
+            auto need_size = size + (mod == 0 ? 0 : align - mod);
+            if (block[i].first->size >= need_size)
+            {
+                if (ret.first == nullptr)
+                {
+
+                    ret = block[i];
+                    actual_size = need_size;
+                }
+                // try to use small size
+                else if (actual_size > need_size)
+                {
+                    ret = block[i];
+                    actual_size = need_size;
+                }
+                // try to use smaller block
+                else if ((ret.first->size > block[i].first->size))
+                {
+                    ret = block[i];
+                    actual_size = need_size;
+                }
+            }
+        }
+        return ret;
+    };
+    block_pair best_block = find_smallest_block(fast_blocks.size() > 0 ? fast_blocks : available_block, align);
+    return best_block.second;
 }
 
-std::map<MemoryObjectPtr, std::pair<uint32_t, uint32_t>> MemoryAllocator::get_liveness()
+bool MMUAllocator::is_sram_address(size_t addr)
 {
-    std::map<MemoryObjectPtr, std::pair<uint32_t, uint32_t>> ret;
+    for (auto m : m_mem)
+    {
+        auto root = m->rootblk();
+        if (root->offset() <= addr && addr < root->offset() + root->size)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MMUAllocator::is_sram_mem(Memory *mem)
+{
+    bool ret = contains(m_mem, mem);
     return ret;
 }
 
-uint32_t MemoryAllocator::clock()
+void MMUAllocator::init_memory(size_t ddr_size)
 {
-    return 0;
-}
-
-uint32_t MemoryAllocator::get_clock()
-{
-    return 0;
-}
-
-void MemoryAllocator::compress_clock()
-{
-    return;
-}
-
-MemoryAllocator *get_mem_allocator()
-{
-    if (BuilderConfig::get<bool>(Constants::USE_SLOTS))
+    auto target = get_target();
+    if (target->isainfo().type >= ISA_ZYv5)
     {
-        return new MemoryAllocator();
+        auto gsram = new Memory(sram_factory.get_sram_by_addr(GSRAM0_BASE), target->gsram_size());
+        m_mem.push_back(gsram);
+        return;
     }
-    return new AMATAllocator();
+    MemoryObjectPtr ws = nullptr;
+    if (ddr_size != 0)
+    {
+        //16K align
+        ddr_size = ((ddr_size + 16 * 1024 - 1) >> 14) << 14;
+
+        //workspace must be 1MB align
+        ws = m_workspace->memory_offset();
+        //we make the align as the ddr_size
+        size_t alignment = 1024 * 1024; //default 1M
+        if ((target->isainfo().type == ISA_ZYv2) || (target->isainfo().type == ISA_ZYv3))
+        {
+            alignment = 16 * 1024; //16K
+        }
+        else if (target->isainfo().type == ISA_ZY)
+        {
+            alignment = 16 * 1024;
+            while (alignment < ddr_size)
+            {
+                alignment = alignment << 1;
+            }
+            //max is 1M
+            alignment = MAX(alignment, 1024 * 1024);
+        }
+        ws->align = MAX(alignment, ws->align);
+        int num_ddr = 2;
+        if (target->gsram_size() >= 32 * 1024)
+        {
+            num_ddr = 4;
+        }
+        m_workspace->shape()[0] = MAX(m_workspace->shape().size(), (num_ddr * ddr_size));
+        ddr_size = m_workspace->shape()[0] / num_ddr;
+    }
+
+    // apply 1MB, GSRAM0/1: 1MB, LSRAM0/1: 1MB
+
+    auto lsram0ddr = std::make_shared<MemoryObject>(0, 0);
+    MemoryObjectPtr lsram1ddr = std::make_shared<MemoryObject>(0, ddr_size);
+    lsram0ddr->relative_offset = 0;
+    lsram0ddr->size = ddr_size;
+    lsram0ddr->base_offset = ws;
+    lsram1ddr->relative_offset = ddr_size;
+    lsram1ddr->size = ddr_size;
+    lsram1ddr->base_offset = ws;
+    auto ddr0 = new Memory(MemoryObjectPtr(lsram0ddr), ddr_size);
+    auto ddr1 = new Memory(MemoryObjectPtr(lsram1ddr), ddr_size);
+
+    m_ddr.push_back(ddr0);
+    m_ddr.push_back(ddr1);
+    Memory *gsram0 = nullptr;
+    Memory *gsram1 = nullptr;
+    MemoryObjectPtr gsram0ddr = std::make_shared<MemoryObject>(0, 2 * ddr_size);
+    MemoryObjectPtr gsram1ddr = std::make_shared<MemoryObject>(0, 3 * ddr_size);
+    if (target->gsram_size() >= 32 * 1024)
+    {
+
+        gsram0ddr->relative_offset = 2 * ddr_size;
+        gsram0ddr->size = ddr_size;
+        gsram0ddr->base_offset = ws;
+        gsram1ddr->relative_offset = 3 * ddr_size;
+        gsram1ddr->size = ddr_size;
+        gsram1ddr->base_offset = ws;
+
+        auto ddr2 = new Memory(MemoryObjectPtr(gsram0ddr), ddr_size);
+        auto ddr3 = new Memory(MemoryObjectPtr(gsram1ddr), ddr_size);
+        gsram0 = new Memory(sram_factory.get_sram_by_addr(GSRAM0_BASE), target->gsram_size());
+        gsram1 = new Memory(sram_factory.get_sram_by_addr(GSRAM1_BASE), target->gsram_size());
+
+        m_ddr.push_back(ddr2);
+        m_ddr.push_back(ddr3);
+        m_ddr_seg.push_back(new SegMMU(MMU_BASE, {gsram0, ddr2}));
+        m_ddr_seg.push_back(new SegMMU(MMU_BASE, {gsram1, ddr3}));
+        m_mem.push_back(gsram0);
+        m_mem.push_back(gsram1);
+        // the mmu is use two physical memory
+        auto mmu0 = new SegMMU(MMU_BASE, {gsram0, gsram1});
+        m_seg.push_back(mmu0);
+    }
+    for (unsigned int i = 0; i < target->tec_num(); ++i)
+    {
+        auto lsram0 = new Memory(sram_factory.get_sram_by_addr(LSRAM_BASE + i * LSRAM_RESERVE), target->lsram_size());
+        auto lsram1 = new Memory(sram_factory.get_sram_by_addr(LSRAM_BASE + i * LSRAM_RESERVE + LSRAM_MAX_SIZE), target->lsram_size());
+
+        m_mem.push_back(lsram0);
+        m_mem.push_back(lsram1);
+        m_seg.push_back(new SegMMU(MMU_BASE, {lsram0, lsram1}));
+        if (i == 0)
+        {
+            m_ddr_seg.push_back(new SegMMU(MMU_BASE, {lsram0, ddr0}));
+            m_ddr_seg.push_back(new SegMMU(MMU_BASE, {lsram1, ddr1}));
+        }
+    }
 }
 
 }; // namespace aipubt

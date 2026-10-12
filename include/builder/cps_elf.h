@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -47,6 +47,75 @@
 namespace aipubt
 {
 
+struct Section
+{
+    operator bool() const
+    {
+        return data && size;
+    }
+
+    void *data = nullptr;
+    size_t size = 0;
+};
+
+struct SectionBuf : public std::streambuf
+{
+    SectionBuf(const void *data = nullptr, size_t size = 0)
+    {
+        char *p = (char *)data;
+        setg(p, p, p + size);
+    }
+    SectionBuf(const Section &sec) : SectionBuf(sec.data, sec.size) {}
+
+    std::streambuf::pos_type seekoff(std::streambuf::off_type off,
+                                     std::ios_base::seekdir way,
+                                     std::ios_base::openmode which)
+    {
+        if (!(which & std::ios::in) || gptr() == nullptr)
+            return std::streambuf::pos_type(std::streambuf::off_type(-1));
+
+        std::streambuf::off_type newoff = 0;
+        char *seekhigh = egptr();
+        switch (way)
+        {
+        case std::ios::beg:
+            newoff = 0;
+            break;
+        case std::ios::cur:
+            newoff = gptr() - eback();
+            break;
+        case std::ios::end:
+            newoff = seekhigh - eback();
+            break;
+        default:
+            break;
+        }
+        newoff += off;
+        if (newoff < 0 || newoff > seekhigh - eback())
+            return std::streambuf::pos_type(std::streambuf::off_type(-1));
+
+        char *newpos = eback() + newoff;
+        setg(eback(), newpos, std::max(newpos, egptr()));
+        return std::streambuf::pos_type(newoff);
+    }
+
+    std::streambuf::pos_type seekpos(std::streambuf::pos_type sp,
+                                     std::ios_base::openmode which)
+    {
+        if (!(which & std::ios::in) || gptr() == nullptr)
+            return std::streambuf::pos_type(std::streambuf::off_type(-1));
+
+        if (sp < 0 || sp > egptr() - eback())
+            return std::streambuf::pos_type(off_type(-1));
+
+        char *newpos = eback() + sp;
+
+        setg(eback(), newpos, std::max(newpos, egptr()));
+
+        return sp;
+    }
+};
+
 struct sync_ctrl_t
 {
     int set_mask;
@@ -70,9 +139,10 @@ enum
     BUF_TYPE_WEIGHT,
     BUF_TYPE_SLOT,
     BUF_TYPE_STREAM,
+    BUF_TYPE_PRINT,
 };
 
-struct buf_desc_t
+struct __attribute__((packed)) buf_desc_t
 {
     uint8_t type;
     uint32_t index;
@@ -81,7 +151,7 @@ struct buf_desc_t
     void *data;
 };
 
-struct buf_loc_t
+struct __attribute__((packed)) buf_loc_t
 {
     uint8_t type;
     uint32_t index;
@@ -93,17 +163,18 @@ struct task_t
     int type;
     uint16_t invalid_offset;
     uint16_t id;
-    union {
+    union
+    {
         struct
         {
             uint32_t offset;
-            uint16_t grid_dim[3];
-            uint16_t block_dim[3];
+            uint32_t grid_dim[3];
+            uint32_t block_dim[3];
             int surfb_desp_num;
             int gb_param_offset;
             int gb_param_size;
             uint32_t ib_size;
-            uint16_t static_sm_bytes;
+            uint16_t sm_bytes;
             uint16_t param_size;
             uint8_t sreg_param_size;
             uint8_t sreg_cnt;
@@ -173,11 +244,85 @@ struct stream_t
     uint32_t id;
     std::vector<task_t> tasks;
 };
+
 struct tensor_info_t
 {
     uint32_t id;
     uint8_t dtype;
     std::vector<uint32_t> shape;
+};
+
+struct task_loc_t
+{
+    uint32_t task_id;
+    uint32_t stream_id;
+    uint32_t offset;
+
+    void load(std::istream &stream)
+    {
+        stream.read((char *)&task_id, sizeof(uint32_t));
+        stream.read((char *)&stream_id, sizeof(uint32_t));
+        stream.read((char *)&offset, sizeof(uint32_t));
+    }
+    void write(std::ostream &stream)
+    {
+        stream.write((char *)&task_id, sizeof(uint32_t));
+        stream.write((char *)&stream_id, sizeof(uint32_t));
+        stream.write((char *)&offset, sizeof(uint32_t));
+    }
+};
+
+struct event_t
+{
+    uint32_t id;
+    std::vector<task_loc_t> offsets;
+
+    void load(std::istream &stream)
+    {
+        uint32_t num_offsets = 0;
+        stream.read((char *)&id, sizeof(uint32_t));
+        stream.read((char *)&num_offsets, sizeof(uint32_t));
+        offsets.resize(num_offsets);
+        for (uint32_t i = 0; i < num_offsets; ++i)
+        {
+            offsets[i].load(stream);
+        }
+    }
+    void write(std::ostream &stream)
+    {
+        uint32_t num_offsets = offsets.size();
+        stream.write((char *)&id, sizeof(uint32_t));
+        stream.write((char *)&num_offsets, sizeof(uint32_t));
+        for (uint32_t i = 0; i < num_offsets; ++i)
+        {
+            offsets[i].write(stream);
+        }
+    }
+};
+
+struct event_table_t
+{
+    std::vector<event_t> events;
+
+    void load(std::istream &stream)
+    {
+        uint32_t num_events = 0;
+        stream.read((char *)&num_events, sizeof(uint32_t));
+        events.resize(num_events);
+        for (uint32_t i = 0; i < num_events; ++i)
+        {
+            events[i].load(stream);
+        }
+    }
+    void write(std::ostream &stream)
+    {
+        uint32_t num_events = events.size();
+        stream.write((char *)&num_events, sizeof(uint32_t));
+        for (uint32_t i = 0; i < num_events; ++i)
+        {
+            events[i].write(stream);
+        }
+    }
 };
 
 class CpsElf;
@@ -193,7 +338,10 @@ public:
     {
         bool ret = elfio_.load(stream);
         if (ret)
+        {
             load_buffer_tab();
+            load_event_tab();
+        }
         return ret;
     }
     bool load(const std::string &filename)
@@ -205,6 +353,7 @@ public:
     bool save(std::ostream &stream)
     {
         save_buffer_tab();
+        save_event_tab();
         return elfio_.save(stream);
     }
     bool save(const std::string &filename)
@@ -220,7 +369,7 @@ public:
         return it != buffers_.end() ? &(it->second) : nullptr;
     }
     void set_buffer(uint8_t type, uint32_t idx, size_t size,
-                    size_t alignment = 1, const void *data = nullptr)
+                    size_t alignment = 1, int mem_id = -1, const void *data = nullptr)
     {
         buf_desc_t desc;
         desc.type = type;
@@ -419,6 +568,26 @@ public:
     {
         return elfio_.sections[name];
     }
+    std::vector<std::pair<const void *, size_t>>
+    get_note_zhouyi(const std::string &key_name) const
+    {
+        std::vector<std::pair<const void *, size_t>> notes;
+        ELFIO::const_note_section_accessor nsa(elfio_, elfio_.sections[".note.zhouyi"]);
+        auto num = nsa.get_notes_num();
+        for (decltype(num) i = 0; i < num; ++i)
+        {
+            std::string name;
+            void *desc = nullptr;
+            ELFIO::Elf_Word type = 0;
+            ELFIO::Elf_Word descSize = 0;
+            nsa.get_note(i, type, name, desc, descSize);
+
+            if (key_name == name)
+                notes.emplace_back(desc, descSize);
+        }
+        return notes;
+    }
+
     std::pair<const void *, size_t> get_note_section(const ELFIO::section *section,
                                                      const std::string &key_name,
                                                      uint32_t key_type = 0) const
@@ -456,6 +625,41 @@ public:
         return {0, 0};
     }
 
+    void set_event_tab(const std::vector<stream_t> &streams)
+    {
+        std::map<size_t, event_t> events;
+        for (auto &stream : streams)
+        {
+            for (size_t i = 0; i < stream.tasks.size(); ++i)
+            {
+                auto &task = stream.tasks[i];
+                if (task.type == TASK_TYPE_BARRIER_SET || task.type == TASK_TYPE_BARRIER_WAIT)
+                {
+                    size_t event_id = task.barrier_set.addr;
+                    if (task.type == TASK_TYPE_BARRIER_WAIT)
+                    {
+                        event_id = task.barrier_wait.addr;
+                    }
+                    auto &event = events[event_id];
+                    task_loc_t offset;
+                    offset.task_id = task.id;
+                    offset.stream_id = stream.id;
+                    offset.offset = i;
+                    event.id = event_id;
+                    event.offsets.push_back(offset);
+                }
+            }
+        }
+        for (auto &kv : events)
+        {
+            event_table_.events.push_back(kv.second);
+        }
+    }
+    const event_table_t &get_event_tab() const
+    {
+        return event_table_;
+    }
+
 private:
     ELFIO::section *force_get_note()
     {
@@ -478,12 +682,20 @@ private:
                       "'key' must be a plain data type.");
         static_assert(std::is_trivial_v<_Val> && std::is_standard_layout_v<_Val>,
                       "'value' must be a plain data type.");
-        using tab_elem_t = typename _Tab<_Key, _Val, _Args...>::value_type;
         _Tab<_Key, _Val, _Args...> tab;
-        const auto p = get_note_section(name);
-        const auto *end = (const tab_elem_t *)(((uint8_t *)p.first) + p.second);
-        for (const auto *elem = (const tab_elem_t *)p.first; elem < end; ++elem)
-            tab.insert(*elem);
+        const auto duo = get_note_section(name);
+        const uint8_t *p = (const uint8_t *)duo.first;
+        const uint8_t *e = p + duo.second;
+        while (p < e)
+        {
+            _Key key;
+            memcpy(&key, p, sizeof(_Key));
+            p += sizeof(_Key);
+            _Val val;
+            memcpy(&val, p, sizeof(_Val));
+            p += sizeof(_Val);
+            tab.emplace(std::move(key), std::move(val));
+        }
         return tab;
     }
     template <class _Key, class _Val, template <class...> class _Tab = std::map, class... _Args>
@@ -493,13 +705,18 @@ private:
                       "'key' must be a plain data type.");
         static_assert(std::is_trivial_v<_Val> && std::is_standard_layout_v<_Val>,
                       "'value' must be a plain data type.");
-        using tab_elem_t = typename _Tab<_Key, _Val, _Args...>::value_type;
         ELFIO::note_section_accessor nsa(elfio_, force_get_note());
-        auto buf = std::make_unique<tab_elem_t[]>(tab.size());
-        tab_elem_t *p = buf.get();
-        for (auto it = tab.begin(); it != tab.end(); ++it, ++p)
-            memcpy((void *)p, &(*it), sizeof(tab_elem_t));
-        nsa.add_note(0, name, buf.get(), tab.size() * sizeof(tab_elem_t));
+        const auto total_size = (sizeof(_Key) + sizeof(_Val)) * tab.size();
+        auto buf = std::make_unique<uint8_t[]>(total_size);
+        uint8_t *p = buf.get();
+        for (auto it = tab.begin(); it != tab.end(); ++it)
+        {
+            memcpy(p, &(it->first), sizeof(_Key));
+            p += sizeof(_Key);
+            memcpy(p, &(it->second), sizeof(_Val));
+            p += sizeof(_Val);
+        }
+        nsa.add_note(0, name, buf.get(), total_size);
     }
 
     void save_buffer_tab()
@@ -543,9 +760,161 @@ private:
         buffers_ = std::move(tab);
     }
 
+    void save_event_tab()
+    {
+        ELFIO::note_section_accessor nsa(elfio_, force_get_note());
+        std::stringstream oss;
+        event_table_.write(oss);
+        auto str = oss.str();
+        nsa.add_note(0, "eventtab", str.c_str(), str.size());
+    }
+    void load_event_tab()
+    {
+        auto note = get_note_section(force_get_note(), "eventtab", 0);
+        SectionBuf buf(note.first, note.second);
+        std::istream stream(&buf);
+        event_table_.load(stream);
+    }
+
     ELFIO::elfio elfio_;
     std::map<uint32_t, buf_desc_t> buffers_;
     uint64_t buffer_total_size_ = 0;
+    event_table_t event_table_;
+};
+
+struct HostTaskArg
+{
+    uint32_t type; // 0: int, 1: void*, 2: const void*, 3: param list
+    uint64_t size; // memory size of tensor type
+    std::vector<HostTaskArg> args;
+
+    void load(std::istream &stream)
+    {
+        uint32_t num_args = 0;
+        stream.read((char *)&type, sizeof(uint32_t));
+        stream.read((char *)&size, sizeof(uint64_t));
+        stream.read((char *)&num_args, sizeof(uint32_t));
+        args.resize(num_args);
+        for (uint32_t i = 0; i < num_args; ++i)
+        {
+            args[i].load(stream);
+        }
+    }
+    void write(std::ostream &stream)
+    {
+        uint32_t num_args = args.size();
+        stream.write((char *)&type, sizeof(uint32_t));
+        stream.write((char *)&size, sizeof(uint64_t));
+        stream.write((char *)&num_args, sizeof(uint32_t));
+        for (uint32_t i = 0; i < num_args; ++i)
+        {
+            args[i].write(stream);
+        }
+    }
+};
+
+struct HostTaskInfo
+{
+    std::string lib_name;
+    std::string task_name;
+    std::string kernel_name;
+    std::vector<HostTaskArg> kernel_args;
+    uint32_t param_offset;
+    uint32_t set_id;
+    uint32_t set_data;
+    uint32_t wait_id;
+    uint32_t wait_ref;
+
+    void load(std::istream &stream)
+    {
+        uint32_t size = 0;
+        stream.read((char *)&size, sizeof(uint32_t));
+        lib_name.resize(size);
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            stream.read((char *)(&lib_name[i]), sizeof(char));
+        }
+        stream.read((char *)&size, sizeof(uint32_t));
+        task_name.resize(size);
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            stream.read((char *)(&task_name[i]), sizeof(char));
+        }
+        stream.read((char *)&size, sizeof(uint32_t));
+        kernel_name.resize(size);
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            stream.read((char *)(&kernel_name[i]), sizeof(char));
+        }
+        stream.read((char *)&size, sizeof(uint32_t));
+        kernel_args.resize(size);
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            kernel_args[i].load(stream);
+        }
+        stream.read((char *)&param_offset, sizeof(uint32_t));
+        stream.read((char *)&set_id, sizeof(uint32_t));
+        stream.read((char *)&set_data, sizeof(uint32_t));
+        stream.read((char *)&wait_id, sizeof(uint32_t));
+        stream.read((char *)&wait_ref, sizeof(uint32_t));
+    }
+    void write(std::ostream &stream)
+    {
+        uint32_t size = lib_name.size();
+        stream.write((char *)&size, sizeof(uint32_t));
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            stream.write((char *)(&lib_name[i]), sizeof(char));
+        }
+        size = task_name.size();
+        stream.write((char *)&size, sizeof(uint32_t));
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            stream.write((char *)(&task_name[i]), sizeof(char));
+        }
+        size = kernel_name.size();
+        stream.write((char *)&size, sizeof(uint32_t));
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            stream.write((char *)(&kernel_name[i]), sizeof(char));
+        }
+        size = kernel_args.size();
+        stream.write((char *)&size, sizeof(uint32_t));
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            kernel_args[i].write(stream);
+        }
+        stream.write((char *)&param_offset, sizeof(uint32_t));
+        stream.write((char *)&set_id, sizeof(uint32_t));
+        stream.write((char *)&set_data, sizeof(uint32_t));
+        stream.write((char *)&wait_id, sizeof(uint32_t));
+        stream.write((char *)&wait_ref, sizeof(uint32_t));
+    }
+};
+
+struct HostTaskInfos
+{
+    std::vector<HostTaskInfo> tasks;
+
+    void load(std::istream &stream)
+    {
+        uint32_t num_tasks = 0;
+        stream.read((char *)&num_tasks, sizeof(uint32_t));
+        tasks.resize(num_tasks);
+        for (uint32_t i = 0; i < num_tasks; ++i)
+        {
+            tasks[i].load(stream);
+        }
+    }
+    void write(std::ostream &stream)
+    {
+        uint32_t num_tasks = tasks.size();
+        stream.write((char *)&num_tasks, sizeof(uint32_t));
+        for (uint32_t i = 0; i < num_tasks; ++i)
+        {
+            tasks[i].write(stream);
+        }
+    }
 };
 
 class HybridELF;
@@ -592,83 +961,12 @@ public:
         }
     };
 
-    struct Section
-    {
-        operator bool() const
-        {
-            return data && size;
-        }
-
-        void *data = nullptr;
-        size_t size = 0;
-    };
-
-    struct SectionBuf : public std::streambuf
-    {
-        SectionBuf(const void *data = nullptr, size_t size = 0)
-        {
-            char *p = (char *)data;
-            setg(p, p, p + size);
-        }
-        SectionBuf(const Section &sec) : SectionBuf(sec.data, sec.size) {}
-
-        std::streambuf::pos_type seekoff(std::streambuf::off_type off,
-                                         std::ios_base::seekdir way,
-                                         std::ios_base::openmode which)
-        {
-            if (!(which & std::ios::in) || gptr() == nullptr)
-                return std::streambuf::pos_type(std::streambuf::off_type(-1));
-
-            std::streambuf::off_type newoff = 0;
-            char *seekhigh = egptr();
-            switch (way)
-            {
-            case std::ios::beg:
-                newoff = 0;
-                break;
-            case std::ios::cur:
-                newoff = gptr() - eback();
-                break;
-            case std::ios::end:
-                newoff = seekhigh - eback();
-                break;
-            default:
-                break;
-            }
-            newoff += off;
-            if (newoff < 0 || newoff > seekhigh - eback())
-                return std::streambuf::pos_type(std::streambuf::off_type(-1));
-
-            char *newpos = eback() + newoff;
-            setg(eback(), newpos, std::max(newpos, egptr()));
-            return std::streambuf::pos_type(newoff);
-        }
-
-        std::streambuf::pos_type seekpos(std::streambuf::pos_type sp,
-                                         std::ios_base::openmode which)
-        {
-            if (!(which & std::ios::in) || gptr() == nullptr)
-                return std::streambuf::pos_type(std::streambuf::off_type(-1));
-
-            if (sp < 0 || sp > egptr() - eback())
-                return std::streambuf::pos_type(off_type(-1));
-
-            char *newpos = eback() + sp;
-
-            setg(eback(), newpos, std::max(newpos, egptr()));
-
-            return sp;
-        }
-    };
-
     HybridELF() { m_elfio.create(ELFCLASS64, ELFDATA2LSB); }
     ~HybridELF() = default;
 
     bool load(std::istream &stream)
     {
-        bool ret = m_elfio.load(stream);
-        load_msg();
-        return ret;
+        return m_elfio.load(stream) ? load_msg(), true : false;
     }
     bool load(const std::string &filename)
     {
@@ -731,6 +1029,26 @@ public:
     const CompilerMsg &get_compiler_msg() const
     {
         return m_msg;
+    }
+
+    void set_task_infos(HostTaskInfos &infos)
+    {
+        remove_note("hosttaskinfo");
+        std::stringstream oss;
+        infos.write(oss);
+        set_note(oss.str(), "hosttaskinfo");
+    }
+    HostTaskInfos get_task_infos()
+    {
+        HostTaskInfos ret;
+        auto note = get_note("hosttaskinfo");
+        if (note)
+        {
+            SectionBuf buf(note);
+            std::istream stream(&buf);
+            ret.load(stream);
+        }
+        return ret;
     }
 
 private:

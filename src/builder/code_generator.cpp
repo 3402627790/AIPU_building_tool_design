@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -128,13 +128,21 @@ void CodeGenerator::gen_device_code(CpsElfPtr elf)
 
 void CodeGenerator::gen_host_code(HybridELFPtr elf)
 {
-    LinkerCps linker;
-    auto workdir = linker.workdir();
+    auto workdir = BuilderConfig::get<std::string>(Constants::global_cwd) + "/ld";
+    if (!utils::path_exists(workdir))
+    {
+        utils::mkdir(workdir);
+    }
 
     gen_host_funcs();
 
     std::set<std::string> libs;
     auto lib_paths = get_all_lib_paths();
+    auto devkit_path = get_devkit_path();
+    if (devkit_path.size())
+    {
+        lib_paths.push_back(devkit_path + "/lib");
+    }
     for (auto &kv : m_host_lib)
     {
         DEBUG() << "kernel: " << kv.first << " lib: " << kv.second;
@@ -176,6 +184,39 @@ void CodeGenerator::gen_host_code(HybridELFPtr elf)
             FATAL() << "An error occurred while compiling the host code!";
         }
         elf->load(o_file);
+        elf->set_task_infos(m_host_tasks);
+    }
+}
+
+static void build_host_task_args(const BuilderParams &params, std::vector<HostTaskArg> &res)
+{
+    res.clear();
+    for (auto &p : params)
+    {
+        HostTaskArg arg;
+        arg.type = 0;
+        arg.size = 0;
+        if (p.surface)
+        {
+            ERROR() << "unsupported surface parameter!";
+        }
+        else if (p.tensor)
+        {
+            arg.type = 1;
+            arg.size = p.tensor->mem_size();
+        }
+        else if (p.const_tensor)
+        {
+            arg.type = 2;
+            arg.size = p.const_tensor->mem_size();
+        }
+        else if (p.param_list)
+        {
+            arg.type = 3;
+            arg.size = p.param_list->mem_size();
+            build_host_task_args(p.param_list->params(), arg.args);
+        }
+        res.emplace_back(arg);
     }
 }
 
@@ -183,9 +224,6 @@ void CodeGenerator::gen_host_funcs()
 {
     auto param_root = m_graph->global_tensors()["param"];
     auto param_root_object = param_root->memory_offset()->get_base_object();
-
-    auto &oss = m_host_code;
-    oss.clear();
 
     for (auto s : m_graph->nodes())
     {
@@ -200,43 +238,176 @@ void CodeGenerator::gen_host_funcs()
                     continue;
                 }
 
+                if (!n->get_attr<bool>(Constants::is_host_impl))
+                {
+                    continue;
+                }
+
                 auto kernel_infos = n->get_attr<KernelInfos>(Constants::kernel_infos);
                 auto param_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::param_bases);
-                auto is_host_impl = n->get_attr<bool>(Constants::is_host_impl);
-                if (is_host_impl)
+                auto set_id = n->get_attr<std::vector<uint32_t>>(Constants::barrier_set_id);
+                auto set_data = n->get_attr<std::vector<uint32_t>>(Constants::barrier_set_data);
+                auto wait_id = n->get_attr<std::vector<uint32_t>>(Constants::barrier_wait_id);
+                auto wait_ref = n->get_attr<std::vector<uint32_t>>(Constants::barrier_wait_ref);
+
+                for (size_t i = 0; i < kernel_infos.size(); ++i)
                 {
-                    for (size_t i = 0; i < kernel_infos.size(); ++i)
+                    auto &kernel_info = kernel_infos[i];
+                    auto param_base = param_bases[i];
+                    auto param_base_object = param_base->memory_offset();
+                    auto param_offset = param_base_object->offset() - param_root_object->offset();
+                    param_offset += 8 * 4; // real param
+
+                    HostTaskInfo task_info;
+                    task_info.lib_name = m_host_lib.at(kernel_info.kernel_name);
+                    task_info.task_name = "aipubt_" + utils::verify_name(n->name()) + "_" + std::to_string(i);
+                    task_info.kernel_name = kernel_info.kernel_name;
+                    task_info.param_offset = param_offset;
+                    task_info.set_id = set_id[i];
+                    task_info.set_data = set_data[i];
+                    task_info.wait_id = wait_id[i];
+                    task_info.wait_ref = wait_ref[i];
+                    build_host_task_args(kernel_info.args, task_info.kernel_args);
+
+                    constexpr size_t max_arg_num = 64;
+                    if (kernel_info.args.size() > max_arg_num)
                     {
-                        auto &info = kernel_infos[i];
-                        auto func_name = "aipubt_" + utils::verify_name(n->name()) + "_" + std::to_string(i);
-                        auto param_base = param_bases[i];
-                        auto param_base_object = param_base->memory_offset();
-                        auto param_offset = param_base_object->offset() - param_root_object->offset();
-                        param_offset += 8 * 4; // real param
-                        gen_host_func(oss, func_name, info, param_offset);
+                        ERROR() << "host plugin supports up to " << max_arg_num << " arguments\n"
+                                << "node: " << n->name();
                     }
+                    m_host_tasks.tasks.emplace_back(task_info);
                 }
             }
         }
     }
+
+    auto &oss = m_host_code;
+    oss.clear();
+
+    for (auto &info : m_host_tasks.tasks)
+    {
+        gen_host_task_func(oss, info);
+    }
+
+    auto tab = std::string(4, ' ');
+    auto launcher = "launcher";
+    auto ctrl = "ctrl";
+    auto tids = "tids";
+    auto args = "args";
+    auto events = "events";
+    auto param_base = "param_base";
+    oss << "void aipu_create_threads(aipubt::rt::ILauncher *" << launcher
+        << ", sync_ctrl_t *" << ctrl
+        << ", std::vector<pthread_t> &" << tids
+        << ", std::vector<thread_arg_t> &" << args
+        << ", std::vector<aipubt::rt::IEvent *> &" << events
+        << ", uint64_t " << param_base << ")\n{\n";
+
+    auto num_tasks = m_host_tasks.tasks.size();
+    if (num_tasks > 0)
+    {
+        oss << tab << ctrl << "->ready.resize(" << num_tasks << ", false);\n";
+        for (size_t i = 0; i < num_tasks; ++i)
+        {
+            auto &info = m_host_tasks.tasks[i];
+
+            auto wait_attr = "wait_attr" + std::to_string(i);
+            auto set_attr = "set_attr" + std::to_string(i);
+            auto wait_event = "wait_event" + std::to_string(i);
+            auto set_event = "set_event" + std::to_string(i);
+            oss << tab << "aipubt::rt::IEvent::attr_t " << wait_attr << ", " << set_attr << ";\n"
+                << tab << wait_attr << ".data = " << info.set_data << ";\n"
+                << tab << wait_attr << ".mask = 0xf;\n"
+                << tab << wait_attr << ".task_id = " << info.set_id << ";\n"
+                << tab << set_attr << ".data = " << info.wait_ref << ";\n"
+                << tab << set_attr << ".mask = 0xf;\n"
+                << tab << set_attr << ".task_id = " << info.wait_id << ";\n"
+                << tab << "auto " << wait_event << " = " << launcher << "->make_event(" << wait_attr << ").get();\n"
+                << tab << events << ".push_back(" << wait_event << ");\n"
+                << tab << "auto " << set_event << " = " << launcher << "->make_event(" << set_attr << ").get();\n"
+                << tab << events << ".push_back(" << set_event << ");\n";
+
+            auto arg = "arg" + std::to_string(i);
+            auto tid = "tid" + std::to_string(i);
+            oss << tab << args << ".push_back(thread_arg_t());\n"
+                << tab << "auto " << arg << " = &" << args << "[" << args << ".size() - 1];\n"
+                << tab << arg << "->tid = " << i << ";\n"
+                << tab << arg << "->param_base = " << param_base << ";\n"
+                << tab << arg << "->wait_event = " << wait_event << ";\n"
+                << tab << arg << "->set_event = " << set_event << ";\n"
+                << tab << arg << "->wait_attr = " << wait_attr << ";\n"
+                << tab << arg << "->set_attr = " << set_attr << ";\n"
+                << tab << arg << "->task_func = " << info.task_name << ";\n"
+                << tab << arg << "->ctrl = " << ctrl << ";\n"
+                << tab << tids << ".push_back(pthread_t());\n"
+                << tab << "auto " << tid << " = &" << tids << "[" << tids << ".size() - 1];\n"
+                << tab << "pthread_create(" << tid << ", NULL, task_thread_func, (void *)" << arg << ");\n";
+        }
+    }
+    oss << "}\n\n";
 }
 
-void CodeGenerator::gen_host_func(std::stringstream &oss,
-                                  const std::string &func_name,
-                                  KernelInfo &info,
-                                  uint64_t param_offset)
+struct BufferInfo
+{
+    std::string host_addr;
+    std::string device_addr;
+    size_t size = 0;
+    bool write_back = false;
+};
+
+static size_t get_var_id()
+{
+    static size_t var_id = 0;
+    return var_id++;
+}
+
+static void process_param_list(std::stringstream &oss,
+                               const std::string &base,
+                               const std::vector<HostTaskArg> &args,
+                               std::vector<BufferInfo> &bufs)
+{
+    auto tab = std::string(4, ' ');
+    size_t offset = 0;
+    for (auto &karg : args)
+    {
+        if (karg.type == 1 || karg.type == 2 || karg.type == 3)
+        {
+            auto var_id = get_var_id();
+            auto arg = "arg" + std::to_string(var_id);
+            auto dp = "dp" + std::to_string(var_id);
+            oss << tab << "char *" << arg << " = new char[" << karg.size << "];\n"
+                << tab << "uint64_t " << dp << " = *(uint64_t *)(" << base << " + " << offset << ");\n"
+                << tab << "aipubt::rt::Allocator::copy("
+                << "(void *)" << arg << ", " << dp << ", " << karg.size << ");\n"
+                << tab << "*(uint64_t *)(" << base << " + " << offset << ") = (uint64_t)" << arg << ";\n";
+            if (karg.type == 3)
+            {
+                process_param_list(oss, arg, karg.args, bufs);
+            }
+            BufferInfo buf;
+            buf.host_addr = arg;
+            buf.device_addr = dp;
+            buf.size = karg.size;
+            buf.write_back = karg.type == 1 ? true : false;
+            bufs.emplace_back(buf);
+            offset += 2 * sizeof(uint32_t);
+        }
+        else
+        {
+            offset += sizeof(uint32_t);
+        }
+    }
+}
+
+void CodeGenerator::gen_host_task_func(std::stringstream &oss, const HostTaskInfo &info)
 {
     auto tab = std::string(4, ' ');
     size_t num_params = 0;
     oss << "extern \"C\" void " << info.kernel_name << "(";
-    for (size_t i = 0; i < info.args.size(); ++i)
+    for (size_t i = 0; i < info.kernel_args.size(); ++i)
     {
-        auto &p = info.args[i];
-        if (p.surface)
-        {
-            ERROR() << "unsupported surface parameter!";
-        }
-        if (p.tensor || p.const_tensor || p.param_list)
+        auto &karg = info.kernel_args[i];
+        if (karg.type == 1 || karg.type == 2 || karg.type == 3)
         {
             num_params += 2;
             oss << "void *";
@@ -246,7 +417,7 @@ void CodeGenerator::gen_host_func(std::stringstream &oss,
             num_params += 1;
             oss << "int";
         }
-        if (i != info.args.size() - 1)
+        if (i != info.kernel_args.size() - 1)
         {
             oss << ", ";
         }
@@ -256,61 +427,52 @@ void CodeGenerator::gen_host_func(std::stringstream &oss,
     auto pb = "pb";
     auto pp = "pp";
     auto tpp = "tpp";
-    oss << "void " << func_name << "(uint64_t " << pb << ")\n{\n"
-        << tab << "uint64_t " << pp << " = " << pb << " + " << param_offset << ";\n"
+    oss << "void " << info.task_name << "(uint64_t " << pb << ")\n{\n"
+        << tab << "uint64_t " << pp << " = " << pb << " + " << info.param_offset << ";\n"
         << tab << "uint32_t *" << tpp << " = new uint32_t[" << num_params << "];\n"
         << tab << "aipubt::rt::Allocator::copy("
-        << "(void *)" << tpp << ", " << pp << ", " << num_params * 4 << ");\n";
+        << "(void *)" << tpp << ", " << pp << ", " << num_params * sizeof(uint32_t) << ");\n";
 
-    size_t pp_offset = 0;
+    size_t offset = 0;
     std::vector<std::string> args;
-    std::vector<std::pair<std::string, std::string>> ptrs;
-    std::vector<size_t> sizes;
-    std::vector<bool> wb;
-    for (size_t i = 0; i < info.args.size(); ++i)
+    std::vector<BufferInfo> bufs;
+    for (auto &karg : info.kernel_args)
     {
-        auto &p = info.args[i];
-        auto arg = "arg" + std::to_string(i);
-        if (p.tensor || p.const_tensor || p.param_list)
+        auto var_id = get_var_id();
+        auto arg = "arg" + std::to_string(var_id);
+        if (karg.type == 1 || karg.type == 2 || karg.type == 3)
         {
-            size_t mem_size = 0;
-            if (p.tensor)
-            {
-                mem_size = p.tensor->mem_size();
-            }
-            else if (p.const_tensor)
-            {
-                mem_size = p.const_tensor->mem_size();
-            }
-            else
-            {
-                mem_size = p.param_list->mem_size();
-            }
-            auto dp = "dp" + std::to_string(i);
-            oss << tab << "char *" << arg << " = new char[" << mem_size << "];\n"
-                << tab << "uint64_t " << dp << " = *(uint64_t *)(" << tpp << " + " << pp_offset << ");\n"
+            auto dp = "dp" + std::to_string(var_id);
+            oss << tab << "char *" << arg << " = new char[" << karg.size << "];\n"
+                << tab << "uint64_t " << dp << " = *(uint64_t *)(" << tpp << " + " << offset << ");\n"
                 << tab << "aipubt::rt::Allocator::copy("
-                << "(void *)" << arg << ", " << dp << ", " << mem_size << ");\n";
-            ptrs.push_back({arg, dp});
-            sizes.push_back(mem_size);
-            wb.push_back(p.tensor ? true : false);
-            pp_offset += 2;
-            // TODO: support param_list
+                << "(void *)" << arg << ", " << dp << ", " << karg.size << ");\n";
+            if (karg.type == 3)
+            {
+                process_param_list(oss, arg, karg.args, bufs);
+            }
+            BufferInfo buf;
+            buf.host_addr = arg;
+            buf.device_addr = dp;
+            buf.size = karg.size;
+            buf.write_back = karg.type == 1 ? true : false;
+            bufs.emplace_back(buf);
+            offset += 2;
         }
         else
         {
-            oss << tab << "uint32_t " << arg << " = " << tpp << "[" << pp_offset << "];\n";
-            pp_offset += 1;
+            oss << tab << "uint32_t " << arg << " = " << tpp << "[" << offset << "];\n";
+            offset += 1;
         }
         args.push_back(arg);
     }
 
     oss << tab << info.kernel_name << "(";
-    for (size_t i = 0; i < info.args.size(); ++i)
+    for (size_t i = 0; i < info.kernel_args.size(); ++i)
     {
-        auto &p = info.args[i];
+        auto &karg = info.kernel_args[i];
         auto &arg = args[i];
-        if (p.tensor || p.const_tensor || p.param_list)
+        if (karg.type == 1 || karg.type == 2 || karg.type == 3)
         {
             oss << "(void *)" << arg;
         }
@@ -318,54 +480,96 @@ void CodeGenerator::gen_host_func(std::stringstream &oss,
         {
             oss << "(int)" << arg;
         }
-        if (i != info.args.size() - 1)
+        if (i != info.kernel_args.size() - 1)
         {
             oss << ", ";
         }
     }
     oss << ");\n";
 
-    for (size_t i = 0; i < ptrs.size(); ++i)
+    for (auto &buf : bufs)
     {
-        auto &p = ptrs[i];
-        if (wb[i])
+        if (buf.write_back)
         {
             oss << tab << "aipubt::rt::Allocator::copy("
-                << p.second << ", (void *)" << p.first << ", " << sizes[i] << ");\n";
+                << buf.device_addr << ", (void *)" << buf.host_addr << ", " << buf.size << ");\n";
         }
-        oss << tab << "delete[] " << p.first << ";\n";
+        oss << tab << "delete[] " << buf.host_addr << ";\n";
     }
     oss << tab << "delete[] " << tpp << ";\n"
         << "}\n\n";
 }
 
-const std::string CodeGenerator::get_cpshost_header() const
-{
-    return R"(
-#pragma once
-#include <modules/btrt/launcher.h>
-
-extern "C" {
-
-aipubt::rt::Launcher *createLauncher();
-
-}
-)";
-}
-
 const std::string CodeGenerator::get_cpshost_code()
 {
-    auto header = get_cpshost_header();
-    utils::replace(header, "#pragma once", "");
     auto host_code = m_host_code.str();
     auto ds_host_code = get_ds_host_code();
     std::stringstream oss;
-    oss << header;
-    if (host_code.size())
+    oss << R"(
+#include <dlfcn.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <unistd.h>
+
+#include <allocator.h>
+#include <launcher.h>
+
+typedef struct sync_ctrl
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    std::vector<bool> ready;
+    bool quit = false;
+} sync_ctrl_t;
+
+typedef struct thread_arg
+{
+    uint32_t tid = 0;
+    uint64_t param_base = 0;
+    aipubt::rt::IEvent *wait_event = NULL;
+    aipubt::rt::IEvent *set_event = NULL;
+    aipubt::rt::IEvent::attr_t wait_attr;
+    aipubt::rt::IEvent::attr_t set_attr;
+    void (*task_func)(uint64_t) = NULL;
+    sync_ctrl_t *ctrl = NULL;
+} thread_arg_t;
+
+void *task_thread_func(void *arg)
+{
+    auto p = (thread_arg_t *)arg;
+    auto tid = p->tid;
+    auto param_base = p->param_base;
+    auto wait_event = p->wait_event;
+    auto set_event = p->set_event;
+    auto &wait_attr = p->wait_attr;
+    auto &set_attr = p->set_attr;
+    auto task_func = p->task_func;
+    auto ctrl = p->ctrl;
+
+    while (true)
     {
-        oss << "#include <modules/btrt/allocator.h>\n\n"
-            << host_code;
+        pthread_mutex_lock(&ctrl->mutex);
+        while (!ctrl->ready[tid] && !ctrl->quit)
+        {
+            pthread_cond_wait(&ctrl->cond, &ctrl->mutex);
+        }
+        if (ctrl->quit)
+        {
+            pthread_mutex_unlock(&ctrl->mutex);
+            break;
+        }
+        ctrl->ready[tid] = false;
+        pthread_mutex_unlock(&ctrl->mutex);
+
+        wait_event->wait(wait_attr);
+        task_func(param_base);
+        set_event->set(set_attr);
     }
+    return NULL;
+}
+
+)";
+    oss << host_code;
     if (ds_host_code.size())
     {
         oss << "typedef unsigned int uint;\n"
@@ -378,30 +582,71 @@ namespace aipubt::rt {
 class HybridLauncher : public Launcher
 {
 public:
+    HybridLauncher() : Launcher(false)
+    {
+        pthread_mutex_init(&m_ctrl.mutex, NULL);
+        pthread_cond_init(&m_ctrl.cond, NULL);
+    }
+    ~HybridLauncher()
+    {
+        if (m_tids.size() > 0)
+        {
+            pthread_mutex_lock(&m_ctrl.mutex);
+            m_ctrl.quit = true;
+            pthread_cond_broadcast(&m_ctrl.cond);
+            pthread_mutex_unlock(&m_ctrl.mutex);
+
+            for (auto &tid : m_tids)
+            {
+                pthread_join(tid, NULL);
+            }
+        }
+        pthread_mutex_destroy(&m_ctrl.mutex);
+        pthread_cond_destroy(&m_ctrl.cond);
+    }
+
+    int load_from_file(const std::string &elf_filepath) override
+    {
+        int ret = Launcher::load_from_file(elf_filepath);
+
+        if (ret == 0)
+        {
+            auto param_base = get_param_base();
+            aipu_create_threads(this, &m_ctrl, m_tids, m_args, m_events, param_base);
+        }
+        return ret;
+    }
+
     int run() override
     {
+        if (m_tids.size() > 0)
+        {
+            pthread_mutex_lock(&m_ctrl.mutex);
+            for (size_t i = 0; i < m_tids.size(); ++i)
+            {
+                m_ctrl.ready[i] = true;
+            }
+            pthread_cond_broadcast(&m_ctrl.cond);
+            pthread_mutex_unlock(&m_ctrl.mutex);
+        }
         return Launcher::run();
     }
 
-    int run_async(AsyncCallback callback,
-                  const std::vector<tensor_data_t> &inputs = {},
-                  const std::map<std::string, int> &symbols = {}) override
-    {
-        return Launcher::run_async(callback, inputs, symbols);
-    }
+protected:
+    sync_ctrl_t m_ctrl;
+    std::vector<pthread_t> m_tids;
+    std::vector<thread_arg_t> m_args;
+    std::vector<IEvent *> m_events;
 };
 
 } // namespace aipubt::rt
 
-#include <dlfcn.h>
-#include <stdio.h>
-
 extern "C" {
 
-aipubt::rt::Launcher *createLauncher()
+aipubt::rt::ILauncher *create_launcher()
 {
     Dl_info info;
-    if (dladdr((void *)createLauncher, &info) == 0)
+    if (dladdr((void *)create_launcher, &info) == 0)
     {
         return NULL;
     }
@@ -419,8 +664,20 @@ aipubt::rt::Launcher *createLauncher()
     return launcher;
 }
 
+void destroy_launcher(aipubt::rt::ILauncher *p)
+{
+    if (p)
+    {
+        delete p;
+    }
 }
+
+}
+
 )";
+    auto model_name = m_graph->name();
+    INFO() << "register model: " << model_name;
+    oss << "REGISTER_MODEL(\"" << model_name << "\", create_launcher, destroy_launcher);\n";
     return oss.str();
 }
 

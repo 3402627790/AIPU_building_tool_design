@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -476,17 +476,16 @@ void DSCodeGeneratorCL::max_batch_preprocess(NodePtr node,
             if (params[i].tensor)
             {
                 auto t = params[i].tensor;
-                if (tensors.count(t))
+                if (!tensors.count(t))
                 {
-                    continue;
-                }
-                for (auto it : tensors)
-                {
-                    if (it->memory_offset()->is_shared_by(t->memory_offset()))
+                    for (auto it : tensors)
                     {
-                        std::vector<Expr> offsets = it->attrs()[Constants::max_batch_offset];
-                        t->set_attr(Constants::max_batch_offset, offsets);
-                        break;
+                        if (it->memory_offset()->is_shared_by(t->memory_offset()))
+                        {
+                            std::vector<Expr> offsets = it->attrs()[Constants::max_batch_offset];
+                            t->set_attr(Constants::max_batch_offset, offsets);
+                            break;
+                        }
                     }
                 }
                 if (t->attrs().count(Constants::max_batch_offset))
@@ -888,12 +887,17 @@ void DSCodeGeneratorCPS::parse(GraphPtr graph)
     m_param_base = graph->global_tensors()["param"];
 
     graph->walk_on_node([&](NodePtr n) {
-        if (n->type() != OpType_ParamUpdate)
+        if (!n->attrs().count(Constants::plugin_impl))
         {
             return;
         }
-        auto impl = n->get_attr<std::shared_ptr<GopDSCodeImpl>>(Constants::plugin_impl);
-        for (auto node : impl->nodes())
+        auto impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
+        auto ds_impl = std::dynamic_pointer_cast<GopDSCodeImpl>(impl);
+        if (!ds_impl)
+        {
+            return;
+        }
+        for (auto node : ds_impl->nodes())
         {
             auto sgn = node.lock();
             auto infos = sgn->get_attr<KernelInfos>(Constants::kernel_infos);
@@ -912,7 +916,7 @@ void DSCodeGeneratorCPS::parse(GraphPtr graph)
                 m_kernels.push_back(DSKernelDesc());
                 auto &kernel = m_kernels.back();
                 kernel.node = sgn;
-                kernel.impl = impl;
+                kernel.impl = ds_impl;
                 kernel.type = DSKernelDesc::KERNEL;
                 kernel.name = "_modify_param" + kernel_id;
                 kernel.param_base = param_base;
@@ -1005,13 +1009,17 @@ void DSCodeGeneratorCPS::generate(GraphPtr graph)
     }
 
     graph->walk_on_node([](NodePtr n) {
-        if (n->type() != OpType_ParamUpdate)
+        if (!n->attrs().count(Constants::plugin_impl))
         {
             return;
         }
-
-        auto impl = n->get_attr<std::shared_ptr<GopDSCodeImpl>>(Constants::plugin_impl);
-        auto infos = impl->kernel_infos();
+        auto impl = n->get_attr<GopImplPtr>(Constants::plugin_impl);
+        auto ds_impl = std::dynamic_pointer_cast<GopDSCodeImpl>(impl);
+        if (!ds_impl)
+        {
+            return;
+        }
+        auto infos = ds_impl->kernel_infos();
         std::vector<PlaceholderPtr> param_bases;
         std::vector<PlaceholderPtr> stream_bases;
         for (size_t i = 0; i < infos.size(); ++i)
@@ -1101,17 +1109,17 @@ void DSCodeGeneratorCPS::generate_kernel_code(std::stringstream &oss,
                     if (d.type == DSParamDesc::PARAM_LIST)
                     {
                         base = "val" + std::to_string(var_id++);
-                        oss << tab2 << "uint *" << base << " = (uint *)(__attribute__((address_space(1))) uint *)"
-                            << "(*(ulonglong *)(" << pp << " + " << d.index << "));\n";
+                        oss << tab2 << "uint *" << base << " = (uint *)(*(ulonglong *)(" << pp << " + " << d.index << "));\n";
                     }
                     auto val = "val" + std::to_string(var_id++);
-                    oss << tab2 << "uint *" << val << " = " << base << " + " << d.offset / 4 << ";\n";
                     if (d.mode == DSParamDesc::FILL)
                     {
+                        oss << tab2 << "uint *" << val << " = " << base << " + " << d.offset / 4 << ";\n";
                         oss << tab2 << "*" << val << " = " << res << ";\n";
                     }
                     else
                     {
+                        oss << tab2 << "ulonglong *" << val << " = (ulonglong *)(" << base << " + " << d.offset / 4 << ");\n";
                         oss << tab2 << "*" << val << " = *" << val << " + " << res << ";\n";
                     }
                 }

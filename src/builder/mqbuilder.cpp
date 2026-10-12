@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -23,6 +23,7 @@
 #include "builder/mqbuilder.h"
 #include "builder/assembler.h"
 #include "builder/code_generator.h"
+#include "builder/defferred_compiler.h"
 #include "builder/gop_plugin.h"
 #include "builder/kernel_adapter.h"
 #include "builder/load_balancer.h"
@@ -106,15 +107,6 @@ HybridELFPtr MqBuilder::get_elf()
     return m_elf;
 }
 
-const std::string MqBuilder::get_header() const
-{
-    if (m_graph->attrs().count("header"))
-    {
-        return m_graph->attrs()["header"];
-    }
-    return std::string();
-}
-
 std::map<TensorPtr, uint32_t> MqBuilder::get_tensor_index_map()
 {
     std::map<TensorPtr, uint32_t> tensor_index_map = m_graph->attrs()["tensor_index_map"];
@@ -124,21 +116,30 @@ std::map<TensorPtr, uint32_t> MqBuilder::get_tensor_index_map()
 std::vector<BuildPhase> MqBuilder::create_phases()
 {
     return {
-        {"optimize", BuildStage::OPTIMIZE, [this]() { return phase_optimize(); }},
-        {"schedule", BuildStage::SCHEDULE, [this]() { return phase_schedule(); }},
-        {"kernel_adapt", BuildStage::KERNEL_ADAPT, [this]() { return phase_kernel_adapt(); }},
-        {"mem_alloc", BuildStage::MEM_ALLOC, [this]() { return phase_mem_alloc(); }},
-        {"device_code_gen", BuildStage::DEVICE_CODE_GEN, [this]() { return phase_device_code_gen(); }},
-        {"assemble", BuildStage::ASSEMBLE, [this]() { return phase_assemble(); }},
-        {"host_code_gen", BuildStage::HOST_CODE_GEN, [this]() { return phase_host_code_gen(); }},
-        {"gen_obj", BuildStage::GEN_OBJ, [this]() { return phase_gen_obj(); }},
+        {"optimize", BuildStage::OPTIMIZE, [this]()
+         { return phase_optimize(); }},
+        {"schedule", BuildStage::SCHEDULE, [this]()
+         { return phase_schedule(); }},
+        {"kernel_adapt", BuildStage::KERNEL_ADAPT, [this]()
+         { return phase_kernel_adapt(); }},
+        {"mem_alloc", BuildStage::MEM_ALLOC, [this]()
+         { return phase_mem_alloc(); }},
+        {"device_code_gen", BuildStage::DEVICE_CODE_GEN, [this]()
+         { return phase_device_code_gen(); }},
+        {"assemble", BuildStage::ASSEMBLE, [this]()
+         { return phase_assemble(); }},
+        {"host_code_gen", BuildStage::HOST_CODE_GEN, [this]()
+         { return phase_host_code_gen(); }},
+        {"gen_obj", BuildStage::GEN_OBJ, [this]()
+         { return phase_gen_obj(); }},
     };
 }
 
 bool MqBuilder::build()
 {
+    int total_stack = 32 * 1024 * 1024;
     m_graph->global_tensors().clear();
-    TensorPtr sp = std::make_shared<Tensor>("stack", TensorShape({8192}), Tensor::UINT8);
+    TensorPtr sp = std::make_shared<Tensor>("stack", TensorShape({total_stack}), Tensor::UINT8);
     m_graph->global_tensors()["stack"] = sp;
     TensorPtr print = std::make_shared<Tensor>("print", TensorShape({8192}), Tensor::UINT8);
     m_graph->global_tensors()["print"] = print;
@@ -255,7 +256,7 @@ bool MqBuilder::phase_kernel_adapt()
 {
     set_layer_id(m_graph);
 
-    //kernel adaptor
+    // kernel adaptor
     KernelAdapter kernel_adapter;
     kernel_adapter.set_graph(m_graph);
     kernel_adapter.kernel_adapt();
@@ -263,8 +264,6 @@ bool MqBuilder::phase_kernel_adapt()
     m_graph->set_attr("const_tensors", const_tensors);
     auto ws_map = kernel_adapter.get_ws_map();
     m_graph->set_attr("ws_map", ws_map);
-    auto surface_tensors = kernel_adapter.get_surface_tensors();
-    m_graph->set_attr("surface_tensors", surface_tensors);
     auto device_lib_names = kernel_adapter.get_device_lib();
     auto host_lib_names = kernel_adapter.get_host_lib();
     m_graph->set_attr("device_lib_names", device_lib_names);
@@ -281,6 +280,17 @@ bool MqBuilder::phase_mem_alloc()
     scheduler.set_gm_size({0});
     std::map<NodePtr, std::set<TensorPtr>> ws_map = m_graph->attrs()["ws_map"];
     scheduler.set_ws(ws_map);
+
+    // uint32_t numa_size = 1 * 1024 * 1024 * 1024;
+    // int numa_num = 8;
+    // std::vector<size_t> mem_size;
+    // for (auto i = 0; i < numa_num; ++i)
+    // {
+    //     mem_size.push_back(numa_size);
+    // }
+    // NumaCfg numa_cfg(numa_num, numa_num, mem_size);
+    // scheduler.set_numacfg(numa_cfg);
+
     scheduler.disable_sm();
     std::set<TensorPtr> not_reuse_tensor;
     std::set<TensorPtr> skip_tensors;
@@ -296,7 +306,7 @@ bool MqBuilder::phase_mem_alloc()
     }
     for (auto gt : m_graph->global_tensors())
     {
-        if (gt.second && gt.second->mem_size())
+        if (gt.second && gt.second->name() == "stack" && gt.second->mem_size())
         {
             not_reuse_tensor.insert(gt.second);
         }
@@ -327,13 +337,31 @@ bool MqBuilder::phase_mem_alloc()
         }
     }
 
+    std::vector<TensorPtr> const_tensors = m_graph->attrs()["const_tensors"];
+    for (auto t : const_tensors)
+    {
+        skip_tensors.insert(t);
+    }
+
+    // aligned to 512 required by EMU
+    for (auto t : input_tensors)
+    {
+        auto ptr = t->memory_offset()->get_base_object();
+        ptr->align = 512;
+    }
+    for (auto t : output_tensors)
+    {
+        auto ptr = t->memory_offset()->get_base_object();
+        ptr->align = 512;
+    }
+
     auto data_slots = scheduler.mem_allocate(not_reuse_tensor, input_tensors, output_tensors, skip_tensors);
     for (unsigned int i = 0; i < data_slots.size(); ++i)
     {
         data_slots[i]->buffer_id = i;
     }
     m_graph->set_attr("data_slots", data_slots);
-    std::vector<ConstTensorPtr> const_tensors = m_graph->attrs()["const_tensors"];
+
     auto const_slots = scheduler.const_allocate(const_tensors);
     m_graph->set_attr("const_slots", const_slots);
 
@@ -342,8 +370,30 @@ bool MqBuilder::phase_mem_alloc()
 
 bool MqBuilder::phase_device_code_gen()
 {
-    CodeGenerator code_gen;
     std::map<std::string, std::string> device_lib_names = m_graph->attrs()["device_lib_names"];
+    if (BuilderConfig::get<bool>("two_stage_compilation"))
+    {
+        INFO() << "two stage compilation";
+        for (auto pair : device_lib_names)
+        {
+            INFO() << "kernel: " << pair.first << " lib: " << pair.second;
+            if (pair.first == "isnan_naive_float32_int32")
+            {
+                device_lib_names[pair.first] = "isnan_x3u_kernel_obj.bc";
+            }
+            else
+            {
+                ERROR() << "unsupport";
+            }
+        }
+        DefferredCompiler def_comp;
+        def_comp.set_graph(m_graph);
+        def_comp.config(device_lib_names);
+        auto device_obj_names = def_comp.compile_to_obj();
+        device_lib_names = device_obj_names;
+    }
+
+    CodeGenerator code_gen;
     code_gen.set_graph(m_graph);
     code_gen.set_device_lib(device_lib_names);
     code_gen.gen_device_code(m_elf->get_cpself());
@@ -353,7 +403,7 @@ bool MqBuilder::phase_device_code_gen()
 
 bool MqBuilder::phase_assemble()
 {
-    //Assembler
+    // Assembler
     Assembler assembler;
     assembler.set_graph(m_graph);
     assembler.set_elf(m_elf->get_cpself());
@@ -368,8 +418,6 @@ bool MqBuilder::phase_assemble()
     m_graph->set_attr("params", params);
     auto tensor_index_map = assembler.get_tensor_index_map();
     m_graph->set_attr("tensor_index_map", tensor_index_map);
-    auto const_index_map = assembler.get_const_index_map();
-    m_graph->set_attr("const_index_map", const_index_map);
 
     return true;
 }
@@ -381,15 +429,13 @@ bool MqBuilder::phase_host_code_gen()
     code_gen.set_graph(m_graph);
     code_gen.set_host_lib(host_lib_names);
     code_gen.gen_host_code(m_elf);
-    auto header = code_gen.get_cpshost_header();
-    m_graph->set_attr("header", header);
 
     return true;
 }
 
 bool MqBuilder::phase_gen_obj()
 {
-    //gen elf
+    // gen elf
     ObjectGenerator object_generator;
     std::vector<std::vector<task_t>> streams = m_graph->attrs()["streams"];
     object_generator.set_streams(streams);
@@ -399,10 +445,10 @@ bool MqBuilder::phase_gen_obj()
     object_generator.set_params(params);
     std::map<TensorPtr, uint32_t> tensor_index_map = m_graph->attrs()["tensor_index_map"];
     object_generator.set_tensor_index_map(tensor_index_map);
-    std::map<ConstTensorPtr, uint32_t> const_index_map = m_graph->attrs()["const_index_map"];
-    object_generator.set_const_index_map(const_index_map);
     std::vector<MemoryObjectPtr> data_slots = m_graph->attrs()["data_slots"];
     object_generator.set_slots(data_slots);
+    std::vector<MemoryObjectPtr> const_slots = m_graph->attrs()["const_slots"];
+    object_generator.set_const_slots(const_slots);
     object_generator.set_graph(m_graph);
     std::vector<ConstTensorPtr> const_tensors = m_graph->attrs()["const_tensors"];
     object_generator.set_constant(const_tensors);

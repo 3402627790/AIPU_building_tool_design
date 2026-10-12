@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -16,14 +16,12 @@
 //--------------------------------------------------------------------------------
 /*
  * @Author: Lang Hu
- * @Date: 2024-10-28 11:52:59
+ * @Date: 2026-09-07 10:32:11
  * @Last Modified by: Lang Hu
- * @Last Modified time: 2024-10-28 11:52:59
+ * @Last Modified time: 2026-09-07 10:32:11
  */
 #include "builder/builder.h"
-#include "builder/lowering/lowering.h"
 #include "builder/mem_remapping.h"
-#include "builder/optimizer.h"
 #include "builder/param_check.h"
 #include "builder/plugin.h"
 #include "builder/ro_generator.h"
@@ -34,23 +32,12 @@
 
 namespace aipubt
 {
-MEMORY_REMAPPING_OP(OpType_CacheUpdate)
+MEMORY_REMAPPING_OP(OpType_PagedCacheUpdate)
 {
-    int index = get_real_node(node)->params()["block_index"];
-    auto inp0 = node->inputs()[0];
-    size_t block_size = inp0->mem_size() / inp0->shape()[0];
-    if (inp0->shape().dim() == 3)
-    {
-        block_size = inp0->mem_size();
-    }
-
-    auto out0 = node->outputs()[0];
-    out0->memory_offset()->relative_offset = index * block_size;
-    out0->memory_offset()->set_base_offset(inp0->memory_offset());
-
-    auto out1 = node->outputs()[1];
-    out1->memory_offset()->relative_offset = 0;
-    out1->memory_offset()->set_base_offset(inp0->memory_offset());
+    auto out = node->outputs()[0];
+    auto inp = node->inputs()[0];
+    out->memory_offset()->relative_offset = 0;
+    out->memory_offset()->set_base_offset(inp->memory_offset());
 }
-MEMORY_REMAPPING_OP_END(OpType_CacheUpdate);
+MEMORY_REMAPPING_OP_END(OpType_PagedCacheUpdate);
 } // namespace aipubt

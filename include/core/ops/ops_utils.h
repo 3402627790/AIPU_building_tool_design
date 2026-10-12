@@ -7,7 +7,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -147,6 +147,15 @@ namespace ops
      */
     bool is_unibroadcastable(const std::vector<int32_t> &input1_dim,
                              const std::vector<int32_t> &input2_dim);
+
+    /**
+     * @brief Computes the output shape after applying NumPy broadcasting rules to multiple input shapes.
+     * @param inputs A vector of input shapes, each shape is a TensorShape.
+     * @return If all shapes can be broadcast, returns the broadcasted shape;
+     *         If broadcasting is not needed (all shapes are identical), returns the first input shape;
+     *         If broadcasting is not possible, returns an empty std::vector<int32_t>.
+     */
+    std::vector<int32_t> get_broadcast_shape(std::vector<TensorShape> inputs);
 
     /**
      * @brief This API will make inputs support multibroadcast through insert tile and reshape.

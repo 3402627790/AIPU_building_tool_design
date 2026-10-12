@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -36,7 +36,7 @@ inline size_t aligned(size_t s, size_t align = 256)
 namespace aipubt
 {
 
-BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
+static BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info, size_t &surface_num)
 {
     auto stack = g->global_tensors()["stack"];
     auto print = g->global_tensors()["print"];
@@ -52,7 +52,7 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
     };
 
     BuilderParams params;
-    params.push_back(stack->memory_offset()->get_base_object()->size);
+    params.push_back(32 * 1024); //stack point size for a warp
     params.push_back(stack);
     params.push_back(0);
     params.push_back(0);            // reserve0
@@ -61,7 +61,6 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
     params.push_back(info.grid.x);  // griddim.x
     params.push_back(info.block.y); // blkdim.y
 
-    std::vector<SurfacePtr> surfaces;
     for (auto &arg : info.args)
     {
         if (arg.tensor)
@@ -77,13 +76,14 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
         }
         else if (arg.const_tensor)
         {
-            params.push_back(arg.const_tensor);
+            TensorPtr t = arg.const_tensor.operator std::shared_ptr<ConstTensor>();
+            params.push_back(t);
             params.push_back(0);
         }
         else if (arg.surface)
         {
-            surfaces.push_back(arg.surface);
             params.push_back(get_surface_index(arg.surface));
+            params.push_back(0);
         }
         else if (arg.param_list)
         {
@@ -110,17 +110,32 @@ BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
         params.resize(align_size, 0);
     }
 
-    for (auto surface : surfaces)
+    surface_num = surface_index_map.size();
+    if (surface_num > 0)
     {
-        params.push_back(surface);
-        params.push_back(0);
+        std::vector<std::pair<SurfacePtr, uint32_t>> vec(surface_index_map.begin(), surface_index_map.end());
+        std::sort(vec.begin(), vec.end(),
+            [](const auto &a, const auto &b) {
+                return a.second < b.second;
+            });
 
-        auto surface_desc = surface->get_surf_desc();
-        const uint32_t *ptr = reinterpret_cast<const uint32_t *>(&surface_desc);
-        params.push_back(ptr[0]);
-        params.push_back(ptr[1]);
+        for (const auto &[surface, _] : vec)
+        {
+            params.push_back(std::static_pointer_cast<Tensor>(surface));
+            params.push_back(0);
+
+            auto &surface_desc = surface->get_surf_desc();
+            params.push_back(surface_desc[0]);
+            params.push_back(surface_desc[1]);
+        }
     }
     return params;
+}
+
+BuilderParams get_kernel_params(GraphPtr g, const KernelInfo &info)
+{
+    size_t surface_num = 0;
+    return get_kernel_params(g, info, surface_num);
 }
 
 bool Assembler::set_graph(GraphPtr g)
@@ -151,20 +166,6 @@ uint32_t Assembler::get_tensor_index(const TensorPtr t)
         m_tensor_index++;
     }
     return m_tensor_index_map[t];
-}
-
-uint32_t Assembler::get_const_index(const ConstTensorPtr t)
-{
-    if (!m_const_index_map.count(t))
-    {
-        m_const_index_map[t] = m_tensor_index;
-        m_tensor_index++;
-    }
-    else
-    {
-        WARN() << "already have " << t->name();
-    }
-    return m_const_index_map[t];
 }
 
 uint32_t Assembler::get_task_id()
@@ -262,6 +263,12 @@ void Assembler::insert_empty_task(GraphPtr sg, std::vector<task_t> &stream, size
     if (first_node && first_node->attrs().count("invld_src")) //first packet need invalidate
     {
         auto src_node = first_node->get_attr<NodeRef>("invld_src").lock();
+        auto src_kernel_infos = src_node->get_attr<KernelInfos>(Constants::kernel_infos);
+        if (src_kernel_infos.size() == 0)
+        {
+            DEBUG() << "src node " << src_node->name() << " kernel is empty, will not invalidate";
+            return;
+        }
         if (!src_node->attrs().count(Constants::stream_id))
         {
             ERROR() << src_node << " has no stream";
@@ -302,10 +309,10 @@ void Assembler::insert_empty_task(GraphPtr sg, std::vector<task_t> &stream, size
 void Assembler::setup_stream_offset(size_t first_kernel, std::vector<task_t> &stream, size_t stream_id)
 {
     auto find_stream_index = [this](NodePtr n, const std::vector<task_t> &stream) -> int {
-        for (size_t i = 0; i < stream.size(); ++i)
+        for (int i = stream.size() - 1; i >= 0; --i)
         {
             auto task = stream.at(i);
-            if (m_task_node_map[task.id] == n)
+            if (m_task_node_map.count(task.id) && m_task_node_map.at(task.id) == n)
             {
                 return i;
             }
@@ -316,10 +323,22 @@ void Assembler::setup_stream_offset(size_t first_kernel, std::vector<task_t> &st
     for (size_t i = first_kernel; i < stream.size(); ++i)
     {
         auto task = stream[i];
-        auto node = m_task_node_map[task.id];
-        if (node->attrs().count("invld_src"))
+        NodePtr node = nullptr;
+        if (m_task_node_map.count(task.id))
+        {
+            node = m_task_node_map.at(task.id);
+        }
+        if (node && node->attrs().count("invld_src"))
         {
             auto src_node = node->get_attr<NodeRef>("invld_src").lock();
+
+            auto src_kernel_infos = src_node->get_attr<KernelInfos>(Constants::kernel_infos);
+            if (src_kernel_infos.size() == 0)
+            {
+                DEBUG() << "src node " << src_node->name() << " kernel is empty, will not invalidate";
+                continue;
+            }
+
             auto src_stream_id = src_node->get_attr<size_t>(Constants::stream_id);
             if (src_stream_id != stream_id)
             {
@@ -332,23 +351,21 @@ void Assembler::setup_stream_offset(size_t first_kernel, std::vector<task_t> &st
             }
             else
             {
-                auto index = find_stream_index(src_node, stream);
-                if (index < 0)
+                auto last_index = find_stream_index(src_node, stream);
+                if (last_index == -1)
                 {
                     ERROR() << "cannot find src node in the stream";
                 }
-                auto &src_task = stream[index];
-                if ((int)i <= index)
+                else
                 {
-                    ERROR() << "invalidate source packet is later";
+                    auto &src_task = stream[last_index];
+                    if (src_task.invalid_offset > 0)
+                    {
+                        continue;
+                    }
+                    src_task.invalid_offset = i - last_index;
                 }
-                if (src_task.invalid_offset > 0)
-                {
-                    ERROR() << "invalidate source packet offset already set";
-                }
-                src_task.invalid_offset = i - index;
             }
-            //TODO: merge multiple invalidate
         }
     }
 }
@@ -389,18 +406,26 @@ void Assembler::print_debug_info()
         std::vector<std::vector<std::vector<task_t>>> queue_level;
         for (size_t i = 0; i < m_streams.size(); ++i)
         {
+            int last_level_id = 0;
             auto &stream = m_streams[i];
             for (auto task : stream)
             {
-                auto node = m_task_node_map[task.id];
                 int level_id = 0;
-                if (node->has_attr_deep(Constants::schedule_level))
+                if (!m_task_node_map.count(task.id))
                 {
-                    level_id = node->get_attr_deep(Constants::schedule_level);
-                }
-                else
+                    level_id = last_level_id;
+                }else
                 {
-                    ERROR() << "no level id";
+                    auto node = m_task_node_map.at(task.id);
+
+                    if (node->has_attr_deep(Constants::schedule_level))
+                    {
+                        level_id = node->get_attr_deep(Constants::schedule_level);
+                    }
+                    else
+                    {
+                        ERROR() << "no level id";
+                    }
                 }
                 if (queue_level.size() <= (size_t)level_id)
                 {
@@ -413,6 +438,8 @@ void Assembler::print_debug_info()
                 }
                 auto &queue = queues[i];
                 queue.push_back(task);
+
+                last_level_id = level_id;
             }
         }
 
@@ -455,11 +482,15 @@ void Assembler::print_debug_info()
                         auto task = queue[k];
                         temp_oss << (int)task.id;
 
-                        auto kernel_name = m_task_kernel_map[task.id];
-                        if (kernel_name.size() > 16)
+                        std::string kernel_name;
+                        if(m_task_kernel_map.count(task.id))
                         {
-                            kernel_name.resize(15);
-                            kernel_name += ".";
+                            kernel_name = m_task_kernel_map[task.id];
+                            if (kernel_name.size() > 16)
+                            {
+                                kernel_name.resize(15);
+                                kernel_name += ".";
+                            }
                         }
                         temp_oss << "(" << kernel_name << ")";
                         line = temp_oss.str();
@@ -489,6 +520,7 @@ void Assembler::print_debug_info()
             {
                 max_packet_size = std::max(max_packet_size, queue.size());
             }
+            std::map<int, int> task_queue_map;
             for (size_t k = 0; k < max_packet_size; ++k)
             {
                 oss.clear();
@@ -508,26 +540,30 @@ void Assembler::print_debug_info()
 
                         auto task = queue[k];
                         temp_oss << (int)task.id;
-
-                        auto node = m_task_node_map[task.id];
-
-                        if (node->attrs().count("invld_src"))
+                        task_queue_map[task.id] = k;
+                        NodePtr node = nullptr;
+                        if (m_task_node_map.count(task.id))
                         {
-                            int src_id = 0;
+                            node = m_task_node_map.at(task.id);
+                        }
+                        if (node && node->attrs().count("invld_src"))
+                        {
+                            int src_id = -1;
                             auto src_node = node->get_attr<NodeRef>("invld_src").lock();
-                            auto it = std::find_if(m_task_node_map.begin(), m_task_node_map.end(),
-                                                   [&src_node](const auto &pair) {
-                                                       return pair.second == src_node;
-                                                   });
+                            for (auto &pair : m_task_node_map)
+                            {
+                                if (src_node == pair.second)
+                                {
+                                    auto index = task_queue_map[pair.first];
+                                    auto offset = queue[index].invalid_offset;
+                                    if (index + (int)offset == (int)k)
+                                    {
+                                        src_id = pair.first;
+                                        break;
+                                    }
+                                }
+                            }
 
-                            if (it != m_task_node_map.end())
-                            {
-                                src_id = it->first;
-                            }
-                            else
-                            {
-                                ERROR() << "src node not found";
-                            }
                             temp_oss << "(invld_src: " << src_id << ")";
                         }
 
@@ -592,6 +628,11 @@ void Assembler::print_debug_info()
                         {
                             set = task.dma.sync.set_mask;
                             wait = task.dma.sync.wait_mask;
+                        }
+                        else if (task.type == TASK_TYPE_CACHE_MGR)
+                        {
+                            set = task.cache_mgr.sync.set_mask;
+                            wait = task.cache_mgr.sync.wait_mask;
                         }
                         else
                         {
@@ -660,6 +701,15 @@ void Assembler::assembly()
         }
     }
 
+    for (auto t : m_graph->get_input_tensors())
+    {
+        get_tensor_index(t);
+    }
+    for (auto t : m_graph->get_output_tensors())
+    {
+        get_tensor_index(t);
+    }
+
     // set global params
     m_params.resize(64, 0);
     size_t input_shape_offset = m_params.size() * PARAM_UNIT_SIZE;
@@ -706,6 +756,9 @@ void Assembler::assembly()
     get_tensor_index(output_shape);
 
     m_streams.resize(m_stream_bases.size());
+    // event 0-3 for dump realtime tensors
+    // host plugin event starts form 4
+    size_t event_id = m_streams.size();
 
     for (size_t l = 0; l < m_levels.size(); ++l)
     {
@@ -743,12 +796,15 @@ void Assembler::assembly()
                         auto param_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::param_bases);
                         auto stream_bases = n->get_attr<std::vector<PlaceholderPtr>>(Constants::stream_bases);
                         auto is_host_impl = n->get_attr<bool>(Constants::is_host_impl);
+                        std::vector<uint32_t> set_id, set_data;
+                        std::vector<uint32_t> wait_id, wait_ref;
                         for (size_t i = 0; i < kernel_infos.size(); ++i)
                         {
                             auto &info = kernel_infos[i];
                             auto param_base = param_bases[i];
                             auto stream_base = stream_bases[i];
-                            auto params = get_kernel_params(m_graph, info);
+                            size_t surface_num = 0;
+                            auto params = get_kernel_params(m_graph, info, surface_num);
                             *param_base = *m_param_base + m_params.size() * PARAM_UNIT_SIZE;
                             *stream_base = *m_stream_base + stream.size() * PACKET_UNIT_SIZE;
                             // DEBUG() << "kernel: " << info.kernel_name << " base 0x" << std::hex << param_base->offset();
@@ -758,25 +814,30 @@ void Assembler::assembly()
                                 b_set.id = get_task_id();
                                 b_set.type = TASK_TYPE_BARRIER_SET;
                                 b_set.invalid_offset = 0;
-                                b_set.barrier_set.addr = 0x1000000 + 0x24; // BARRIER_REG1 Register
+                                b_set.barrier_set.addr = event_id; // virtual addr, rewrite by runtime
                                 b_set.barrier_set.data = 1;
                                 b_set.barrier_set.wr_be = 0xf;
                                 b_set.barrier_set.interrupt = 1;
                                 b_set.barrier_set.timer_mode = 0;
                                 b_set.barrier_set.bar_src = 1; // src is register
                                 stream.push_back(b_set);
+                                set_id.push_back(b_set.id);
+                                set_data.push_back(b_set.barrier_set.data);
 
                                 task_t b_wait;
                                 b_wait.id = get_task_id();
                                 b_wait.type = TASK_TYPE_BARRIER_WAIT;
                                 b_wait.invalid_offset = 0;
-                                b_wait.barrier_wait.addr = 0x1000000 + 0x24; // BARRIER_REG1 Register
-                                b_wait.barrier_wait.ref = 1;
+                                b_wait.barrier_wait.addr = event_id; // virtual addr, rewrite by runtime
+                                b_wait.barrier_wait.ref = 2;
                                 b_wait.barrier_wait.rd_be = 0xf;
                                 b_wait.barrier_wait.func = 0;          // ==ref_val
                                 b_wait.barrier_wait.pool_interval = 0; // ignore for src=1
                                 b_wait.barrier_wait.bar_src = 1;       // src is register
                                 stream.push_back(b_wait);
+                                wait_id.push_back(b_wait.id);
+                                wait_ref.push_back(b_wait.barrier_wait.ref);
+                                event_id++;
                             }
                             else
                             {
@@ -816,6 +877,15 @@ void Assembler::assembly()
                                     // INFO() << "launch padding: " << (uint16_t)kernel_launch.padding;
                                 }
                                 auto [offset, size] = m_elf->get_symbol(symtab_section, kernel_name);
+                                // symtab st_value is a virtual address (sh_addr + in-section
+                                // offset); the runtime contract (TextMgr) is section-relative:
+                                // kernel_ptr = .text load base + kernel_id. Convert here, or a
+                                // non-first .text (e.g. a leading .rodata pushing sh_addr to
+                                // 0x100) biases every kernel launch by sh_addr bytes.
+                                auto text_section = m_elf->get_section(".text");
+                                auto text_sh_addr =
+                                    text_section ? static_cast<uint64_t>(text_section->get_address()) : 0;
+                                offset = (offset >= text_sh_addr) ? offset - text_sh_addr : offset;
                                 if (offset == 0 && size == 0)
                                 {
                                     ERROR() << "cannot find kernel: " << kernel_name;
@@ -842,11 +912,11 @@ void Assembler::assembly()
                                 task.kernel.block_dim[0] = dims[3];
                                 task.kernel.block_dim[1] = dims[4];
                                 task.kernel.block_dim[2] = dims[5];
-                                task.kernel.surfb_desp_num = 0;
+                                task.kernel.surfb_desp_num = surface_num;
                                 task.kernel.gb_param_offset = m_params.size() * PARAM_UNIT_SIZE;
                                 task.kernel.gb_param_size = params.size() * PARAM_UNIT_SIZE;
                                 task.kernel.ib_size = kernel_launch.ib_size;
-                                task.kernel.static_sm_bytes = kernel_launch.static_sm_bytes;
+                                task.kernel.sm_bytes = kernel_launch.static_sm_bytes + info.sharemem_size;
                                 task.kernel.param_size = kernel_launch.param_size;
                                 task.kernel.sreg_param_size = kernel_launch.sreg_param_size;
                                 task.kernel.sreg_cnt = kernel_launch.sreg_cnt;
@@ -874,7 +944,7 @@ void Assembler::assembly()
                                 b_set.id = get_task_id();
                                 b_set.type = TASK_TYPE_BARRIER_SET;
                                 b_set.invalid_offset = 0;
-                                b_set.barrier_set.addr = 0x1000000 + 0x20; // BARRIER_REG0 Register
+                                b_set.barrier_set.addr = stream_id; // virtual addr, rewrite by runtime
                                 b_set.barrier_set.data = 1;
                                 b_set.barrier_set.wr_be = 0xf;
                                 b_set.barrier_set.interrupt = 1;
@@ -886,8 +956,8 @@ void Assembler::assembly()
                                 b_wait.id = get_task_id();
                                 b_wait.type = TASK_TYPE_BARRIER_WAIT;
                                 b_wait.invalid_offset = 0;
-                                b_wait.barrier_wait.addr = 0x1000000 + 0x20; // BARRIER_REG0 Register
-                                b_wait.barrier_wait.ref = 1;
+                                b_wait.barrier_wait.addr = stream_id; // virtual addr, rewrite by runtime
+                                b_wait.barrier_wait.ref = 2;
                                 b_wait.barrier_wait.rd_be = 0xf;
                                 b_wait.barrier_wait.func = 0;          // ==ref_val
                                 b_wait.barrier_wait.pool_interval = 0; // ignore for src=1
@@ -940,7 +1010,8 @@ void Assembler::assembly()
                                         }
                                         else if (p.const_tensor)
                                         {
-                                            params.push_back(p.const_tensor);
+                                            TensorPtr t = arg.const_tensor.operator std::shared_ptr<ConstTensor>();
+                                            params.push_back(t);
                                             params.push_back(0);
                                         }
                                         else
@@ -970,6 +1041,13 @@ void Assembler::assembly()
                             }
                             m_params.insert(m_params.end(), params.begin(), params.end());
                         }
+                        if (is_host_impl)
+                        {
+                            n->set_attr(Constants::barrier_set_id, set_id);
+                            n->set_attr(Constants::barrier_set_data, set_data);
+                            n->set_attr(Constants::barrier_wait_id, wait_id);
+                            n->set_attr(Constants::barrier_wait_ref, wait_ref);
+                        }
                     }
                 }
 
@@ -990,11 +1068,29 @@ void Assembler::assembly()
         }
     }
 
+
+    // add L2 flush and invalidate at the end of each queue
+    for(auto & stream : m_streams)
+    {
+        if(stream.size() == 0)
+        {
+            continue;
+        }
+        task_t l2_cache;
+        l2_cache.id = get_task_id();
+        l2_cache.type = TASK_TYPE_CACHE_MGR;
+        l2_cache.invalid_offset = 0;
+        l2_cache.cache_mgr.op = 3; // flush & invalidate L2
+        l2_cache.cache_mgr.sync.set_mask = 0;
+        l2_cache.cache_mgr.sync.wait_mask = 0;
+        stream.push_back(l2_cache);
+    }
+
     // build remap table
     for (size_t i = 0; i < m_params.size(); ++i)
     {
         auto p = m_params[i];
-        if (p.tensor || p.surface || p.param_list)
+        if (p.tensor || p.surface || p.param_list || p.const_tensor)
         {
             auto t = p.tensor;
             if (p.surface)
@@ -1005,13 +1101,11 @@ void Assembler::assembly()
             {
                 t = p.param_list;
             }
+            else if (p.const_tensor)
+            {
+                t = p.const_tensor.operator std::shared_ptr<ConstTensor>();
+            }
             auto idx = get_tensor_index(t);
-            m_param_offset_table[i * PARAM_UNIT_SIZE] = idx;
-            m_params[i] = idx;
-        }
-        else if (p.const_tensor)
-        {
-            auto idx = get_const_index(p.const_tensor);
             m_param_offset_table[i * PARAM_UNIT_SIZE] = idx;
             m_params[i] = idx;
         }
@@ -1040,11 +1134,6 @@ std::map<uint32_t, uint32_t> Assembler::get_param_offset_table()
 std::map<TensorPtr, uint32_t> Assembler::get_tensor_index_map()
 {
     return m_tensor_index_map;
-}
-
-std::map<ConstTensorPtr, uint32_t> Assembler::get_const_index_map()
-{
-    return m_const_index_map;
 }
 
 } // namespace aipubt

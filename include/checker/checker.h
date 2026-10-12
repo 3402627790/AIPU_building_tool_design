@@ -46,6 +46,9 @@ protected:
     bool preprocess(SectionList &sec_list, const std::string &graph_name, const std::string &file_name);
     bool link_subgraphs(GraphPtr g, const std::string &graph_name, std::set<std::string> &linked);
     bool parse_and_syntax();
+    SectionTable parse_sections(SectionList &sections, GraphPtr g, bool with_header, const std::string &file_name, bool &ret);
+    bool parse_header(GraphPtr g, Section &sec, int layer_num, SectionTable &sec_table);
+    bool parse_node(GraphPtr g, Section &section, SectionTable &sec_table, std::map<std::string, std::pair<std::vector<NodePtr>, TensorPtr>> &tensor_map, std::set<int> &layer_id_set, const std::string &file_name);
 
     SectionList m_section_list;
     GraphPtr m_graph;
@@ -59,4 +62,4 @@ protected:
 bool is_DAG(GraphPtr g);
 } // namespace aipubt
 
-#endif //!CHECKER_CHECKER_H
+#endif //! CHECKER_CHECKER_H

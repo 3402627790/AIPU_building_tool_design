@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -56,14 +56,14 @@ static const std::string &get_aipuas()
         exe_path = "aipuoas";
         return exe_path;
     }
-    //1. try to use env
+    // 1. try to use env
     auto env = utils::get_env(Constants::AIPUOAS);
     if (!env.empty())
     {
         exe_path = env;
         return exe_path;
     }
-    //2. checking path
+    // 2. checking path
     auto path = utils::get_env("PATH");
     for (auto d : utils::split_string(path, ':'))
     {
@@ -77,7 +77,7 @@ static const std::string &get_aipuas()
     WARN() << "Can NOT find aipuoas in PATH. Please make sure you have added it to PATH.";
     exe_path = "aipuoas";
 #else
-    //3. use default: push the dir to path
+    // 3. use default: push the dir to path
     std::string lpath = path + "/project/ai/scratch01/toolchain/llvm/binary/bin/";
     setenv("PATH", lpath.c_str(), 1);
     exe_path = "/project/ai/scratch01/toolchain/llvm/binary/bin/aipuoas";
@@ -98,14 +98,14 @@ static const std::string &get_aipuld()
         exe_path = "aipuold";
         return exe_path;
     }
-    //1. try to use env
+    // 1. try to use env
     auto env = utils::get_env(Constants::AIPUOLD);
     if (!env.empty())
     {
         exe_path = env;
         return exe_path;
     }
-    //2. checking path
+    // 2. checking path
     auto path = utils::get_env("PATH");
     for (auto d : utils::split_string(path, ':'))
     {
@@ -119,7 +119,7 @@ static const std::string &get_aipuld()
     WARN() << "Can NOT find aipuold in PATH. Please make sure you have added it to PATH.";
     exe_path = "aipuold";
 #else
-    //3. use default: push the dir to path
+    // 3. use default: push the dir to path
     std::string lpath = path + "/project/ai/scratch01/toolchain/llvm/binary/bin/";
     setenv("PATH", lpath.c_str(), 1);
     exe_path = "/project/ai/scratch01/toolchain/llvm/binary/bin/aipuold";
@@ -140,14 +140,14 @@ static const std::string &get_aipuocc()
         exe_path = "clang";
         return exe_path;
     }
-    //1. try to use env
+    // 1. try to use env
     auto env = utils::get_env(Constants::AIPUOCC);
     if (!env.empty())
     {
         exe_path = env;
         return exe_path;
     }
-    //2. checking path
+    // 2. checking path
     auto path = utils::get_env("PATH");
     for (auto d : utils::split_string(path, ':'))
     {
@@ -161,7 +161,7 @@ static const std::string &get_aipuocc()
     WARN() << "Can NOT find aipuocc in PATH. Please make sure you have added it to PATH.";
     exe_path = "aipuocc";
 #else
-    //3. use default: push the dir to path
+    // 3. use default: push the dir to path
     std::string lpath = path + "/project/ai/scratch01/toolchain/llvm/binary/bin/";
     setenv("PATH", lpath.c_str(), 1);
     exe_path = "/project/ai/scratch01/toolchain/llvm/binary/bin/aipuocc";
@@ -296,9 +296,9 @@ static const std::string &get_cpsld()
     WARN() << "Can NOT find aipuold in PATH. Please make sure you have added it to PATH.";
     exe_path = "aipuold";
 #else
-    //3. use default: push the dir to path
-    // std::string lpath = path + "/project/ai/scratch01/toolchain/llvm/binary/bin/";
-    // setenv("PATH", lpath.c_str(), 1);
+    // 3. use default: push the dir to path
+    //  std::string lpath = path + "/project/ai/scratch01/toolchain/llvm/binary/bin/";
+    //  setenv("PATH", lpath.c_str(), 1);
     exe_path = "/project/ai/scratch01/compass-toolkit/compiler/latest/bin/cpsld";
 #endif
     return exe_path;
@@ -394,11 +394,14 @@ static std::string get_hostcc()
 
 #if RELEASE_VERSION
     WARN() << "Can NOT find CPSHOSTCC. Use g++ by default.";
+    auto exe_path = "g++";
+#else
+    auto exe_path = "/arm/tools/gnu/gcc/13.3.0/rhe7-x86_64/bin/g++";
 #endif
-    return "g++";
+    return exe_path;
 }
 
-static std::string get_devkit_path()
+std::string get_devkit_path()
 {
     auto env = utils::get_env(Constants::CPSDEVKIT_PATH);
     if (env.size())
@@ -415,22 +418,39 @@ static std::string get_devkit_path()
     return devkit_path;
 }
 
-int cpshostcc(const std::string &c_file, const std::string &out)
+int cpshostcc(const std::string &c_file,
+              const std::vector<std::string> &objs,
+              const std::string &out)
 {
     std::vector<std::string> args;
     args.push_back(get_hostcc());
     args.push_back("-fPIC");
     args.push_back("-shared");
     args.push_back("-O2");
+    args.push_back("-gdwarf-4");
     args.push_back(c_file);
-    auto devkit_path = get_devkit_path();
-    if (devkit_path.size())
+    for (auto &obj : objs)
     {
-        args.push_back("-I" + devkit_path + "/include");
+        args.push_back(obj);
+    }
+    auto inc_path = utils::get_env(Constants::BTRT_INC_PATH);
+    auto lib_path = utils::get_env(Constants::BTRT_LIB_PATH);
+    auto devkit_path = get_devkit_path();
+    if (inc_path.size() && lib_path.size())
+    {
+        INFO() << "Using BTRT_INC_PATH: " << inc_path;
+        INFO() << "Using BTRT_LIB_PATH: " << lib_path;
+        args.push_back("-I" + inc_path);
+        args.push_back("-L" + lib_path);
+    }
+    else if (devkit_path.size())
+    {
+        args.push_back("-I" + devkit_path + "/include/modules/btrt");
         args.push_back("-L" + devkit_path + "/lib");
     }
     args.push_back("-laipubtrt");
     args.push_back("-ldl");
+    args.push_back("-lpthread");
     args.push_back("-o");
     args.push_back(out);
     auto cmd = utils::join_string(" ", args);
@@ -505,4 +525,4 @@ static void load_toolchain()
     static ToolChainHelper _tool_chain_helper;
 #endif // OS_ANDROID
 }
-} //namespace aipubt
+} // namespace aipubt

@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -251,6 +251,83 @@ namespace ops
         Trunc,
     };
 
+    enum class MoeRoutingMethod : int32_t
+    {
+        // invilid
+        None = 0x0,
+        // logits -> Softmax(all E) -> TopK -> selected weights (normalized by summation)
+        // Mixtral,Qwen3.5-MoE
+        RenormalizeNaive,
+        // logits -> TopK -> Softmax(selected K)
+        // GPT-OSS
+        Renormalize,
+        // logits -> scoring_func -> select ids -> from no correction-bias scores ->
+        // Gather -> normalize by sum -> route_scale
+        // DeepSeek-V4 learned/hash router
+        Deepseekv3,
+    };
+
+    // Method for selecting expert ID
+    enum class MoeRoutingSelect : int32_t
+    {
+        None = 0x0,
+        Topk,
+        Hash,
+    };
+
+    // for MoeRouter scoring_func
+    enum class MoeRouterScoringFunc : int32_t
+    {
+        Softmax = 0x0,
+        Raw,
+        Sqrtsoftplus,
+    };
+
+    enum class GroupedExpertsLayout : int32_t
+    {
+        E_O_I = 0x0,
+        E_I_O,
+    };
+
+    enum class GroupedExpertsGL : int32_t
+    {
+        Concatenated = 0x0,
+        Interleaved,
+    };
+
+    enum class UpdateRule : int32_t
+    {
+        GatedDelta = 0x0,
+        Linear,
+        Gated,
+        Delta,
+    };
+
+    struct MoeRoutingParam
+    {
+        // --------required------
+        // Distinguishing the order of Softmax and TopK.
+        MoeRoutingMethod routing_method = MoeRoutingMethod::None;
+        int32_t num_experts = -1;
+        int32_t top_k = -1;
+        int32_t hidden_size = -1;
+        MoeRoutingSelect router_select = MoeRoutingSelect::None;
+        MoeRouterScoringFunc scoring_func = MoeRouterScoringFunc::Softmax;
+
+        // -------optional-----------
+        // GPT-OSS//DeepSeek-V4
+        TensorPtr bias = nullptr;
+
+        Tensor::Dtype top_k_weights_dtype = Tensor::Dtype::VOID;
+        // DeepSeek-V4
+        float route_scale = -1;
+        // DeepSeek-V4
+        double norm_eps = 1;
+
+        // when router_select=MoeRoutingSelect::Hash
+        TensorPtr expert_id_table = nullptr;
+    };
+
     struct Activation
     {
         Activation() {}
@@ -472,7 +549,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
      *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
      *                the data tensor elementwise, where 'alpha' is the slope parameter.
@@ -647,7 +724,7 @@ namespace ops
      *                              - Activation("RELU")
      *                              - Activation("TANH")
      *                              - Activation("SIGMOID")
-     *                              - Activation("LEAKYRELU", negative_slope_value)
+     *                              - Activation("LEAKYRELU", negative_slope.value)
      *                              - Activation("THRESHOLDEDRELU", alpha)
      *                              - Activation("HARDSIGHMOID", alpha, beta)
      *                              - Activation("ELU", alpha)
@@ -756,6 +833,41 @@ namespace ops
     TensorPtr bias_add(TensorPtr input,
                        TensorPtr bias,
                        const Quantization &quant = {});
+
+    /**
+     * @brief It is used in autonomous driving vision-based 3D object
+     *        detection to efficiently transform 2D image features into bird's-eye views.
+     *        It's an upgrade from the classic BEVPool,
+     *        significantly improving forward inference and training speeds through optimized memory access
+     *        and parallel computing.
+     *        It's widely used in mainstream end-to-end viewpoint transformation frameworks such as BEVDet.
+     * @param[in] feature A "TensorPtr", specifying the 'feature' tensor.
+     * @param[in] depth A "TensorPtr", specifying the 'depth' tensor.
+     * @param[in] ranks_depth A "TensorPtr", specifying the 'ranks_depth' tensor.
+     *                        It is the depth bin index corresponding to each hit,
+     *                        used in `avg` mode to count the number of hits by voxel.
+     * @param[in] ranks_feat A "TensorPtr", specifying the '`ranks_feat`' tensor.
+     *                       It is the row number (source feature position) of each hit in the weighted features.
+     * @param[in] ranks_bev A "TensorPtr", specifying the 'ranks_bev' tensor.
+     *                      It is the BEV voxel linear index mapped to for each hit.
+     * @param[in] interval_starts A "TensorPtr", specifying the 'interval_starts' tensor.
+     *                            It is the starting offset of the `i`th interval in `ranks_*`.
+     * @param[in] interval_lengths A "TensorPtr", specifying the 'interval_lengths' tensor.
+     *                             It is the number of BEV voxels hit in the `i`th interval.
+     * @param[in] grid_size BEV grid {grid_y, grid_x}. If there is only one value, both x and y are this value.
+     * @param[in] quant A Quantization class ,include scale and zeropoint,
+     *                  specify the quantization of the output tensor.
+     * @return A output "TensorPtr".
+     */
+    TensorPtr bev_pool_v2(TensorPtr feature,
+                          TensorPtr depth,
+                          TensorPtr ranks_depth,
+                          TensorPtr ranks_feat,
+                          TensorPtr ranks_bev,
+                          TensorPtr interval_starts,
+                          TensorPtr interval_lengths,
+                          std::vector<int32_t> grid_size,
+                          const Quantization &quant = {});
 
     /**
      * @brief Returns the tensor resulting from performing the bitwise and operation elementwise on the input tensors.
@@ -1039,7 +1151,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1087,7 +1199,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1130,7 +1242,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1172,7 +1284,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1213,7 +1325,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1263,7 +1375,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1310,7 +1422,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1357,7 +1469,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1397,39 +1509,6 @@ namespace ops
      * @return A "TensorPtr" list, specifying the output tensors [collapsed_labels, new_seq_length].
      */
     std::vector<TensorPtr> collapse_repeated(TensorPtr labels, TensorPtr seq_length);
-
-    /**
-     * @brief The operator rearranges column blocks back into a multidimensional image.
-     * @param[in] input A "TensorPtr", specifying input tensor.
-     *                  Input data tensor to be rearranged from column blocks back into an image.S
-     *                  This is a 3-dimensional tensor containing [N, C * n-ary- product(block_shape), L], where N is batch dimension,
-     *                  C is image channel dimension and L is number of blocks.The blocks are enumerated in increasing lexicographic-order
-     *                  of their indices.For example, with an image-size 10*20 and block-size 9*18, there would be 2*3 blocks,
-     *                  enumerated in the order block(0, 0), block(0, 1), block(0, 2), block(1, 0), block(1, 1), block(1, 2).
-     * @param[in] image_shape The shape of the spatial dimensions of the image after rearranging the column blocks.
-     *                        This is a 1-dimensional tensor with size of at least 2, containing the value [H_img, W_img] for a 2-D image
-     *                        or [dim_i1, dim_i2, ..., dim_iN] for a N-D image.
-     * @param[in] block_shape The shape of the block to apply on the input.This is a 1-dimensional tensor of size of at least 2,
-     *                        containing the value [H_block, W_block] for a 2-D image or [dim_b1, dim_b2,..., dim_bN] for a N-D block.
-     *                        This is the block-shape before dilation is applied to it.
-     * @param[in] strides 1-dimensional tensor with stride value along each spatial axis. If not present, the stride defaults to 1 along each spatial axis.
-     * @param[in] padding 1-dimensional tensor with padding value for the beginning and ending along each spatial axis,
-     *                    it can take any value greater than or equal to 0. The value represent the number of pixels added to the beginning
-     *                    and end part of the corresponding axis. pads format should be as follow [x1_begin, x2_begin ... x1_end, x2_end,...],
-     *                    where xi_begin is the number of pixels added at the beginning of axis i and xi_end is the number of pixels
-     *                    added at the end of axis i. If not present, the padding defaults to 0 along start and end of each spatial axis.
-     * @param[in] dilations 1-dimensional tensor with dilation value along each spatial axis of the image.
-     *                      If not present, the dilation defaults to 1 along each spatial axis of the image.
-     * @param[in] quant A "Quantization" object, specifying output quantization parameters.
-     * @return A "TensorPtr", specifying the output tensor.
-     */
-    TensorPtr col2im(TensorPtr input,
-                     TensorPtr image_shape,
-                     TensorPtr block_shape,
-                     const std::vector<int32_t> &strides = {},
-                     Padding padding = Padding({0, 0, 0, 0}),
-                     const std::vector<int32_t> &dilations = {},
-                     const Quantization &quant = {});
 
     /**
      * @brief Calculates the hyperbolic cosine of the given input tensor element-wise.
@@ -1646,7 +1725,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -1654,6 +1733,7 @@ namespace ops
      *                  If not set, used default.
      * @param[in] output_shape  Optional "TensorShape" object, specifying the output shape.
      *                          If not present, should be inferred.
+     * @param[in] accumulation_dtype  accumulation data dtype.
      * @return A "TensorPtr", its shape and scale/offset are described by above parameters.
      */
     TensorPtr depthwise_conv2d(TensorPtr input,
@@ -1665,7 +1745,8 @@ namespace ops
                                const std::vector<int32_t> &dilations = {},
                                const Quantization &quant = {},
                                int32_t quantization_dim = 0,
-                               const TensorShape &output_shape = {});
+                               const TensorShape &output_shape = {},
+                               Tensor::Dtype accumulation_dtype = Tensor::FP32);
 
     /**
      * @brief Deuantize the input tensor
@@ -1798,184 +1879,12 @@ namespace ops
     TensorPtrList dummy(TensorPtrList inputs);
 
     /**
-     * @brief Performs elementwise addition of each of the input tensors (with NumPy-style broadcasting support).
-     *        All inputs and outputs must have the same data type.
-     *        Besides, this operator supports multidirectional (that is, NumPy-style) broadcasting
-     *        and sums all the input tensors into the output tensor under the OPERATOR LIBRARY support.
-     * @param[in] input1 A "TensorPtr", specifying the first tensor.
-     * @param[in] input2 A "TensorPtr", specifying the second tensor, which must have the same
-     *            data type with @p input1, but can have different scale and offset with @p input1.
-     * @param[in] with_activation An Activation object, default empty, represents "NONE", supports bellow:
-     *            - Activation("NONE")
-     *            - Activation("RELU")
-     *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
-     *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
-     *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
-     *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
-     *                the data tensor elementwise, where 'alpha' is the slope parameter.
-     *            - Activation("CLIP", clip_min, clip_max)
-     *                Where, clip_min (or clip_max) means the minimum (or maximum) saturation threshold
-     *                during the clip operation to produce the output tensor after convolution.
-     *            - Activation("PRELU", negative_slope)
-     *                  PRelu takes input data (Tensor) and slope tensor as input,then produces one output data (Tensor) where the function,
-     *                  f(x) = slope * x for x < 0, f(x) = x for x >= 0, is applied to the data tensor elementwise.
-     *                  This operator supports unidirectional broadcasting (tensor slope should be
-     *                  unidirectional broadcastable to the input tensor).
-     *            - ...
-     * @param[in] quant A "Quantization" object, specifying the output scale/offset.
-     * @return A "TensorPtr", specifying the output tensor pointer.
-     *         It has the same data type as @p inputs. The shape is after multibroadcast shape.
-     *         Output can have the different scale and offset with @p inputs.
+     * @param[in] input A "TensorPtr", specifying the input tensor.
+     * @param[in] quant A "Quantization" object, specifying the output quantization parameter.
+     * @return A "TensorPtr", specifying the output tensor, which has the same shape with @p input.
+     *         Its data type will be inferred by @p quant.
      */
-    TensorPtr elementwise_add(TensorPtr input1,
-                              TensorPtr input2,
-                              const Activation &with_activation = {},
-                              const Quantization &quant = {});
-
-    /**
-     * @brief Performs elementwise maximum of each of the input tensors (with NumPy-style broadcasting support).
-     *        All inputs and outputs must have the same data type.
-     *        Besides, this operator supports multidirectional (that is, NumPy-style) broadcasting
-     *        and sums all the input tensors into the output tensor under the OPERATOR LIBRARY support.
-     * @param[in] input1 A "TensorPtr", specifying the first tensor.
-     * @param[in] input2 A "TensorPtr", specifying the second tensor, which must have the same
-     *            data type with @p input1, but can have different scale and offset with @p input1.
-     * @param[in] with_activation An Activation object, default empty, represents "NONE", supports bellow:
-     *            - Activation("NONE")
-     *            - Activation("RELU")
-     *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
-     *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
-     *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
-     *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
-     *                the data tensor elementwise, where 'alpha' is the slope parameter.
-     *            - Activation("CLIP", clip_min, clip_max)
-     *                Where, clip_min (or clip_max) means the minimum (or maximum) saturation threshold
-     *                during the clip operation to produce the output tensor after convolution.
-     *            - Activation("PRELU", negative_slope)
-     *                  PRelu takes input data (Tensor) and slope tensor as input,then produces one output data (Tensor) where the function,
-     *                   f(x) = slope * x for x < 0, f(x) = x for x >= 0, is applied to the data tensor elementwise.
-     *                   This operator supports unidirectional broadcasting (tensor slope should be
-     *                   unidirectional broadcastable to the input tensor).
-     *            - ...
-     * @param[in] quant A "Quantization" object, specifying the output scale/offset.
-     * @return A "TensorPtr", specifying the output tensor pointer.
-     *         It has the same data type as @p inputs. The shape is after multibroadcast shape.
-     *         Output can have the different scale and offset with @p inputs.
-     */
-    TensorPtr elementwise_max(TensorPtr input1,
-                              TensorPtr input2,
-                              const Activation &with_activation = {},
-                              const Quantization &quant = {});
-
-    /**
-     * @brief Performs elementwise minimum of each of the input tensors (with NumPy-style broadcasting support).
-     *        All inputs and outputs must have the same data type.
-     *        Besides, this operator supports multidirectional (that is, NumPy-style) broadcasting
-     *        and sums all the input tensors into the output tensor under the OPERATOR LIBRARY support.
-     * @param[in] input1 A "TensorPtr", specifying the first tensor.
-     * @param[in] input2 A "TensorPtr", specifying the second tensor, which must have the same
-     *            data type with @p input1, but can have different scale and offset with @p input1.
-     * @param[in] with_activation An Activation object, default empty, represents "NONE", supports bellow:
-     *            - Activation("NONE")
-     *            - Activation("RELU")
-     *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
-     *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
-     *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
-     *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
-     *                the data tensor elementwise, where 'alpha' is the slope parameter.
-     *            - Activation("CLIP", clip_min, clip_max)
-     *                Where, clip_min (or clip_max) means the minimum (or maximum) saturation threshold
-     *                during the clip operation to produce the output tensor after convolution.
-     *            - Activation("PRELU", negative_slope)
-     *                  PRelu takes input data (Tensor) and slope tensor as input,then produces one output data (Tensor) where the function,
-     *                  f(x) = slope * x for x < 0, f(x) = x for x >= 0, is applied to the data tensor elementwise.
-     *                  This operator supports unidirectional broadcasting (tensor slope should be
-     *                  unidirectional broadcastable to the input tensor).
-     *            - ...
-     * @param[in] quant A "Quantization" object, specifying the output scale/offset.
-     * @return A "TensorPtr", specifying the output tensor pointer.
-     *         It has the same data type as @p inputs. The shape is after multibroadcast shape.
-     *         Output can have the different scale and offset with @p inputs.
-     */
-    TensorPtr elementwise_min(TensorPtr input1,
-                              TensorPtr input2,
-                              const Activation &with_activation = {},
-                              const Quantization &quant = {});
-
-    /**
-     * @brief Performs element-wise multiplication of the input tensors.
-     *        All inputs and outputs must have the same data type.
-     *        Besides, this operator supports multidirectional (that is, NumPy-style) broadcasting
-     *        and sums all the input tensors into the output tensor under the OPERATOR LIBRARY support.
-     * @param[in] input1 A "TensorPtr", specifying the first tensor.
-     * @param[in] input2 A "TensorPtr", specifying the second tensor, which must have the same
-     *            data type with @p input1, but can have different scale and offset with @p input1.
-     * @param[in] with_activation An Activation object, default empty, represents "NONE", supports bellow:
-     *            - Activation("NONE")
-     *            - Activation("RELU")
-     *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
-     *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
-     *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
-     *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
-     *                the data tensor elementwise, where 'alpha' is the slope parameter.
-     *            - Activation("CLIP", clip_min, clip_max)
-     *                Where, clip_min (or clip_max) means the minimum (or maximum) saturation threshold
-     *                during the clip operation to produce the output tensor after convolution.
-     *            - Activation("PRELU", negative_slope)
-     *                  PRelu takes input data (Tensor) and slope tensor as input,then produces one output data (Tensor) where the function,
-     *                  f(x) = slope * x for x < 0, f(x) = x for x >= 0, is applied to the data tensor elementwise.
-     *                  This operator supports unidirectional broadcasting (tensor slope should be
-     *                  unidirectional broadcastable to the input tensor).
-     *            - ...
-     * @param[in] quant A "Quantization" object, specifying the output scale/offset.
-     * @return A "TensorPtr", specifying the output tensor pointer.
-     *         It has the same data type as @p inputs. The shape is after multibroadcast shape.
-     *         Output can have the different scale and offset with @p inputs.
-     */
-    TensorPtr elementwise_mul(TensorPtr input1,
-                              TensorPtr input2,
-                              const Activation &with_activation = {},
-                              const Quantization &quant = {});
-
-    /**
-     * @brief Performs elementwise subtraction of each of the input tensors (with NumPy-style broadcasting support).
-     *        All inputs and outputs must have the same data type.
-     *        Besides, this operator supports multidirectional (that is, NumPy-style) broadcasting
-     *        and sums all the input tensors into the output tensor under the OPERATOR LIBRARY support.
-     * @param[in] input1 A "TensorPtr", specifying the first tensor.
-     * @param[in] input2 A "TensorPtr", specifying the second tensor, which must have the same
-     *            data type with @p input1, but can have different scale and offset with @p input1.
-     * @param[in] with_activation An Activation object, default empty, represents "NONE", supports bellow:
-     *            - Activation("NONE")
-     *            - Activation("RELU")
-     *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
-     *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
-     *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
-     *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
-     *                the data tensor elementwise, where 'alpha' is the slope parameter.
-     *            - Activation("CLIP", clip_min, clip_max)
-     *                Where, clip_min (or clip_max) means the minimum (or maximum) saturation threshold
-     *                during the clip operation to produce the output tensor after convolution.
-     *            - Activation("PRELU", negative_slope)
-     *                  PRelu takes input data (Tensor) and slope tensor as input,then produces one output data (Tensor) where the function,
-     *                  f(x) = slope * x for x < 0, f(x) = x for x >= 0, is applied to the data tensor elementwise.
-     *                  This operator supports unidirectional broadcasting (tensor slope should be
-     *                  unidirectional broadcastable to the input tensor).
-     *            - ...
-     * @param[in] quant A "Quantization" object, specifying the output scale/offset.
-     * @return A "TensorPtr", specifying the output tensor pointer.
-     *         It has the same data type as @p inputs. The shape is after multibroadcast shape.
-     *         Output can have the different scale and offset with @p inputs.
-     */
-    TensorPtr elementwise_sub(TensorPtr input1,
-                              TensorPtr input2,
-                              const Activation &with_activation = {},
-                              const Quantization &quant = {});
+    TensorPtr dynamic_quantize(TensorPtr input, const Quantization &quant);
 
     /**
      * @brief split a tensor into a list of sub tensors.
@@ -2188,6 +2097,38 @@ namespace ops
     TensorPtr floor(TensorPtr input, const Quantization &quant = {});
 
     /**
+     * @brief Combines an array of sliding local blocks into a large containing tensor.
+     *        The blocks of the input are summed (not averaged) into the overlapping
+     *        output locations, following torch.nn.functional.fold semantics.
+     * @param[in] input A "TensorPtr", specifying the input tensor, with shape
+     *                  [N, C * prod(kernel_size), L], where L is the number of blocks.
+     * @param[in] output_size An uint32 vector (size 2 or 3), specifying the spatial
+     *                        dimensions [H_out, W_out] or [D_out, H_out, W_out] of the output.
+     * @param[in] kernel_size An uint32 vector (size 2 or 3), specifying the block size
+     *                        [k_h, k_w] or [k_d, k_h, k_w] to apply on the input.
+     * @param[in] dilations An uint32 vector (size 2 or 3), specifying the dilation value
+     *                      along each spatial axis. If empty, defaults to 1 along each axis.
+     * @param[in] paddings An uint32 vector (size 2 or 3), specifying the padding value
+     *                     added to the beginning and end along each spatial axis.
+     *                     If empty, defaults to 0 along each axis.
+     * @param[in] strides An uint32 vector (size 2 or 3), specifying the stride value
+     *                    along each spatial axis. If empty, defaults to 1 along each axis.
+     * @param[in] layout An string, specifying the output's datalayout, only supports NCHW,
+     *                    NHWC, NCDHW, NDHWC, default value is NCHW.
+     * @param[in] quant A "Quantization" object, specifying output quantization parameters.
+     * @return A "TensorPtr", specifying the output tensor with shape
+     *         [N, C, *output_size], which has the same data type and scale/offset with @p input.
+     */
+    TensorPtr fold(TensorPtr input,
+                   const std::vector<uint32_t> &output_size,
+                   const std::vector<uint32_t> &kernel_size,
+                   const std::vector<uint32_t> &dilations = {},
+                   const std::vector<uint32_t> &paddings = {},
+                   const std::vector<uint32_t> &strides = {},
+                   const std::string &layout = "NCHW",
+                   const Quantization &quant = {});
+
+    /**
      * @brief Fractional average pooling is similar to Fractional max pooling in the pooling region generation step.
      *        The only difference is that after pooling regions are generated, a mean operation is performed instead of a max operation in each pooling region.
      *        Note that, in the following Inputs or Outputs sections:
@@ -2231,7 +2172,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *            - Activation("CLIP", clip_min, clip_max)
      *            - Activation("PRELU", negative_slope)
      *            - ...
@@ -2499,6 +2440,41 @@ namespace ops
                                   int32_t group = 32,
                                   float epsilon = 1e-5f,
                                   const Quantization &quant = {});
+
+    /**
+     * @brief GroupedExperts is responsible for expert grouped MLP computation,
+     *        including expert MLP, weight layout, bias, and activation.
+     *        Dispatch is handled by MoePermute, and weighted combine is handled by MoeUnpermute.
+     * @param[in] permuted_states A "TensorPtr",it is an output tensor from 'MoePermute' OP.
+     * @param[in] expert_offsets A "TensorPtr", it is an output tensor from 'MoePermute' OP.
+     * @param[in] expert_counts A "TensorPtr", it is an output tensor from 'MoePermute' OP.
+     * @param[in] gate_up_weights A "TensorPtr",specifying the expert 'gate_up' weight.
+     * @param[in] down_weights A "TensorPtr",specifying the expert down weight.
+     * @param[in] gate_up_weight_layout Describe the order of the weight axis.
+     * @param[in] down_weight_layout Describe the order of the weight axis.
+     * @param[in] gate_up_layout Description internal gate/up arrangement.
+     * @param[in] activation An Activation object, default empty, represents "NONE", supports bellow:
+     *            Mixtral: Activation("silu")
+     *            GPT-OSS: Activation("swiglu_oss", clamp_limit, alpha)
+     *            Qwen: Activation("silu")
+     *            Deepseek: Activation("silu",clamp_limit)
+     * @param[in] gate_up_bias Optional parameter.
+     *                         only GPT-OSS has  'gate_up_bias' tensor;
+     * @param[in] down_bias Optional parameter.
+     *                      only GPT-OSS has  'gate_up_bias' tensor;
+     * @return A "TensorPtr", specifying the output tensor.
+     */
+    TensorPtr grouped_experts(TensorPtr permuted_states,
+                              TensorPtr expert_offsets,
+                              TensorPtr expert_counts,
+                              TensorPtr gate_up_weights,
+                              TensorPtr down_weights,
+                              const GroupedExpertsLayout gate_up_weight_layout = GroupedExpertsLayout::E_O_I,
+                              const GroupedExpertsLayout down_weight_layout = GroupedExpertsLayout::E_O_I,
+                              const GroupedExpertsGL gate_up_layout = GroupedExpertsGL::Concatenated,
+                              const Activation &activation = {},
+                              TensorPtr gate_up_bias = nullptr,
+                              TensorPtr down_bias = nullptr);
 
     /**
      * @brief Computes a one-layer GRU(gated recurrent unit).
@@ -2954,6 +2930,51 @@ namespace ops
                          const Quantization &quant = {});
 
     /**
+     * @brief Unified linear attention operator for autoregressive decoding (T=1) and prefill (T>1).
+     * @param[in] inputs A "TensorPtr" list.
+     *                   input order is [query,key,value,decay,beta,past_state].
+     *            query:Query vectors with 3D packed shape (B, T, H_q * d_k). Heads are packed into the last dimension.
+     *            key:Key vectors with 3D packed shape (B, T, H_kv * d_k). Should be L2-normalized for delta/gated_delta modes.
+     *            value:Value vectors with 3D packed shape (B, T, H_kv * d_v).
+     *            decay:Exponential decay gate in log-space.
+     *                  3D packed shape: (B, T, H_kv * d_k) for per-key-dimension decay (GLA/RWKV-6),
+     *                  or (B, T, H_kv) for per-head scalar decay (DeltaNet/RetNet).
+     *                  Required for 'gated' and 'gated_delta' modes.
+     *            beta:Update rate (sigmoid output).
+     *                 3D packed shape: (B, T, H_kv) or (B, T, 1).
+     *                 Required for 'delta' and 'gated_delta' modes.
+     *            past_state:Recurrent state from previous step with shape (B, H_kv, d_k, d_v).
+     *                       Always 4D.
+     *                       If not provided, defaults to zeros.
+     * @param[in] q_num_heads Number of query heads. Always required.
+     * @param[in] k_num_heads Number of key heads. Always required.
+     * @param[in] v_num_heads Number of value heads. Always required.
+     * @param[in] scale Output scaling factor. When 0.0 (default), derives d_k = query.shape[-1] / q_num_heads and uses 1/sqrt(d_k).
+     *                  Set explicitly to override.
+     *                  Default is 0.0.
+     * @param[in] update_rule The update_rule attribute selects the recurrence type:
+     *           "linear": S_t = S_{t-1} + k_t ⊗ v_t; o_t = scale * q_t^T S_t
+     *           "gated": S_t = exp(g_t) * S_{t-1} + k_t ⊗ v_t; o_t = scale * q_t^T S_t
+     *           "delta": S_t = S_{t-1} + β_t * k_t ⊗ (v_t - S_{t-1}^T k_t); o_t = scale * q_t^T S_t
+     *           "gated_delta": S_t = exp(g_t) * S_{t-1} + β_t * k_t ⊗ (v_t - exp(g_t) * S_{t-1}^T k_t); o_t = scale * q_t^T S_t
+     * @param[in] has_present_state Whether to output 'present_state'.default is false.
+     * @param[in] chunk_size Chunk size for the chunk-parallel WY decomposition during prefill (T>1).
+     *                       Tuning hint; does not affect output correctness.
+     *                       Default is 64.
+     * @return A "TensorPtr" list. [output,present_state].
+     *         output:Attention output with 3D packed shape (B, T, H_q * d_v).
+     *         present_state:Updated recurrent state with shape (B, H_kv, d_k, d_v). Always 4D.
+     */
+    TensorPtrList linear_attention(TensorPtrList inputs,
+                                   int q_num_heads,
+                                   int k_num_heads,
+                                   int v_num_heads,
+                                   float scale = 0.0,
+                                   UpdateRule update_rule = UpdateRule::GatedDelta,
+                                   bool has_present_state = false,
+                                   int chunk_size = 64);
+
+    /**
      * @brief Computes natural logarithm of x element-wise.
      * @param[in] input A "TensorPtr", specifying the input tensor.
      * @param[in] quant A "Quantization" object, specifying the output scale and offset.
@@ -3349,6 +3370,63 @@ namespace ops
     TensorPtr mod(TensorPtr input1, TensorPtr input2, bool fmod = false, const Quantization &qunt = {});
 
     /**
+     * @brief MoERouter is responsible for gate projection,
+     *        route scoring, TopK selection, and weight normalization.
+     * @param[in] inputs A "TensorPtr" list,which is  [hidden_states] or [hidden_states,input_ids].
+     * @param[in] weight A "TensorPtr",specifying the weight tensor.
+     * @param[in] param Moe Router Parameters,refer to the structure description.
+     * @return A vector of "TensorPtr".
+     *
+     */
+    TensorPtrList moe_router(
+        TensorPtrList inputs,
+        TensorPtr weight,
+        MoeRoutingParam param);
+
+    /**
+     * @brief MoePermute corresponds to the token dispatch/gather operations
+     *        within the original GroupedExperts.
+     * @param[in] input A "TensorPtr",specifying the input tensor.
+     * @param[in] top_k_ids A "TensorPtr",specifying the top_k_ids tensor.
+     * @param[in] num_experts Number of routes for the expert.
+     * @return A vector of "TensorPtr".
+     *
+     */
+    TensorPtrList moe_permute(TensorPtr input,
+                              TensorPtr top_k_ids,
+                              int32_t num_experts);
+
+    /**
+     * @brief MoeUnpermute corresponds to the 'unpermute' and 'weighted combine' operations
+     *        within the original 'GroupedExperts'.
+     * @param[in] input A "TensorPtr",specifying the input tensor.
+     * @param[in] route_pos A "TensorPtr",specifying the route_pos tensor.
+     *                      The physical location of each route.
+     * @param[in] top_k_weights A "TensorPtr",specifying the 'top_k' weights tensor.
+     * @return A vector of "TensorPtr".
+     */
+    TensorPtr moe_unpermute(TensorPtr input,
+                            TensorPtr route_pos,
+                            TensorPtr top_k_weights);
+
+    /**
+     * @brief MoeFinalize is a unified fusion IR for the MoE output stage, responsible for consolidating routed,
+     *        shared, shared-gate, output-cast,
+     *        and shape-restore operations into a single output processing step.
+     * @param[in] inputs A "TensorPtr" vector,specifying the input tensors.
+     *                   routed_output:MoeUnpermute Output
+     *                   shared_output:SharedExpert Output
+     *                   shared_gate:shared branch gating values or gating logits
+     *                   Inputs for each model:
+     *                   Mixtral/GPT-OSS: {routed_output}
+     *                   deepSeek:{routed_output,shared_output}
+     *                   qwen:{routed_output,shared_output,shared_gate}
+     * @param[in] out_shape The output shape.
+     * @return A "TensorPtr", specifying the output tensor pointer.
+     */
+    TensorPtr moe_finalize(TensorPtrList inputs, const TensorShape out_shape = {});
+
+    /**
      * @brief Performs elementwise maximum of each of the input tensors (with NumPy-style broadcasting support).
      *        All inputs and outputs must have the same data type.
      *        Besides, this operator supports multidirectional (that is, NumPy-style) broadcasting
@@ -3361,7 +3439,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
      *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
      *                the data tensor elementwise, where 'alpha' is the slope parameter.
@@ -3397,7 +3475,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
      *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
      *                the data tensor elementwise, where 'alpha' is the slope parameter.
@@ -3449,7 +3527,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
      *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
      *                the data tensor elementwise, where 'alpha' is the slope parameter.
@@ -3495,6 +3573,42 @@ namespace ops
                                                   const Quantization &quant = {});
 
     /**
+     * @brief Computes scaled dot product attention.
+     *        output = softmax((query @ key^T) * scale + attn_mask) @ value
+     *        Accepts 3 inputs (Q, K, V) or 4 inputs (Q, K, V, attn_mask).
+     *        Q/K/V must be 3-D [batch, seq_length, hidden_size] or
+     *        4-D [batch, num_heads, seq_length, head_size], sharing the same rank.
+     *        attn_mask (if any) must broadcast to:
+     *          [batch, q_num_heads, q_seq_length, total_seq_length] for 4-D Q,
+     *          [batch, q_seq_length, total_seq_length] for 3-D Q,
+     *        where total_seq_length = past_seq_len + kv_seq_length (K's seq dim holds
+     *        the full past+current kv length, so total_seq_length == key seq_length).
+     *        Constraint: when attn_mask is provided, is_causal must be false;
+     *                    when attn_mask is nullptr, is_causal must be true.
+     * @param[in] query A "TensorPtr", specifying the query tensor.
+     * @param[in] key A "TensorPtr", specifying the key tensor.
+     * @param[in] value A "TensorPtr", specifying the value tensor.
+     * @param[in] attn_mask A "TensorPtr" or nullptr, specifying the attention mask.
+     *            Dtype must be UINT8 (boolean mask stored as uint8) or the same as query.
+     * @param[in] is_causal A bool, specifying whether to apply causal masking.
+     *            Must be true when attn_mask is nullptr, and false when attn_mask is provided.
+     * @param[in] scale A float scalar, specifying the scaling factor applied to Q@K^T.
+     * @param[in] enable_gqa A bool, specifying whether grouped query attention is enabled
+     *            (num_q_heads must be a multiple of num_kv_heads).
+     * @param[in] quant A "Quantization" object, specifying the output scale/offset.
+     * @return A "TensorPtr", specifying the output tensor. Shape matches Q's rank:
+     *         3-D -> [batch, q_seq_length, v_hidden]; 4-D -> [batch, q_num_heads, q_seq_length, v_head_size].
+     */
+    TensorPtr scaled_dot_product_attention(TensorPtr query,
+                                           TensorPtr key,
+                                           TensorPtr value,
+                                           TensorPtr attn_mask = nullptr,
+                                           bool is_causal = true,
+                                           float scale = 0.0f,
+                                           bool enable_gqa = false,
+                                           const Quantization &quant = {});
+
+    /**
      * @brief Returns the truth value of (input1 != input2) element-wise.
      * @param[in] input1 A "TensorPtr".
      * @param[in] input2 A "TensorPtr",Must have the same type and shape as input1.
@@ -3514,49 +3628,39 @@ namespace ops
 
     /**
      * @brief Returns the indices of the elements that are non-zero (in row-major order - by dimension).
-     * Note that, in the following Outputs sections:
-     *    Y1 means the whether the input is zero or not.
-     *    Y2 means size of output.
-
      * @param[in] input A "TensorPtr".
-     * @return A "TensorPtr" list,include Y1 and Y2.
+     * @return A "TensorPtr".
      */
-    TensorPtrList nonzero(TensorPtr input);
+    TensorPtr nonzero(TensorPtr input);
 
     /**
-     * TODO: New IR will be coming.
-     * @brief The Non-Maximum Suppression (NMS) filters out boxes that have high Intersection-Over-Union (IOU)
-     *        overlap with previously selected boxes.
-     * @param[in] box_coor A "TensorPtr", specified coordinates of boxes in each batch with shape [batch_size, num_boxes, 4].
-     * @param[in] box_num_per_class A "TensorPtr", specified number of boxes in each class and each batch with shape [batch_size, num_classes].
-     * @param[in] class_num_per_batch A "TensorPtr", specified number of classes in each batch with shape [batch_size, 1].
-     * @param[in] score A "TensorPtr", specified scores of boxes in each batch with shape [batch_size, num_boxes].
-     * @param[in] nms_method A "NmsMethod" enumerate, it can be NmsMethod.Hard, NmsMethod.Gaussian. Default is Hard.
-     * @param[in] max_output_size An uint32 scalar, specifying max output box number. Default is 5000.
-     * @param[in] score_threshold A float/int scalar, boxes with scores lower than the threshold are filtered before sending to the NMS algorithm. Default is 0.6.
-     * @param[in] iou_threshold A float/int scalar, which will be ignored when method is "Gaussian". Default is 0.5.
-     * @param[in] sigma A float scalar, which will be ignored when method is not "Gaussian". Default is 0.
-     * @param[in] center_point_box A bool scalar, "false" means coordinates format is [y1,x1,y2,x2]. "true" means coordinates format is [y_center,x_center,height,width].
-     *                             Default is "false".
-     * @param[in] image_info An uint32 vector, specified input featuremap height/width information, due to *            coordinates is normalized value, so we need this to back it.
-     *            This parameter is valid only when 'center_point_box' is enabled.
-     *            It defaults to empty.
-     * @return vector of "TensorPtr", first "TensorPtr" specified coordinates of selected boxes in each batch. Its shape is same with @p box_coor.
-     *         Second "TensorPtr" specified number of selected boxes in each batch. Its shape is same with @p box_num_per_class.
-     *         Third "TensorPtr" specified scores of boxes in each batch. Its shape is same with @p score.
-     *         Forth "TensorPtr" specified indices of boxes in each batch. Its shape is same with @p score.
+     * @brief Filter out boxes that have high intersection-over-union (IOU) overlap with previously selected boxes.
+     * @param[in] boxes An input tensor with shape [num_batches, spatial_dimension, 4].
+     *            The single box data format is indicated by center_point_box.
+     * @param[in] scores An input tensor with shape [num_batches, num_classes, spatial_dimension].
+     * @param[in] max_output_boxes_per_class Integer representing the maximum number
+     *           of boxes to be selected per batch per class.
+     *           It is a scalar.
+     *           Default to 0, which means no output.
+     * @param[in] iou_threshold Float representing the threshold
+     *            for deciding whether boxes overlap too much with respect to IOU.
+     *            Boxes with IoU strictly greater than this threshold are suppressed.
+     *            It is scalar. Value range [0, 1]. Default to 0.
+     * @param[in] score_threshold Float representing the threshold for deciding when to remove boxes based on score.
+     *            It is a scalar.Default to 0.
+     * @param[in] center_point_box A scalar, "0" means coordinates format is [y1,x1,y2,x2].
+     *            "1" means coordinates format is [y_center,x_center,height,width].
+     *             Default is "0".
+     * @return selected indices from the boxes tensor. [num_selected_indices, 3],
+     *         the selected index format is [batch_index, class_index, box_index].
+     *         Take the maximum value of 'num_selected_indices'.
      */
-    std::vector<TensorPtr> nms(TensorPtr box_coor,
-                               TensorPtr box_num_per_class,
-                               TensorPtr class_num_per_batch,
-                               TensorPtr score,
-                               NmsMethod nms_method = NmsMethod::Hard,
-                               uint32_t max_output_size = 5000,
-                               NodeParamValue core_threshold = 0.6,
-                               NodeParamValue iou_threshold = 0.5,
-                               float sigma = 0.f,
-                               bool center_point_box = false,
-                               const std::vector<uint32_t> &image_info = {});
+    TensorPtr nms(TensorPtr boxes,
+                  TensorPtr scores,
+                  int64_t max_output_boxes_per_class = 0,
+                  float iou_threshold = 0,
+                  float score_threshold = 0,
+                  int32_t center_point_box = 0);
 
     /**
      * @brief Calculate the mean and variance of based on the sufficient statistics.
@@ -4429,9 +4533,34 @@ namespace ops
      * @param[in] inputs A "TensorPtr", specifying the input tensors.
      *                   The order is [data, starts, ends, axes, steps].
      *                   The axes and steps are optional.
-     * @return A "TensorPtr" list, specifying the output tensor, and output shape tensor.
+     * @return A "TensorPtr", specifying the output tensor.
      */
-    TensorPtrList dynamic_slice(TensorPtrList inputs);
+    TensorPtr dynamic_slice(TensorPtrList inputs);
+
+    /**
+     * @brief SharedExpert is a dense gated MLP independent IR performed on all tokens,
+     *        and does not accept top_k_ids, route_pos, or expert_offsets.
+     * @param[in] input A "TensorPtr", specifying the input tensor.
+     * @param[in] ffn_gate_weight A "TensorPtr", specifying the FFN gate weight tensor.
+     * @param[in] ffn_up_weight A "TensorPtr", specifying the FFN up weight tensor.
+     * @param[in] ffn_down_weight A "TensorPtr", specifying the FFN down weight tensor.
+     * @param[in] activation An Activation object, default empty, own "NONE", supports bellow:
+     *            Activation("silu")
+     *            Deepseek: Activation("silu",clamp_limit).
+     * @param[in] ffn_gate_bias A "TensorPtr", specifying the FFN gate bias tensor.
+     * @param[in] ffn_up_bias A "TensorPtr", specifying the FFN up bias tensor.
+     * @param[in] ffn_down_bias A "TensorPtr", specifying the FFN down bias tensor.
+     * @return A "TensorPtr", specifying the output tensor.
+     */
+    TensorPtr shared_expert(
+        TensorPtr input,
+        TensorPtr ffn_gate_weight,
+        TensorPtr ffn_up_weight,
+        TensorPtr ffn_down_weight,
+        const Activation &activation = {},
+        TensorPtr ffn_gate_bias = nullptr,
+        TensorPtr ffn_up_bias = nullptr,
+        TensorPtr ffn_down_bias = nullptr);
 
     /**
      * SlotUpdate implements the SlotUpdate operation.
@@ -4481,14 +4610,14 @@ namespace ops
                       const Quantization &quant = {});
 
     /**
-     * @brief Softplus takes one input Tensor and produces one output Tensor where the softplus function, y = ln(exp(x) + 1),
-     *        is applied to the tensor elementwise.
+     * @brief Softplus takes one input Tensor and produces one output Tensor where the softplus function,
+     *        y = x if beta * x > threshold else  log(1 + e^(beta * x)) / beta, is applied to the tensor elementwise.
      * @param[in] input A "TensorPtr", specifying the input tensor.
      * @param[in] quant A "Quantization" object, specifying the output tensor scale and offset.
      * @return A "TensorPtr", specifying the output tensor, which has the same shape with @p input.
      *         Output data type can be inferred by @p quant, and scale/offset are described as @p quant.
      */
-    TensorPtr softplus(TensorPtr input, const Quantization &quant = {});
+    TensorPtr softplus(TensorPtr input, const float &beta = 1.0, const float &threshold = 20.0, const Quantization &quant = {});
 
     /**
      * @brief Sorts the elements of the input tensor along a given dimension in ascending order by value.
@@ -4496,7 +4625,7 @@ namespace ops
      * @return A "TensorPtr" list, specifying the output tensor, which has the same shape with @p input.
      *         It contains results and indices.
      */
-    TensorPtrList sort(TensorPtr input);
+    TensorPtrList sort(TensorPtr input, int32_t axis, bool decending);
 
     /**
      * @brief This operation divides "spatial" dimensions(height/width) of the input into a grid of blocks of shape block_shape,
@@ -4605,7 +4734,7 @@ namespace ops
      *            - Activation("RELU")
      *            - Activation("RELU1"), will forward to Activation("CLIP", -1., 1.)
      *            - Activation("RELU6"), will forward to Activation("CLIP", 0., 6.)
-     *            - Activation("LEAKYRELU", negative_slope_value)
+     *            - Activation("LEAKYRELU", negative_slope.value)
      *                LeakyRelu takes input data (Tensor) and an argument alpha, then produces one output data (Tensor)
      *                where the function f(x) = alpha * x for x <0, f(x) = x for x >=0, is applied to
      *                the data tensor elementwise, where 'alpha' is the slope parameter.
@@ -4813,6 +4942,36 @@ namespace ops
      * @return A "TensorPtr",with the same shape and type as the tensors in "input".
      */
     TensorPtr trunc(TensorPtr input, const Quantization &quant = {});
+
+    /**
+     * @brief Extracts sliding local blocks from a batched input tensor.
+     *        The blocks are enumerated in increasing lexicographic order of their
+     *        indices, following torch.nn.functional.unfold semantics.
+     * @param[in] input A "TensorPtr", specifying the input tensor, with shape
+     *                  [N, C, H, W] or [N, C, D, H, W].
+     * @param[in] kernel_size An uint32 vector (size 2 or 3), specifying the block size
+     *                        [k_h, k_w] or [k_d, k_h, k_w] to apply on the input.
+     * @param[in] dilations An uint32 vector (size 2 or 3), specifying the dilation value
+     *                      along each spatial axis. If empty, defaults to 1 along each axis.
+     * @param[in] paddings An uint32 vector (size 2 or 3), specifying the padding value
+     *                     added to the beginning and end along each spatial axis.
+     *                     If empty, defaults to 0 along each axis.
+     * @param[in] strides An uint32 vector (size 2 or 3), specifying the stride value
+     *                    along each spatial axis. If empty, defaults to 1 along each axis.
+     * @param[in] layout An string, specifying the input's datalayout, only supports NCHW,
+     *                    NHWC, NCDHW, NDHWC, default value is NCHW.
+     * @param[in] quant A "Quantization" object, specifying output quantization parameters.
+     * @return A "TensorPtr", specifying the output1.0 tensor with shape
+     *         [N, C * prod(kernel_size), L], where L is the number of blocks per batch element.
+     *         Output has the same data type and scale/offset with @p input.
+     */
+    TensorPtr unfold(TensorPtr input,
+                     const std::vector<uint32_t> &kernel_size,
+                     const std::vector<uint32_t> &dilations = {},
+                     const std::vector<uint32_t> &paddings = {},
+                     const std::vector<uint32_t> &strides = {},
+                     const std::string &layout = "NCHW",
+                     const Quantization &quant = {});
 
     /**
      * @brief Performs the upsample operation on the inputs according to the index in the corresponding indices tensor

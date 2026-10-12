@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -17,20 +17,37 @@
 /*
  * @Author: Kyle Huang 
  * @Date: 2024-07-15 14:27:29 
- * @Last Modified by: Kyle Huang 
- * @Last Modified time: 2024-07-15 11:16:43
+ * @Last Modified by: Neo Wang
+ * @Last Modified time: 2026-06-25 16:58:45
  */
 #ifndef BUILDER_SOMS_SCHEDULER_H
 #define BUILDER_SOMS_SCHEDULER_H
 
+#include "builder/numa.h"
+#include "builder/scheduler.h"
 #include "core/const_tensor.h"
-#include "scheduler.h"
 #include <set>
 namespace aipubt
 {
 
 class SOMSScheduler : public Scheduler
 {
+
+    enum AllocOrder
+    {
+        orderbylife,
+        orderbysize,
+        orderbyfp,
+        orderbydefault
+    };
+
+    enum AllocGoal
+    {
+        MaxFp,
+        MinSpace,
+        Linear
+    };
+
 public:
     using Scheduler::Scheduler;
     virtual std::vector<MemoryObjectPtr> mem_allocate(const std::set<TensorPtr> &not_reuse_tensor = std::set<TensorPtr>(),
@@ -39,12 +56,14 @@ public:
                                                       const std::set<TensorPtr> &skip_tensors = {}) override;
 
     void disable_sm();
-    std::vector<MemoryObjectPtr> const_allocate(const std::set<ConstTensorPtr> &const_tensor);
+    std::vector<MemoryObjectPtr> const_allocate(const std::vector<TensorPtr> &const_tensor);
     void set_ws(std::map<NodePtr, std::set<TensorPtr>> &ws_map);
+    void set_numacfg(const NumaCfg &numa_cfg);
 
 private:
     bool m_enable_sm = true;
-    std::map<MemoryObjectPtr, int32_t> m_mem_core_map;
+    bool m_need_prior_gm = false;
+    NumaCfg m_numa_cfg;
     std::vector<MemoryObjectPtr> m_slots;
     std::map<MemoryObjectPtr, std::vector<NodePtr>> m_p_consumers;
     std::map<MemoryObjectPtr, std::vector<NodePtr>> m_p_generators;
@@ -65,9 +84,9 @@ private:
     std::set<MemoryObjectPtr> allocate_sm(std::set<MemoryObjectPtr> &skip_mem);
     std::set<MemoryObjectPtr> mem_live_init(const std::set<MemoryObjectPtr> &skip_mem);
     std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> gen_mem_conflict(const std::set<MemoryObjectPtr> &all_mem);
-    std::vector<MemoryObjectPtr> offset_assignment(MemoryObjectPtr gm_s, const std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> &conflict_map, const std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &not_reuse_mem);
+    std::vector<MemoryObjectPtr> mem_assignment(const std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> &conflict_map, const std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &not_reuse_mem);
+    uint64_t offset_assignment(MemoryObjectPtr pool, const std::map<MemoryObjectPtr, size_t> &memory_size, const std::map<MemoryObjectPtr, std::vector<MemoryObjectPtr>> &conflict_map, AllocOrder s, bool intermediate_only, uint32_t opt_loop, AllocGoal opt_goal, const std::set<MemoryObjectPtr> &mem_ptr, std::set<MemoryObjectPtr> &assigned_ptr, std::set<MemoryObjectPtr> &unassigned_ptr, std::map<MemoryObjectPtr, uint64_t> &offset_map, std::set<MemoryObjectPtr> &total_assigned_ptr);
     std::set<NodePtr> anc_streams(NodePtr n, uint32_t level);
-
     bool anc_stream_reuse(MemoryObjectPtr m1, MemoryObjectPtr m2);
     bool same_stream_reuse(MemoryObjectPtr m1, MemoryObjectPtr m2);
     // uint32_t max_parent_id(MemoryObjectPtr m, NodePtr s);
@@ -81,12 +100,13 @@ private:
     void find_anc_streams(NodePtr n, std::set<NodePtr> &ancestors, const uint32_t &level);
     int32_t get_start_level(MemoryObjectPtr m);
     int32_t get_end_level(MemoryObjectPtr m);
-    NodePtr update_gen_consume(GraphPtr g, int &node_stamp, std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &skip_mem, const int core_id);
+    NodePtr update_gen_consume(GraphPtr g, int &node_stamp, std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &skip_mem);
     void update_stream(GraphPtr g, const std::set<MemoryObjectPtr> &skip_mem, NodePtr stream);
     void update_sm(GraphPtr g, std::set<MemoryObjectPtr> &sm_mem);
     void sm_skip_tensors(GraphPtr g, std::set<TensorPtr> &skip_tensors, const std::set<MemoryObjectPtr> &skip_mem);
     bool same_stream(MemoryObjectPtr m1, MemoryObjectPtr m2);
     void check_all_mems(GraphPtr g, const std::set<MemoryObjectPtr> &all_mems, const std::set<MemoryObjectPtr> &skip_mem);
+    int get_mem_id(TensorPtr t);
 };
 };     // namespace aipubt
 #endif //!BUILDER_SOMS_SCHEDULER_H

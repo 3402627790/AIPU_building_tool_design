@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -18,7 +18,7 @@
  * @Author: Neo Wang
  * @Date: 2020-01-29 14:26:28
  * @Last Modified by: Neo Wang
- * @Last Modified time: 2025-10-22 11:40:12
+ * @Last Modified time: 2026-06-25 16:59:02
  */
 #include "linker/linker_v1.h"
 // #include "linker/linker_v2.h"
@@ -28,6 +28,8 @@
 #include "builder/lowering/hash_constant.h"
 #include "builder/ops/ops.h"
 #include "builder/profiler.h"
+#include "builder/scheduler.h"
+#include "builder/soms_scheduler.h"
 #include "builder/target.h"
 #include "core/config.h"
 #include "core/core.h"
@@ -37,8 +39,6 @@
 #include "mc_scheduler.h"
 #include "reorder_optimizer.h"
 #include "ro_generator.h"
-#include "scheduler.h"
-#include "soms_scheduler.h"
 #include "statistic/statistic.h"
 #include "text_generator.h"
 #include "transform/passes.h"
@@ -1170,7 +1170,6 @@ void get_internal_mems(GraphPtr g, std::set<TensorPtr> &internal_vec)
     }
 }
 
-
 bool handle_tensor_overlap(GraphPtr g, size_t gm_size)
 {
     std::map<MemoryObjectPtr, uint64_t> prior_mem;
@@ -1323,6 +1322,7 @@ bool handle_tensor_overlap(GraphPtr g, size_t gm_size)
         return ret;
     };
 
+    std::map<MemoryObjectPtr, TensorPtr> mem_tensor_map;
     for (auto n : g->nodes())
     {
         if (n->type() == OpType_Loop || n->type() == OpType_If)
@@ -1333,10 +1333,11 @@ bool handle_tensor_overlap(GraphPtr g, size_t gm_size)
             for (auto t : internal_vec)
             {
                 auto ptr = t->memory_offset()->get_base_object();
-                if (t->attrs().count("prior_in_gm"))
+                if (t->is_prior_tensor())
                 {
                     auto size = std::max((uint64_t)ptr->size, (uint64_t)t->mem_size());
                     prior_mem[ptr] = size;
+                    mem_tensor_map[ptr] = t;
                     if (size > gm_size)
                     {
                         ERROR() << t->name() << " size: 0x" << std::hex << t->mem_size() << " already larger than gm size";
@@ -1349,10 +1350,11 @@ bool handle_tensor_overlap(GraphPtr g, size_t gm_size)
         for (auto t : n->outputs())
         {
             auto ptr = t->memory_offset()->get_base_object();
-            if (t->attrs().count("prior_in_gm"))
+            if (t->is_prior_tensor())
             {
                 auto size = std::max((uint64_t)ptr->size, (uint64_t)t->mem_size());
                 prior_mem[ptr] = size;
+                mem_tensor_map[ptr] = t;
                 if (size > gm_size)
                 {
                     ERROR() << t->name() << " size: 0x" << std::hex << t->mem_size() << " already larger than gm size";
@@ -1416,40 +1418,86 @@ bool handle_tensor_overlap(GraphPtr g, size_t gm_size)
             }
             else
             {
-                auto total_size = size1 + size2;
-                //no dependency may need add fake_edge
-                if (total_size <= gm_size)
+                // INFO() << "may overlap " << mem_tensor_map[m1]->node() << " and " << mem_tensor_map[m2]->node();
+                if (!add_fake_dependency(m1, m2))
                 {
-                    // can all put into gm
-                    pair1.second = total_size;
-                    pair2.second = total_size;
-                    std::set total_gen(generators[m1]);
-                    total_gen.insert(generators[m2].begin(), generators[m2].end());
-                    std::set total_con(consumers[m1]);
-                    total_con.insert(consumers[m2].begin(), consumers[m2].end());
-                    generators[m1] = total_gen;
-                    generators[m2] = total_gen;
-                    consumers[m1] = total_con;
-                    consumers[m2] = total_con;
-                }
-                else
-                {
-                    // need fake edge so that all can in gm
-                    // auto s1 = generators[m1];
-                    // auto s2 = generators[m2];
-                    // auto n1 = *s1.begin();
-                    // auto n2 = *s2.begin();
-                    // INFO() << "tensor overlap: " << n1->name() << " " << n2->name();
-                    if (!add_fake_dependency(m1, m2))
+                    auto total_size = size1 + size2;
+                    //no dependency may need add fake_edge
+                    if (total_size <= gm_size)
                     {
-                        ERROR() << "cannot resolve overlap of t1 and t2";
-                        return false;
+                        // can all put into gm
+                        pair1.second = total_size;
+                        pair2.second = total_size;
+                        std::set total_gen(generators[m1]);
+                        total_gen.insert(generators[m2].begin(), generators[m2].end());
+                        std::set total_con(consumers[m1]);
+                        total_con.insert(consumers[m2].begin(), consumers[m2].end());
+                        generators[m1] = total_gen;
+                        generators[m2] = total_gen;
+                        consumers[m1] = total_con;
+                        consumers[m2] = total_con;
+                        INFO() << "merge " << mem_tensor_map[m1]->node() << " and " << mem_tensor_map[m2]->node();
+                    }else
+                    {
+                        ERROR() << "cannot resolve overlap of " << mem_tensor_map[m1]->node() << " and " << mem_tensor_map[m2]->node();
                     }
                 }
             }
         }
     }
     return true;
+}
+
+void remove_tensor(TensorPtr t)
+{
+    auto node = t->node();
+    node->erase_output(t);
+    if (node->type() == OpType_SubGraphInput)
+    {
+        node->graph()->remove_node(node);
+    }
+
+    for (auto c : t->consumers())
+    {
+        c->erase_input(t);
+    }
+}
+
+void remove_fake_tensor(GraphPtr g)
+{
+    auto nodes = g->nodes();
+    for (auto node : nodes)
+    {
+        if (!node)
+        {
+            continue;
+        }
+        if (SubGraphNode::is_subgraph_node(node) && !node->attrs().count(Constants::plugin_attrs_name))
+        {
+            auto sgn = SubGraphNode::from_node(node);
+            if (sgn)
+            {
+                remove_fake_tensor(sgn->subgraph());
+            }
+        }
+        if (node->outputs().size() == 0)
+        {
+            continue;
+        }
+        for (int i = node->outputs().size() - 1; i >= 0; --i)
+        {
+            auto t = node->outputs()[i];
+            if (t->is_fake_tensor()) //fake tensor
+            {
+                if (t->mem_size() > 0)
+                {
+                    ERROR();
+                }
+                // INFO() << "erase fake tensor " << t->name() << " from " << node->name();
+                remove_tensor(t);
+            }
+        }
+    }
 }
 
 GraphPtr GraphBuilder::build_graph(const std::vector<TensorPtr> &inputs_,
@@ -2303,6 +2351,27 @@ bool GraphBuilder::build_aipu(const std::vector<TensorPtr> &inputs_,
             else
             {
                 scheduler = new SOMSScheduler();
+                std::map<NodePtr, std::set<TensorPtr>> ws_map;
+
+                for (auto node : m_graph->nodes())
+                {
+                    auto sgn = SubGraphNode::from_node(node);
+                    if (sgn)
+                    {
+                        auto sg = sgn->subgraph();
+                        for (auto sg_node : sg->nodes())
+                        {
+                            TensorPtr t = sg_node->attrs()[Constants::localspace];
+                            if (t && t->size())
+                            {
+                                ws_map[sg_node].insert(t);
+                            }
+                        }
+                    }
+                }
+
+                ((SOMSScheduler *)scheduler)->set_ws(ws_map);
+                // ((SOMSScheduler *)scheduler)->disable_sm();
             }
             uint32_t gms = BuilderConfig::get<uint32_t>(Constants::gm_size);
             if (BuilderConfig::exist(Constants::preserve_gm_size))

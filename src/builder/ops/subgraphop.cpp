@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -327,10 +327,11 @@ RO_GENERATOR(OpType_SubGraph)
                             params[start + 54] = tp_base;
                             if (desc_size)
                             {
-                                params[start + 51] = desc_dt_base;
-                                params[start + 55] = desc_base; // desc_base will influence the descriptor pretech
-                                params[start + 56] = desc_param_base;
-                                params[start + 57] = desc_act_base;
+                                ReadOnlyParam empty(0);
+                                params[start + 51] = desc_dt_base ? ReadOnlyParam(desc_dt_base) : empty;
+                                params[start + 55] = desc_base ? ReadOnlyParam(desc_base) : empty;
+                                params[start + 56] = desc_param_base ? ReadOnlyParam(desc_param_base) : empty;
+                                params[start + 57] = desc_act_base ? ReadOnlyParam(desc_act_base) : empty;
                             }
                         }
                     }
@@ -374,6 +375,14 @@ RO_GENERATOR(OpType_SubGraph)
         }
         // INFO() << "Generating RO for " << sgnode->name() << "...  ro offset:" << upper_ro_size;
         params = plugin->generate_params(sgnode, bml);
+        std::string error_msg;
+        if (get_target()->isainfo().type >= ISA_ZYv5 &&
+            !check_params(params, error_msg))
+        {
+            ERROR() << "Failed to check params: " << error_msg << "\n"
+                    << "Node: " << sgnode->name() << "\n"
+                    << "Plugin: " << plugin_info->name;
+        }
     }
     for (auto p : params)
     {
@@ -399,7 +408,7 @@ static void gen_rt_tensor_param(NodePtr node)
         for (auto o : node->outputs())
         {
             desc_rt_param.push_back(o);
-            desc_rt_param.push_back(o->mem_size());
+            desc_rt_param.push_back(o->buffer_size());
         }
     }
     else if (BuilderConfig::get<bool>(Constants::dump_rt_input_tensors))
@@ -408,7 +417,7 @@ static void gen_rt_tensor_param(NodePtr node)
         for (auto i : node->inputs())
         {
             desc_rt_param.push_back(i);
-            desc_rt_param.push_back(i->mem_size());
+            desc_rt_param.push_back(i->buffer_size());
         }
     }
     else if (BuilderConfig::get<int>(Constants::dump_rt_tensor_id) != -1)
@@ -432,7 +441,7 @@ static void gen_rt_tensor_param(NodePtr node)
             for (auto o : realtime_n->outputs())
             {
                 desc_rt_param.push_back(o);
-                desc_rt_param.push_back(o->mem_size());
+                desc_rt_param.push_back(o->buffer_size());
             }
         }
         else
