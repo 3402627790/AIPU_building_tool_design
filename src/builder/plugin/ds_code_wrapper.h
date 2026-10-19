@@ -6,7 +6,7 @@
 // be used by a person authorised under and to the extent permitted by a
 // subsisting licensing agreement from Arm China.
 //
-//        (C) Copyright 2020 Arm Technology (China) Co. Ltd.
+//        (C) Copyright 2020-2026 Arm Technology (China) Co. Ltd.
 //                    All rights reserved.
 //
 // This entire notice must be reproduced on all copies of this file and copies of
@@ -51,12 +51,14 @@ public:
     virtual uint64_t flops() const override;
 
     ADD_MEMBER(param_root, PlaceholderPtr, m_param_root);
+    ADD_MEMBER(nodes, std::vector<NodeRef>, m_nodes);
     ADD_MEMBER(kernel_names, std::vector<std::string>, m_kernel_names);
     ADD_MEMBER(param_bases, std::vector<PlaceholderPtr>, m_param_bases);
     ADD_MEMBER(stream_bases, std::vector<PlaceholderPtr>, m_stream_bases);
 
 protected:
     PlaceholderPtr m_param_root;
+    std::vector<NodeRef> m_nodes;
     std::vector<std::string> m_kernel_names;
     std::vector<PlaceholderPtr> m_param_bases;
     std::vector<PlaceholderPtr> m_stream_bases;

@@ -15,6 +15,8 @@
 //
 //--------------------------------------------------------------------------------
 
+#pragma once
+
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "llvm/ADT/StringMap.h"
