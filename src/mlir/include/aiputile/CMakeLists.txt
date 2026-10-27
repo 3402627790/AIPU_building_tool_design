@@ -1,0 +1,6 @@
+set(LLVM_TARGET_DEFINITIONS AIPUTileOps.td)
+mlir_tablegen(AIPUTileOps.h.inc -gen-op-decls)
+mlir_tablegen(AIPUTileOps.cpp.inc -gen-op-defs)
+mlir_tablegen(AIPUTileOpsDialect.h.inc -gen-dialect-decls -dialect=aiputile)
+mlir_tablegen(AIPUTileOpsDialect.cpp.inc -gen-dialect-defs -dialect=aiputile)
+add_public_tablegen_target(AIPUTileIncGen)
