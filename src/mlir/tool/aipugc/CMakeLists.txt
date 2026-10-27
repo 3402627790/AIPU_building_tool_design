@@ -37,6 +37,7 @@ add_dependencies(aipugc-llir libAIPUMLIR)
 
 target_link_libraries(aipugc
   PUBLIC
+    AIPUTile
     ${AIPUBuildLIB}
     AIPUMLIR
 

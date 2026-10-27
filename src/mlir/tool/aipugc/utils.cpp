@@ -24,6 +24,7 @@
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
@@ -63,7 +64,7 @@ static void setZhouyiAddrSpace1(llvm::Function &F)
     }
 }
 
-int dumpLLVMIR(mlir::ModuleOp module, llvm::StringRef dumpFilename, llvm::StringRef llvmTarget) {
+int dumpLLVMIR(mlir::ModuleOp module, llvm::StringRef dumpFilename, llvm::StringRef llvmTarget, bool devicePointersLowered) {
   mlir::registerBuiltinDialectTranslation(*module->getContext());
   mlir::registerLLVMDialectTranslation(*module->getContext());
   mlir::registerNVVMDialectTranslation(*module->getContext());
@@ -110,7 +111,11 @@ int dumpLLVMIR(mlir::ModuleOp module, llvm::StringRef dumpFilename, llvm::String
     for (llvm::Function &F : *llvmModule) {
       if (!F.isDeclaration() && F.getReturnType()->isVoidTy())
       {
-        setZhouyiAddrSpace1(F);
+        // The tile path constructs AS1 pointers through MLIR type conversion.
+        // Retain the legacy baseline behavior here, but never mutate types on
+        // the tile path: that would leave function and instruction types stale.
+        if (!devicePointersLowered)
+          setZhouyiAddrSpace1(F);
         F.setCallingConv(llvm::CallingConv::Zhouyi_Kernel);
       }
     }
@@ -136,12 +141,20 @@ int dumpLLVMIR(mlir::ModuleOp module, llvm::StringRef dumpFilename, llvm::String
   }
 
 
+  if (devicePointersLowered && llvm::verifyModule(*llvmModule, &llvm::errs())) {
+    llvm::errs() << "Invalid LLVM IR before optimization.\n";
+    return -1;
+  }
   auto optPipeline = mlir::makeOptimizingTransformer(3, 0, nullptr);
   if (auto err = optPipeline(llvmModule.get())) {
     llvm::errs() << "Failed to optimize LLVM IR " << err << "\n";
     return -1;
   }
   
+  if (devicePointersLowered && llvm::verifyModule(*llvmModule, &llvm::errs())) {
+    llvm::errs() << "Invalid LLVM IR after optimization.\n";
+    return -1;
+  }
   llvm::errs() << "Below is LLVMIR:" << "\n" << *llvmModule << "\n";
   
   if (!dumpFilename.empty()) {

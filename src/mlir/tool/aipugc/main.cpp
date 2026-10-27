@@ -20,9 +20,12 @@
 #include "aipugc/Dialect.h"
 #include "aipugc/MLIRGen.h"
 #include "aipugc/Passes.h"
+#include "aiputile/AIPUTileDialect.h"
+#include "aiputile/Passes.h"
 #include "utils.h"
 #include <iostream>
 #include <fstream>
+#include <cstdint>
 #include <tools/argparser.h>
 #include <tools/common_options.h>
 #include <utils/utils.h>
@@ -99,7 +102,10 @@ enum Action {
   DumpCUDA,
   DumpVulkan,
   DumpLL,
-  RunJIT
+  RunJIT,
+  DumpTile,
+  DumpTileFused,
+  DumpTileLoops
 };
 
 static cl::opt<enum Action> emitAction(
@@ -113,8 +119,18 @@ static cl::opt<enum Action> emitAction(
   cl::values(clEnumValN(DumpCUDA, "cuda", "backend to cuda")),
   cl::values(clEnumValN(DumpVulkan, "vulkan", "backend to vulkan")),
   cl::values(clEnumValN(DumpLL, "ll", "output the LLVMIR")),
-  cl::values(clEnumValN(RunJIT, "jit", "JIT and run the code"))
+  cl::values(clEnumValN(RunJIT, "jit", "JIT and run the code")),
+  cl::values(clEnumValN(DumpTile, "aiputile", "output unfused AIPUTile IR")),
+  cl::values(clEnumValN(DumpTileFused, "tile-fused", "output fused AIPUTile IR")),
+  cl::values(clEnumValN(DumpTileLoops, "tile-loops", "output explicit SCF tile loops"))
 );
+
+static cl::opt<std::string> pipeline(
+  "pipeline", cl::desc("Compilation path: baseline or tile"), cl::init("baseline"));
+static cl::opt<int64_t> tileSize(
+  "tile-size", cl::desc("Elements per logical tile"), cl::init(256));
+static cl::opt<std::string> inputFormat(
+  "input-format", cl::desc("Input format: graph or mlir"), cl::init("graph"));
 
 static cl::opt<std::string> graphFilename(
   cl::Positional,
@@ -154,18 +170,44 @@ int main(int argc, const char **argv) {
 
   cl::ParseCommandLineOptions(argc, argv, "Compass IR compiler\n");
 
+  if ((pipeline != "baseline" && pipeline != "tile") ||
+      (inputFormat != "graph" && inputFormat != "mlir")) {
+    llvm::errs() << "Expected --pipeline=baseline|tile and --input-format=graph|mlir\n";
+    return 1;
+  }
+  if (pipeline == "baseline" && emitAction >= Action::DumpTile) {
+    llvm::errs() << "Tile IR stages require --pipeline=tile\n";
+    return 1;
+  }
+  if (pipeline == "tile" && llvmTarget != "cpu" && llvmTarget != "zhouyi") {
+    llvm::errs() << "Tile path requires --llvm-target=cpu|zhouyi\n";
+    return 1;
+  }
+  if (pipeline == "tile" &&
+      (tileSize <= 0 || tileSize > INT32_MAX ||
+       (emitAction != Action::None && emitAction != Action::DumpAIPUGC &&
+        emitAction != Action::DumpTile && emitAction != Action::DumpTileFused &&
+        emitAction != Action::DumpTileLoops && emitAction != Action::DumpCPU &&
+        emitAction != Action::DumpLL))) {
+    llvm::errs() << "Tile path requires tile-size in [1, INT32_MAX] and "
+                    "emit=aipugc|aiputile|tile-fused|tile-loops|cpu|ll\n";
+    return 1;
+  }
+
   auto graphFile = llvm::StringRef(graphFilename);
   auto weightFile = llvm::StringRef(weightFilename);
   if (!utils::file_exists(graphFile.str())) {
     ERROR() << "Cannot Open file:" << graphFile.str();
     return -1;
   }
-  GraphPtr g = Graph::parse(graphFile.str());
-  if (!g) {
+  GraphPtr g;
+  if (inputFormat == "graph")
+    g = Graph::parse(graphFile.str());
+  if (inputFormat == "graph" && !g) {
     ERROR() << "The file:" << graphFile.str() << " parse failed!";
     return -1;
   }
-  if (utils::file_exists(weightFile.str())) {
+  if (g && utils::file_exists(weightFile.str())) {
     g->load_weight(weightFile.str());
   }
 
@@ -177,16 +219,40 @@ int main(int argc, const char **argv) {
 
   mlir::MLIRContext context(registry);
   context.getOrLoadDialect<mlir::aipugc::AIPUDialect>();
+  context.getOrLoadDialect<mlir::aiputile::AIPUTileDialect>();
   context.appendDialectRegistry(registry);
 
   // Get mlir module from context
-  mlir::OwningOpRef<mlir::ModuleOp> module = aipugc::mlirGen(context, g);
+  mlir::OwningOpRef<mlir::ModuleOp> module = inputFormat == "mlir"
+      ? mlir::parseSourceFile<mlir::ModuleOp>(graphFile, &context)
+      : aipugc::mlirGen(context, g);
   if (!module) {
     llvm::errs() << "Error: MLIR generation or module verification failed.\n";
     return 1;
   }
 
-  if (emitAction != Action::None) {
+  if (pipeline == "tile" && emitAction != Action::None &&
+      emitAction != Action::DumpAIPUGC) {
+    mlir::PassManager pm(module.get()->getName());
+    if (mlir::failed(mlir::applyPassManagerCLOptions(pm)))
+      return 4;
+    pm.addPass(mlir::aiputile::createLowerAipugcToAIPUTilePass());
+    if (emitAction != Action::DumpTile)
+      pm.addPass(mlir::aiputile::createTileFusionPass(tileSize));
+    if (emitAction == Action::DumpTileLoops || emitAction == Action::DumpCPU ||
+        emitAction == Action::DumpLL)
+      pm.addPass(mlir::aiputile::createTileLoweringPass(
+          llvmTarget == "zhouyi" ? 1 : 0));
+    if (emitAction == Action::DumpCPU || emitAction == Action::DumpLL) {
+      // MemRef memory spaces are converted consistently, including function
+      // signatures, GEPs and memory accesses. No LLVM Value::mutateType needed.
+      pm.addPass(mlir::aiputile::createTileToLLVMPass(
+          true, llvmTarget == "zhouyi" ? 32 : 64));
+      pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+    }
+    if (mlir::failed(pm.run(*module)))
+      return 4;
+  } else if (pipeline == "baseline" && emitAction != Action::None) {
     mlir::PassManager pm(module.get()->getName());
     if (mlir::failed(mlir::applyPassManagerCLOptions(pm))) {
       return 4;
@@ -354,7 +420,8 @@ int main(int argc, const char **argv) {
   llvm::outs() << "\n";
 
   if (emitAction == Action::DumpLL) {
-    dumpLLVMIR(*module, dump, llvmTarget);
+    if (dumpLLVMIR(*module, dump, llvmTarget, pipeline == "tile") != 0)
+      return 4;
   }
 
   if (emitAction == Action::RunJIT) {
