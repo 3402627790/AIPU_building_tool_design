@@ -21,27 +21,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(AIPUTILE_STANDALONE ON)
 endif()
 
-# Private SDKs may backport the greedy driver rename independently of their
-# LLVM version. Probe the actual headers instead of guessing from a version.
-include(CheckCXXSourceCompiles)
-function(aiputile_check_greedy_api)
-  set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-  set(CMAKE_REQUIRED_INCLUDES ${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
-  check_cxx_source_compiles([[
-    #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-    void probe(mlir::Operation *op,
-               const mlir::FrozenRewritePatternSet &patterns) {
-      (void)mlir::applyPatternsGreedily(op, patterns);
-    }
-  ]] AIPUTILE_HAS_APPLY_PATTERNS_GREEDILY)
-endfunction()
-aiputile_check_greedy_api()
-
-add_library(AIPUTile STATIC AIPUTileDialect.cpp AIPUTileOps.cpp Passes.cpp)
+add_library(AIPUTile STATIC AIPUTileDialect.cpp AIPUTileTypes.cpp AIPUTileOps.cpp Passes.cpp)
 add_dependencies(AIPUTile AIPUTileIncGen)
-if(AIPUTILE_HAS_APPLY_PATTERNS_GREEDILY)
-  target_compile_definitions(AIPUTile PRIVATE AIPUTILE_HAS_APPLY_PATTERNS_GREEDILY=1)
-endif()
 target_compile_options(AIPUTile PRIVATE -fno-rtti -fno-exceptions -Wall -Werror)
 target_link_libraries(AIPUTile PUBLIC
   MLIRIR MLIRFuncDialect MLIRArithDialect MLIRSCFDialect MLIRMemRefDialect

@@ -1,6 +1,7 @@
 #ifndef AIPUTILE_OPS_H
 #define AIPUTILE_OPS_H
 #include "aiputile/AIPUTileDialect.h"
+#include "aiputile/AIPUTileTypes.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -10,6 +11,7 @@
 #include "aiputile/AIPUTileOps.h.inc"
 namespace mlir::aiputile {
 // Shared with the source conversion so unsupported layouts/types fail early.
-LogicalResult verifyTensorTypes(Operation *op);
+LogicalResult verifySourceTensorTypes(Operation *op);
+LogicalResult verifyTileTypes(Operation *op);
 } // namespace mlir::aiputile
 #endif
