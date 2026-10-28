@@ -105,7 +105,8 @@ enum Action {
   RunJIT,
   DumpTile,
   DumpTileFused,
-  DumpTileLoops
+  DumpTileLoops,
+  DumpTilePartitioned
 };
 
 static cl::opt<enum Action> emitAction(
@@ -122,7 +123,8 @@ static cl::opt<enum Action> emitAction(
   cl::values(clEnumValN(RunJIT, "jit", "JIT and run the code")),
   cl::values(clEnumValN(DumpTile, "aiputile", "output unfused AIPUTile IR")),
   cl::values(clEnumValN(DumpTileFused, "tile-fused", "output fused AIPUTile IR")),
-  cl::values(clEnumValN(DumpTileLoops, "tile-loops", "output explicit SCF tile loops"))
+  cl::values(clEnumValN(DumpTileLoops, "tile-loops", "output explicit SCF tile loops")),
+  cl::values(clEnumValN(DumpTilePartitioned, "tile-partitioned", "output independently partitioned tile regions"))
 );
 
 static cl::opt<std::string> pipeline(
@@ -187,10 +189,11 @@ int main(int argc, const char **argv) {
       (tileSize <= 0 || tileSize > INT32_MAX ||
        (emitAction != Action::None && emitAction != Action::DumpAIPUGC &&
         emitAction != Action::DumpTile && emitAction != Action::DumpTileFused &&
-        emitAction != Action::DumpTileLoops && emitAction != Action::DumpCPU &&
+        emitAction != Action::DumpTileLoops && emitAction != Action::DumpTilePartitioned &&
+        emitAction != Action::DumpCPU &&
         emitAction != Action::DumpLL))) {
     llvm::errs() << "Tile path requires tile-size in [1, INT32_MAX] and "
-                    "emit=aipugc|aiputile|tile-fused|tile-loops|cpu|ll\n";
+                    "emit=aipugc|aiputile|tile-partitioned|tile-fused|tile-loops|cpu|ll\n";
     return 1;
   }
 
@@ -238,7 +241,9 @@ int main(int argc, const char **argv) {
       return 4;
     pm.addPass(mlir::aiputile::createLowerAipugcToAIPUTilePass());
     if (emitAction != Action::DumpTile)
-      pm.addPass(mlir::aiputile::createTileFusionPass(tileSize));
+      pm.addPass(mlir::aiputile::createTileTilingPass(tileSize));
+    if (emitAction != Action::DumpTile && emitAction != Action::DumpTilePartitioned)
+      pm.addPass(mlir::aiputile::createTileFusionPass());
     if (emitAction == Action::DumpTileLoops || emitAction == Action::DumpCPU ||
         emitAction == Action::DumpLL)
       pm.addPass(mlir::aiputile::createTileLoweringPass(
